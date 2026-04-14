@@ -12,6 +12,8 @@ interface DistillConfig {
   model: { provider: string; id: string };
 }
 
+const MAX_DISTILL_DURATION_MS = 10 * 60 * 1000; // 10 minutes
+
 const DEFAULT_CONFIG: DistillConfig = {
   enabled: false,
   intervalMinutes: 60,
@@ -42,13 +44,68 @@ const DISTILL_PROMPT = `Distill this conversation into the napkin vault.
 
 Be selective. Only capture knowledge useful to someone working on this project later. Skip meta-discussion, tool output, and chatter.`;
 
+/**
+ * Escape a string for use in single-quoted shell arguments.
+ */
+function shellEscape(s: string): string {
+  return s.replace(/'/g, "'\\''");
+}
+
+/**
+ * Spawn a detached pi distill process that survives parent exit.
+ * The shell wrapper cleans up the temp dir when pi finishes.
+ * Returns the temp dir path (used as a completion marker — when it disappears, distill is done).
+ */
+function spawnDistill(
+  sessionFile: string,
+  cwd: string,
+  config: DistillConfig,
+): string | null {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-distill-"));
+
+  try {
+    const forkedSm = SessionManager.forkFrom(sessionFile, cwd, tmpDir);
+    const forkedFile = forkedSm.getSessionFile();
+    if (!forkedFile) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      return null;
+    }
+
+    const piArgs = [
+      "--session",
+      forkedFile,
+      "-p",
+      "--model",
+      `${config.model.provider}/${config.model.id}`,
+      DISTILL_PROMPT,
+    ];
+
+    // Shell wrapper: run pi, then clean up temp dir regardless of exit code
+    const escapedArgs = piArgs.map((a) => `'${shellEscape(a)}'`).join(" ");
+    const cmd = `pi ${escapedArgs} >/dev/null 2>&1; rm -rf '${shellEscape(tmpDir)}'`;
+
+    const proc = spawn("sh", ["-c", cmd], {
+      cwd,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, NAPKIN_DISTILL_NO_RECURSE: "1" },
+    });
+    proc.unref();
+
+    return tmpDir;
+  } catch {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    return null;
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
   let countdownHandle: ReturnType<typeof setInterval> | null = null;
+  let pollHandle: ReturnType<typeof setInterval> | null = null;
   let lastDistillTimestamp = Date.now();
   let lastSessionSize = 0;
   let isRunning = false;
-  let activeProcess: ReturnType<typeof spawn> | null = null;
 
   pi.on("session_start", async (_event, ctx) => {
     const vaultPath = findVaultPath(ctx.cwd);
@@ -57,18 +114,23 @@ export default function (pi: ExtensionAPI) {
     const config = loadDistillConfig(vaultPath);
     if (!config.enabled) {
       if (ctx.hasUI) {
-        const theme = ctx.ui.theme;
-        ctx.ui.setStatus("napkin-distill", theme.fg("dim", "distill: off"));
+        ctx.ui.setStatus(
+          "napkin-distill",
+          ctx.ui.theme.fg("dim", "distill: off"),
+        );
       }
       return;
     }
+
+    // Skip if this is a distill subprocess
+    if (process.env.NAPKIN_DISTILL_NO_RECURSE) return;
 
     lastDistillTimestamp = Date.now();
     const intervalMs = config.intervalMinutes * 60 * 1000;
 
     if (ctx.hasUI) {
       const theme = ctx.ui.theme;
-      const updateCountdown = () => {
+      countdownHandle = setInterval(() => {
         if (isRunning) return;
         const remaining = Math.max(
           0,
@@ -84,21 +146,11 @@ export default function (pi: ExtensionAPI) {
           "napkin-distill",
           theme.fg("dim", `distill: ${display}`),
         );
-      };
-      updateCountdown();
-      countdownHandle = setInterval(updateCountdown, 1000);
+      }, 1000);
     }
 
     intervalHandle = setInterval(() => {
-      if (isRunning) return;
-      runDistill(ctx).catch((err) => {
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `Distill error: ${err instanceof Error ? err.message : String(err)}`,
-            "error",
-          );
-        }
-      });
+      runDistill(ctx);
     }, intervalMs);
   });
 
@@ -111,13 +163,14 @@ export default function (pi: ExtensionAPI) {
       clearInterval(intervalHandle);
       intervalHandle = null;
     }
-    if (activeProcess) {
-      activeProcess.kill();
-      activeProcess = null;
+    if (pollHandle) {
+      clearInterval(pollHandle);
+      pollHandle = null;
     }
+    // No need to kill anything — detached processes survive on their own
   });
 
-  async function runDistill(ctx: {
+  function runDistill(ctx: {
     // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
     sessionManager: any;
     hasUI: boolean;
@@ -125,19 +178,14 @@ export default function (pi: ExtensionAPI) {
     ui: any;
     cwd: string;
   }) {
+    if (isRunning) return;
+
     const vaultPath = findVaultPath(ctx.cwd);
     if (!vaultPath) return;
 
     const config = loadDistillConfig(vaultPath);
     const sessionFile = ctx.sessionManager.getSessionFile?.();
-    if (!sessionFile) {
-      if (ctx.hasUI)
-        ctx.ui.notify(
-          "Distill: no session file (ephemeral session)",
-          "warning",
-        );
-      return;
-    }
+    if (!sessionFile) return;
 
     // Skip if session hasn't changed since last distill
     const currentSize = fs.existsSync(sessionFile)
@@ -148,9 +196,20 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
+    const tmpDir = spawnDistill(sessionFile, ctx.cwd, config);
+    if (!tmpDir) {
+      if (ctx.hasUI && ctx.ui.theme) {
+        ctx.ui.setStatus(
+          "napkin-distill",
+          ctx.ui.theme.fg("error", "✗") +
+            ctx.ui.theme.fg("dim", " distill: spawn failed"),
+        );
+      }
+      return;
+    }
+
     isRunning = true;
     const startTime = Date.now();
-    let timerHandle: ReturnType<typeof setInterval> | null = null;
     const theme = ctx.hasUI ? ctx.ui.theme : null;
 
     if (ctx.hasUI && theme) {
@@ -158,79 +217,47 @@ export default function (pi: ExtensionAPI) {
         "napkin-distill",
         theme.fg("accent", "●") + theme.fg("dim", " distill"),
       );
-      timerHandle = setInterval(() => {
-        const elapsed = Math.floor((Date.now() - startTime) / 1000);
-        ctx.ui.setStatus(
-          "napkin-distill",
-          theme.fg("accent", "●") + theme.fg("dim", ` distill ${elapsed}s`),
-        );
-      }, 1000);
     }
 
-    // Fork the session to a temp directory so the subprocess
-    // inherits the full conversation without modifying the original
-    const tmpSessionDir = fs.mkdtempSync(
-      path.join(os.tmpdir(), "napkin-distill-"),
-    );
-    try {
-      // Fork: creates a new session file with the full conversation
-      const forkedSm = SessionManager.forkFrom(
-        sessionFile,
-        ctx.cwd,
-        tmpSessionDir,
-      );
-      const forkedSessionFile = forkedSm.getSessionFile();
+    // Poll for completion: temp dir disappears when the shell wrapper finishes
+    pollHandle = setInterval(() => {
+      const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      const timedOut = Date.now() - startTime > MAX_DISTILL_DURATION_MS;
 
-      if (!forkedSessionFile) {
-        throw new Error("Failed to fork session");
+      if (fs.existsSync(tmpDir) && !timedOut) {
+        // Still running — update elapsed time in status bar
+        if (ctx.hasUI && theme) {
+          ctx.ui.setStatus(
+            "napkin-distill",
+            theme.fg("accent", "●") + theme.fg("dim", ` distill ${elapsed}s`),
+          );
+        }
+        return;
       }
 
-      // Spawn pi on the forked session
-      const args = [
-        "--session",
-        forkedSessionFile,
-        "-p",
-        "--model",
-        `${config.model.provider}/${config.model.id}`,
-        DISTILL_PROMPT,
-      ];
+      // Done or timed out
+      if (pollHandle) {
+        clearInterval(pollHandle);
+        pollHandle = null;
+      }
+      isRunning = false;
 
-      const _exitCode = await new Promise<number>((resolve, reject) => {
-        const proc = spawn("pi", args, {
-          cwd: ctx.cwd,
-          shell: false,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-        activeProcess = proc;
-
-        let stderr = "";
-        proc.stderr.on("data", (data) => {
-          stderr += data.toString();
-        });
-
-        proc.on("error", (err) => {
-          activeProcess = null;
-          reject(err);
-        });
-
-        proc.on("close", (code) => {
-          activeProcess = null;
-          if (code !== 0 && stderr.trim()) {
-            reject(
-              new Error(
-                `pi exited with code ${code}: ${stderr.trim().slice(0, 200)}`,
-              ),
-            );
-          } else {
-            resolve(code ?? 0);
-          }
-        });
-      });
+      if (timedOut) {
+        // Clean up orphaned temp dir
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        if (ctx.hasUI && theme) {
+          ctx.ui.setStatus(
+            "napkin-distill",
+            theme.fg("error", "✗") + theme.fg("dim", " distill: timeout"),
+          );
+          ctx.ui.notify("Distillation timed out (10m)", "error");
+        }
+        return;
+      }
 
       lastDistillTimestamp = Date.now();
       lastSessionSize = currentSize;
 
-      const elapsed = Math.floor((Date.now() - startTime) / 1000);
       if (ctx.hasUI && theme) {
         ctx.ui.setStatus(
           "napkin-distill",
@@ -238,54 +265,18 @@ export default function (pi: ExtensionAPI) {
         );
         ctx.ui.notify(`Distillation complete (${elapsed}s)`, "success");
       }
-    } catch (err) {
-      if (ctx.hasUI && theme) {
-        ctx.ui.setStatus(
-          "napkin-distill",
-          theme.fg("error", "✗") + theme.fg("dim", " distill"),
-        );
-      }
-      throw err;
-    } finally {
-      if (timerHandle) clearInterval(timerHandle);
-      isRunning = false;
-      // Clean up forked session
-      fs.rmSync(tmpSessionDir, { recursive: true, force: true });
-    }
+    }, 2000);
   }
 
-  // Manual trigger
   pi.registerCommand("distill", {
     description: "Distill conversation knowledge into the vault",
     handler: async (_args, ctx) => {
-      const vaultPath = findVaultPath(ctx.cwd);
-      if (!vaultPath) {
-        if (ctx.hasUI) ctx.ui.notify("No vault found", "error");
-        return;
-      }
-
       if (isRunning) {
         if (ctx.hasUI) ctx.ui.notify("Distill already running", "warning");
         return;
       }
-
-      const savedTimestamp = lastDistillTimestamp;
-      lastDistillTimestamp = 0;
-      lastSessionSize = 0; // bypass size check for manual trigger
-      runDistill(ctx)
-        .catch((err) => {
-          if (ctx.hasUI) {
-            ctx.ui.notify(
-              `Distill error: ${err instanceof Error ? err.message : String(err)}`,
-              "error",
-            );
-          }
-        })
-        .finally(() => {
-          if (lastDistillTimestamp === 0) {
-            lastDistillTimestamp = savedTimestamp;
-          }
-        });
+      lastSessionSize = 0; // bypass size check
+      runDistill(ctx);
     },
   });
 }
