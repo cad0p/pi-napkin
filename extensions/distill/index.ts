@@ -6,8 +6,8 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { findVaultPath } from "../vault-resolve.js";
 
-const DEBUG = process.env.NAPKIN_DISTILL_DEBUG !== "0";
-const LOG_FILE = "/tmp/napkin-distill.log";
+const DEBUG = process.env.NAPKIN_DISTILL_DEBUG === "1";
+const LOG_FILE = path.join(os.homedir(), ".pi", "napkin-distill.log");
 function dbg(msg: string) {
   if (!DEBUG) return;
   fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`);
@@ -15,17 +15,43 @@ function dbg(msg: string) {
 
 dbg(`EXTENSION LOADED pid=${process.pid}`);
 
-// Process-level guards for SIGHUP/SIGTERM handler
-let signalHandlerRegistered = false;
-let signalSpawned = false;
-// biome-ignore lint/suspicious/noExplicitAny: ctx type varies across pi versions
-let latestCtx: any = null;
-let latestConfig: DistillConfig | null = null;
-
 interface DistillConfig {
   enabled: boolean;
   intervalMinutes: number;
   model: { provider: string; id: string };
+}
+
+interface DistillContext {
+  sessionManager: { getSessionFile?: () => string | null };
+  hasUI: boolean;
+  // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext — pi doesn't export this type
+  ui: any;
+  cwd: string;
+}
+
+// Process-level guards for SIGHUP/SIGTERM handler
+let signalHandlerRegistered = false;
+let signalSpawned = false;
+let latestCtx: DistillContext | null = null;
+let latestConfig: DistillConfig | null = null;
+
+/**
+ * Check if the session has new content worth distilling.
+ */
+function shouldDistill(
+  ctx: DistillContext,
+  lastSize: number,
+): { sessionFile: string; currentSize: number } | null {
+  const sessionFile = ctx.sessionManager.getSessionFile?.();
+  if (!sessionFile) return null;
+  let currentSize: number;
+  try {
+    currentSize = fs.statSync(sessionFile).size;
+  } catch {
+    return null;
+  }
+  if (currentSize === 0 || currentSize === lastSize) return null;
+  return { sessionFile, currentSize };
 }
 
 const DEFAULT_CONFIG: DistillConfig = {
@@ -55,34 +81,44 @@ function spawnDetachedDistill(
   cwd: string,
   config: DistillConfig,
 ): void {
-  const tmpSessionDir = fs.mkdtempSync(
-    path.join(os.tmpdir(), "napkin-distill-"),
-  );
-  const forkedSm = SessionManager.forkFrom(sessionFile, cwd, tmpSessionDir);
-  const forkedSessionFile = forkedSm.getSessionFile();
-  if (!forkedSessionFile) {
-    fs.rmSync(tmpSessionDir, { recursive: true, force: true });
-    return;
+  let tmpSessionDir: string | null = null;
+  try {
+    tmpSessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-distill-"));
+    const forkedSm = SessionManager.forkFrom(sessionFile, cwd, tmpSessionDir);
+    const forkedSessionFile = forkedSm.getSessionFile();
+    if (!forkedSessionFile) {
+      fs.rmSync(tmpSessionDir, { recursive: true, force: true });
+      return;
+    }
+
+    const esc = (s: string) => s.replace(/'/g, "'\\''");
+    const escapedTmpDir = esc(tmpSessionDir);
+    const escapedLogFile = esc(LOG_FILE);
+
+    // Wrap in a shell that cleans up the temp dir after pi exits
+    const piArgs = [
+      "--session",
+      forkedSessionFile,
+      "-p",
+      "--model",
+      `${config.model.provider}/${config.model.id}`,
+      DISTILL_PROMPT,
+    ];
+    const shellCmd = `trap '' HUP; ${DEBUG ? `echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] START pid=$$ tmpdir='${escapedTmpDir}'" >> '${escapedLogFile}';` : ""} pi ${piArgs.map((a) => `'${esc(a)}'`).join(" ")} >/dev/null 2>&1; ${DEBUG ? `echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] DONE pid=$$ exit=$?" >> '${escapedLogFile}';` : ""} rm -rf '${escapedTmpDir}'`;
+
+    const proc = spawn("sh", ["-c", shellCmd], {
+      cwd,
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env, NAPKIN_DISTILL_NO_RECURSE: "1" },
+    });
+    proc.unref();
+  } catch (err) {
+    dbg(`spawnDetachedDistill error: ${err}`);
+    if (tmpSessionDir) {
+      fs.rmSync(tmpSessionDir, { recursive: true, force: true });
+    }
   }
-
-  // Wrap in a shell that cleans up the temp dir after pi exits
-  const piArgs = [
-    "--session",
-    forkedSessionFile,
-    "-p",
-    "--model",
-    `${config.model.provider}/${config.model.id}`,
-    DISTILL_PROMPT,
-  ];
-  const shellCmd = `trap '' HUP; ${DEBUG ? `echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] START pid=$$ tmpdir=${tmpSessionDir}" >> ${LOG_FILE};` : ""} pi ${piArgs.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")} >/dev/null 2>&1; ${DEBUG ? `echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] DONE pid=$$ exit=$?" >> ${LOG_FILE};` : ""} rm -rf '${tmpSessionDir}'`;
-
-  const proc = spawn("sh", ["-c", shellCmd], {
-    cwd,
-    detached: true,
-    stdio: "ignore",
-    env: { ...process.env, NAPKIN_DISTILL_NO_RECURSE: "1" },
-  });
-  proc.unref();
 }
 
 const DISTILL_PROMPT = `Distill this conversation into the napkin vault.
@@ -126,31 +162,35 @@ export default function (pi: ExtensionAPI) {
     if (!signalHandlerRegistered) {
       signalHandlerRegistered = true;
       const handleSignal = (sig: string) => {
-        if (process.env.NAPKIN_DISTILL_NO_RECURSE) {
-          dbg(`${sig}: skip: NO_RECURSE`);
-          return;
+        try {
+          if (process.env.NAPKIN_DISTILL_NO_RECURSE) {
+            dbg(`${sig}: skip: NO_RECURSE`);
+            return;
+          }
+          if (signalSpawned) {
+            dbg(`${sig}: skip: already spawned`);
+            return;
+          }
+          if (!latestCtx || !latestConfig) {
+            dbg(`${sig}: skip: no context`);
+            return;
+          }
+          signalSpawned = true;
+          dbg(`${sig}: caught pid=${process.pid}`);
+          const result = shouldDistill(latestCtx, lastSessionSize);
+          if (!result) {
+            dbg(`${sig}: skip: nothing to distill`);
+            return;
+          }
+          spawnDetachedDistill(result.sessionFile, latestCtx.cwd, latestConfig);
+          dbg(`${sig}: spawned detached distill`);
+        } catch (err) {
+          dbg(`${sig}: error: ${err}`);
+        } finally {
+          // Restore default handler and re-raise to actually terminate
+          process.removeAllListeners(sig as NodeJS.Signals);
+          process.kill(process.pid, sig as NodeJS.Signals);
         }
-        if (signalSpawned) {
-          dbg(`${sig}: skip: already spawned`);
-          return;
-        }
-        signalSpawned = true;
-        dbg(`${sig}: caught pid=${process.pid}`);
-        // biome-ignore lint/style/noNonNullAssertion: guaranteed set in session_start before signal fires
-        const ctx = latestCtx!;
-        const sessionFile = ctx.sessionManager.getSessionFile?.();
-        dbg(
-          `${sig}: sessionFile=${sessionFile} exists=${sessionFile ? fs.existsSync(sessionFile) : "N/A"}`,
-        );
-        if (!sessionFile || !fs.existsSync(sessionFile)) return;
-        const currentSize = fs.statSync(sessionFile).size;
-        dbg(
-          `${sig}: currentSize=${currentSize} lastSessionSize=${lastSessionSize}`,
-        );
-        if (currentSize === 0 || currentSize === lastSessionSize) return;
-        // biome-ignore lint/style/noNonNullAssertion: guaranteed set in session_start before signal fires
-        spawnDetachedDistill(sessionFile, ctx.cwd, latestConfig!);
-        dbg(`${sig}: spawned detached distill`);
       };
       process.on("SIGHUP", () => handleSignal("SIGHUP"));
       process.on("SIGTERM", () => handleSignal("SIGTERM"));
@@ -202,6 +242,11 @@ export default function (pi: ExtensionAPI) {
       dbg("SHUTDOWN: skip: NO_RECURSE");
       return;
     }
+    // Signal handler already spawned a detached distill — don't double-spawn
+    if (signalSpawned) {
+      dbg("SHUTDOWN: skip: already spawned by signal handler");
+      return;
+    }
 
     if (countdownHandle) {
       clearInterval(countdownHandle);
@@ -231,6 +276,10 @@ export default function (pi: ExtensionAPI) {
         return;
       }
       const config = loadDistillConfig(vaultPath);
+      if (!config.enabled) {
+        dbg("SHUTDOWN: skip: not enabled");
+        return;
+      }
       const sessionFile = ctx.sessionManager.getSessionFile?.();
       if (!sessionFile) {
         dbg("SHUTDOWN: skip: no session file");
@@ -256,61 +305,34 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const sessionFile = ctx.sessionManager.getSessionFile?.();
-    dbg(
-      `SHUTDOWN: sessionFile=${sessionFile} exists=${sessionFile ? fs.existsSync(sessionFile) : "N/A"}`,
-    );
-    if (!sessionFile) {
-      dbg("SHUTDOWN: skip: no session file");
-      return;
-    }
-
-    const currentSize = fs.existsSync(sessionFile)
-      ? fs.statSync(sessionFile).size
-      : 0;
-    dbg(
-      `SHUTDOWN: currentSize=${currentSize} lastSessionSize=${lastSessionSize}`,
-    );
-    if (currentSize === 0 || currentSize === lastSessionSize) {
-      dbg("SHUTDOWN: skip: no change");
+    const result = shouldDistill(ctx, lastSessionSize);
+    if (!result) {
+      dbg("SHUTDOWN: skip: nothing to distill");
       return;
     }
 
     // Spawn a detached distill that outlives this process
-    spawnDetachedDistill(sessionFile, ctx.cwd, config);
+    spawnDetachedDistill(result.sessionFile, ctx.cwd, config);
     dbg("SHUTDOWN: spawned detached");
   });
 
-  async function runDistill(ctx: {
-    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
-    sessionManager: any;
-    hasUI: boolean;
-    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
-    ui: any;
-    cwd: string;
-  }) {
+  async function runDistill(ctx: DistillContext) {
     const vaultPath = findVaultPath(ctx.cwd);
     if (!vaultPath) return;
 
     const config = loadDistillConfig(vaultPath);
-    const sessionFile = ctx.sessionManager.getSessionFile?.();
-    if (!sessionFile) {
-      if (ctx.hasUI)
+    const result = shouldDistill(ctx, lastSessionSize);
+    if (!result) {
+      if (ctx.hasUI && !ctx.sessionManager.getSessionFile?.()) {
         ctx.ui.notify(
           "Distill: no session file (ephemeral session)",
           "warning",
         );
-      return;
-    }
-
-    // Skip if session hasn't changed since last distill
-    const currentSize = fs.existsSync(sessionFile)
-      ? fs.statSync(sessionFile).size
-      : 0;
-    if (currentSize > 0 && currentSize === lastSessionSize) {
+      }
       lastDistillTimestamp = Date.now();
       return;
     }
+    const { sessionFile, currentSize } = result;
 
     isRunning = true;
     const startTime = Date.now();
