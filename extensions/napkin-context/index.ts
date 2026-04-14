@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Type } from "@sinclair/typebox";
 import { Markdown, Text } from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
 import { Napkin } from "napkin-ai";
 import { findVaultPath } from "../vault-resolve.js";
 
@@ -143,7 +143,7 @@ export default function (pi: ExtensionAPI) {
         .map((r) => {
           let entry = `**${r.file}**`;
           if (r.snippets && r.snippets.length > 0) {
-            entry += "\n" + r.snippets.map((s) => `  ${s.text}`).join("\n");
+            entry += `\n${r.snippets.map((s) => `  ${s.text}`).join("\n")}`;
           }
           return entry;
         })

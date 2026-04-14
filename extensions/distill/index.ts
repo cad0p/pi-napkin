@@ -58,10 +58,7 @@ export default function (pi: ExtensionAPI) {
     if (!config.enabled) {
       if (ctx.hasUI) {
         const theme = ctx.ui.theme;
-        ctx.ui.setStatus(
-          "napkin-distill",
-          theme.fg("dim", "distill: off"),
-        );
+        ctx.ui.setStatus("napkin-distill", theme.fg("dim", "distill: off"));
       }
       return;
     }
@@ -73,10 +70,16 @@ export default function (pi: ExtensionAPI) {
       const theme = ctx.ui.theme;
       const updateCountdown = () => {
         if (isRunning) return;
-        const remaining = Math.max(0, intervalMs - (Date.now() - lastDistillTimestamp));
+        const remaining = Math.max(
+          0,
+          intervalMs - (Date.now() - lastDistillTimestamp),
+        );
         const mins = Math.floor(remaining / 60000);
         const secs = Math.floor((remaining % 60000) / 1000);
-        const display = mins > 0 ? `${mins}m${secs.toString().padStart(2, "0")}s` : `${secs}s`;
+        const display =
+          mins > 0
+            ? `${mins}m${secs.toString().padStart(2, "0")}s`
+            : `${secs}s`;
         ctx.ui.setStatus(
           "napkin-distill",
           theme.fg("dim", `distill: ${display}`),
@@ -86,20 +89,17 @@ export default function (pi: ExtensionAPI) {
       countdownHandle = setInterval(updateCountdown, 1000);
     }
 
-    intervalHandle = setInterval(
-      () => {
-        if (isRunning) return;
-        runDistill(ctx).catch((err) => {
-          if (ctx.hasUI) {
-            ctx.ui.notify(
-              `Distill error: ${err instanceof Error ? err.message : String(err)}`,
-              "error",
-            );
-          }
-        });
-      },
-      intervalMs,
-    );
+    intervalHandle = setInterval(() => {
+      if (isRunning) return;
+      runDistill(ctx).catch((err) => {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `Distill error: ${err instanceof Error ? err.message : String(err)}`,
+            "error",
+          );
+        }
+      });
+    }, intervalMs);
   });
 
   pi.on("session_shutdown", async () => {
@@ -118,8 +118,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   async function runDistill(ctx: {
+    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
     sessionManager: any;
     hasUI: boolean;
+    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
     ui: any;
     cwd: string;
   }) {
@@ -160,8 +162,7 @@ export default function (pi: ExtensionAPI) {
         const elapsed = Math.floor((Date.now() - startTime) / 1000);
         ctx.ui.setStatus(
           "napkin-distill",
-          theme.fg("accent", "●") +
-            theme.fg("dim", ` distill ${elapsed}s`),
+          theme.fg("accent", "●") + theme.fg("dim", ` distill ${elapsed}s`),
         );
       }, 1000);
     }
@@ -196,7 +197,7 @@ export default function (pi: ExtensionAPI) {
         DISTILL_PROMPT,
       ];
 
-      const exitCode = await new Promise<number>((resolve, reject) => {
+      const _exitCode = await new Promise<number>((resolve, reject) => {
         const proc = spawn("pi", args, {
           cwd: ctx.cwd,
           shell: false,
@@ -235,8 +236,7 @@ export default function (pi: ExtensionAPI) {
       if (ctx.hasUI && theme) {
         ctx.ui.setStatus(
           "napkin-distill",
-          theme.fg("success", "✓") +
-            theme.fg("dim", ` distill ${elapsed}s`),
+          theme.fg("success", "✓") + theme.fg("dim", ` distill ${elapsed}s`),
         );
         ctx.ui.notify(`Distillation complete (${elapsed}s)`, "success");
       }
