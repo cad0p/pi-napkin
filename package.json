@@ -1,0 +1,24 @@
+{
+  "name": "pi-napkin",
+  "version": "0.1.0",
+  "description": "🧻 Napkin integration for pi — vault context, knowledge tools, and automatic distillation",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": [
+      "extensions/napkin-context",
+      "extensions/distill"
+    ],
+    "skills": [
+      "skills"
+    ]
+  },
+  "dependencies": {
+    "napkin-ai": "^0.7.5"
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "@sinclair/typebox": "*"
+  },
+  "license": "MIT"
+}
