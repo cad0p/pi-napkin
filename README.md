@@ -6,7 +6,7 @@
 
 ```bash
 npm i -g napkin-ai
-pi install git:github.com/Michaelliv/pi-napkin
+pi install npm:pi-napkin
 ```
 
 ## What you get
