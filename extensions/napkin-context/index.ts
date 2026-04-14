@@ -143,7 +143,7 @@ export default function (pi: ExtensionAPI) {
         .map((r) => {
           let entry = `**${r.file}**`;
           if (r.snippets && r.snippets.length > 0) {
-            entry += "\n" + r.snippets.map((s) => `  ${s}`).join("\n");
+            entry += "\n" + r.snippets.map((s) => `  ${s.text}`).join("\n");
           }
           return entry;
         })
