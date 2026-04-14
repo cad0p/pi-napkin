@@ -6,6 +6,22 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import { findVaultPath } from "../vault-resolve.js";
 
+const DEBUG = process.env.NAPKIN_DISTILL_DEBUG !== "0";
+const LOG_FILE = "/tmp/napkin-distill.log";
+function dbg(msg: string) {
+  if (!DEBUG) return;
+  fs.appendFileSync(LOG_FILE, `[${new Date().toISOString()}] ${msg}\n`);
+}
+
+dbg(`EXTENSION LOADED pid=${process.pid}`);
+
+// Process-level guards for SIGHUP/SIGTERM handler
+let signalHandlerRegistered = false;
+let signalSpawned = false;
+// biome-ignore lint/suspicious/noExplicitAny: ctx type varies across pi versions
+let latestCtx: any = null;
+let latestConfig: DistillConfig | null = null;
+
 interface DistillConfig {
   enabled: boolean;
   intervalMinutes: number;
@@ -30,6 +46,45 @@ function loadDistillConfig(vaultPath: string): DistillConfig {
   }
 }
 
+/**
+ * Spawn a detached pi distill process that survives parent exit.
+ * Returns immediately — the child runs independently.
+ */
+function spawnDetachedDistill(
+  sessionFile: string,
+  cwd: string,
+  config: DistillConfig,
+): void {
+  const tmpSessionDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "napkin-distill-"),
+  );
+  const forkedSm = SessionManager.forkFrom(sessionFile, cwd, tmpSessionDir);
+  const forkedSessionFile = forkedSm.getSessionFile();
+  if (!forkedSessionFile) {
+    fs.rmSync(tmpSessionDir, { recursive: true, force: true });
+    return;
+  }
+
+  // Wrap in a shell that cleans up the temp dir after pi exits
+  const piArgs = [
+    "--session",
+    forkedSessionFile,
+    "-p",
+    "--model",
+    `${config.model.provider}/${config.model.id}`,
+    DISTILL_PROMPT,
+  ];
+  const shellCmd = `trap '' HUP; ${DEBUG ? `echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] START pid=$$ tmpdir=${tmpSessionDir}" >> ${LOG_FILE};` : ""} pi ${piArgs.map((a) => `'${a.replace(/'/g, "'\\''")}'`).join(" ")} >/dev/null 2>&1; ${DEBUG ? `echo "[$(date -u +%Y-%m-%dT%H:%M:%SZ)] DONE pid=$$ exit=$?" >> ${LOG_FILE};` : ""} rm -rf '${tmpSessionDir}'`;
+
+  const proc = spawn("sh", ["-c", shellCmd], {
+    cwd,
+    detached: true,
+    stdio: "ignore",
+    env: { ...process.env, NAPKIN_DISTILL_NO_RECURSE: "1" },
+  });
+  proc.unref();
+}
+
 const DISTILL_PROMPT = `Distill this conversation into the napkin vault.
 
 1. \`napkin overview\` — learn the vault structure and what exists
@@ -49,6 +104,7 @@ export default function (pi: ExtensionAPI) {
   let lastSessionSize = 0;
   let isRunning = false;
   let activeProcess: ReturnType<typeof spawn> | null = null;
+  let activeTmpDir: string | null = null;
 
   pi.on("session_start", async (_event, ctx) => {
     const vaultPath = findVaultPath(ctx.cwd);
@@ -61,6 +117,43 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus("napkin-distill", theme.fg("dim", "distill: off"));
       }
       return;
+    }
+
+    // Catch SIGHUP/SIGTERM (tmux pane close, kill <pid>) — pi does not
+    // handle these, so session_shutdown never fires. Spawn detached distill here.
+    latestCtx = ctx;
+    latestConfig = config;
+    if (!signalHandlerRegistered) {
+      signalHandlerRegistered = true;
+      const handleSignal = (sig: string) => {
+        if (process.env.NAPKIN_DISTILL_NO_RECURSE) {
+          dbg(`${sig}: skip: NO_RECURSE`);
+          return;
+        }
+        if (signalSpawned) {
+          dbg(`${sig}: skip: already spawned`);
+          return;
+        }
+        signalSpawned = true;
+        dbg(`${sig}: caught pid=${process.pid}`);
+        // biome-ignore lint/style/noNonNullAssertion: guaranteed set in session_start before signal fires
+        const ctx = latestCtx!;
+        const sessionFile = ctx.sessionManager.getSessionFile?.();
+        dbg(
+          `${sig}: sessionFile=${sessionFile} exists=${sessionFile ? fs.existsSync(sessionFile) : "N/A"}`,
+        );
+        if (!sessionFile || !fs.existsSync(sessionFile)) return;
+        const currentSize = fs.statSync(sessionFile).size;
+        dbg(
+          `${sig}: currentSize=${currentSize} lastSessionSize=${lastSessionSize}`,
+        );
+        if (currentSize === 0 || currentSize === lastSessionSize) return;
+        // biome-ignore lint/style/noNonNullAssertion: guaranteed set in session_start before signal fires
+        spawnDetachedDistill(sessionFile, ctx.cwd, latestConfig!);
+        dbg(`${sig}: spawned detached distill`);
+      };
+      process.on("SIGHUP", () => handleSignal("SIGHUP"));
+      process.on("SIGTERM", () => handleSignal("SIGTERM"));
     }
 
     lastDistillTimestamp = Date.now();
@@ -102,7 +195,14 @@ export default function (pi: ExtensionAPI) {
     }, intervalMs);
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
+    dbg(`SHUTDOWN: entered cwd=${ctx.cwd}`);
+    // Prevent infinite recursion: detached distill processes must not spawn more distills
+    if (process.env.NAPKIN_DISTILL_NO_RECURSE) {
+      dbg("SHUTDOWN: skip: NO_RECURSE");
+      return;
+    }
+
     if (countdownHandle) {
       clearInterval(countdownHandle);
       countdownHandle = null;
@@ -111,10 +211,74 @@ export default function (pi: ExtensionAPI) {
       clearInterval(intervalHandle);
       intervalHandle = null;
     }
-    if (activeProcess) {
-      activeProcess.kill();
+
+    // If a distill is already running, detach it instead of killing it.
+    if (activeProcess && activeTmpDir) {
+      dbg("SHUTDOWN: path: activeProcess+activeTmpDir — re-spawning detached");
+      const tmpDir = activeTmpDir;
+      try {
+        activeProcess.kill();
+      } catch {
+        // already dead — ignore
+      }
       activeProcess = null;
+      activeTmpDir = null;
+
+      // Re-spawn as detached so it survives parent exit with cleanup
+      const vaultPath = findVaultPath(ctx.cwd);
+      if (!vaultPath) {
+        dbg("SHUTDOWN: skip: no vault");
+        return;
+      }
+      const config = loadDistillConfig(vaultPath);
+      const sessionFile = ctx.sessionManager.getSessionFile?.();
+      if (!sessionFile) {
+        dbg("SHUTDOWN: skip: no session file");
+        return;
+      }
+      spawnDetachedDistill(sessionFile, ctx.cwd, config);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      dbg("SHUTDOWN: re-spawned detached");
+      return;
     }
+
+    // No distill running — check if session has new content worth distilling
+    const vaultPath = findVaultPath(ctx.cwd);
+    dbg(`SHUTDOWN: vaultPath=${vaultPath} cwd=${ctx.cwd}`);
+    if (!vaultPath) {
+      dbg("SHUTDOWN: skip: no vault");
+      return;
+    }
+
+    const config = loadDistillConfig(vaultPath);
+    if (!config.enabled) {
+      dbg("SHUTDOWN: skip: not enabled");
+      return;
+    }
+
+    const sessionFile = ctx.sessionManager.getSessionFile?.();
+    dbg(
+      `SHUTDOWN: sessionFile=${sessionFile} exists=${sessionFile ? fs.existsSync(sessionFile) : "N/A"}`,
+    );
+    if (!sessionFile) {
+      dbg("SHUTDOWN: skip: no session file");
+      return;
+    }
+
+    const currentSize = fs.existsSync(sessionFile)
+      ? fs.statSync(sessionFile).size
+      : 0;
+    dbg(
+      `SHUTDOWN: currentSize=${currentSize} lastSessionSize=${lastSessionSize}`,
+    );
+    if (currentSize === 0 || currentSize === lastSessionSize) {
+      dbg("SHUTDOWN: skip: no change");
+      return;
+    }
+
+    // Spawn a detached distill that outlives this process
+    spawnDetachedDistill(sessionFile, ctx.cwd, config);
+    dbg("SHUTDOWN: spawned detached");
   });
 
   async function runDistill(ctx: {
@@ -172,6 +336,7 @@ export default function (pi: ExtensionAPI) {
     const tmpSessionDir = fs.mkdtempSync(
       path.join(os.tmpdir(), "napkin-distill-"),
     );
+    activeTmpDir = tmpSessionDir;
     let forkedSessionFile: string | null = null;
 
     try {
@@ -251,8 +416,11 @@ export default function (pi: ExtensionAPI) {
     } finally {
       if (timerHandle) clearInterval(timerHandle);
       isRunning = false;
-      // Clean up forked session
-      fs.rmSync(tmpSessionDir, { recursive: true, force: true });
+      // Clean up forked session — skip if shutdown detached the process
+      if (activeTmpDir === tmpSessionDir) {
+        fs.rmSync(tmpSessionDir, { recursive: true, force: true });
+        activeTmpDir = null;
+      }
     }
   }
 
