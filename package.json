@@ -1,8 +1,10 @@
 {
   "name": "pi-napkin",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "🧻 Napkin integration for pi — vault context, knowledge tools, and automatic distillation",
-  "keywords": ["pi-package"],
+  "keywords": [
+    "pi-package"
+  ],
   "pi": {
     "extensions": [
       "extensions/napkin-context",
