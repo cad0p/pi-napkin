@@ -11,18 +11,18 @@ Install: `npm install -g napkin-ai`
 
 ## Vault Structure
 
-`.napkin/` is the vault root — all content lives inside it:
+`.napkin/` is the config directory. Content lives at the vault root alongside it:
 
 ```
-my-project/
-  .napkin/                  # The vault
-    NAPKIN.md               # Context note (Level 0)
+my-vault/                   # Vault root
+  .napkin/                  # Config only
     config.json             # Unified config (syncs to .obsidian/)
-    decisions/              # Template-defined directories
-    architecture/
-    Templates/              # Note templates
     .obsidian/              # Obsidian compatibility (auto-generated)
-  src/                      # Project source (not in vault)
+  NAPKIN.md                 # Context note (Level 0)
+  Templates/                # Note templates
+  decisions/                # Template-defined directories
+  architecture/
+  guides/
 ```
 
 ## Progressive Disclosure

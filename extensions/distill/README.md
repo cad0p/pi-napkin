@@ -43,7 +43,7 @@ All distill settings live in `.napkin/config.json` under the `distill` key:
 | `distill.intervalMinutes` | `60` | How often to check for new content |
 | `distill.model.provider` | `"anthropic"` | LLM provider |
 | `distill.model.id` | `"claude-sonnet-4-6"` | Model for distillation |
-| `distill.templates` | `[]` | Which templates to use (empty = all in Templates/) |
+
 
 ## Manual trigger
 

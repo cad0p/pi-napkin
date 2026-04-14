@@ -172,8 +172,6 @@ export default function (pi: ExtensionAPI) {
     const tmpSessionDir = fs.mkdtempSync(
       path.join(os.tmpdir(), "napkin-distill-"),
     );
-    let forkedSessionFile: string | null = null;
-
     try {
       // Fork: creates a new session file with the full conversation
       const forkedSm = SessionManager.forkFrom(
@@ -181,7 +179,7 @@ export default function (pi: ExtensionAPI) {
         ctx.cwd,
         tmpSessionDir,
       );
-      forkedSessionFile = forkedSm.getSessionFile();
+      const forkedSessionFile = forkedSm.getSessionFile();
 
       if (!forkedSessionFile) {
         throw new Error("Failed to fork session");
