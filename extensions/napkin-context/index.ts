@@ -1,9 +1,21 @@
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Markdown, Text } from "@mariozechner/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { Napkin } from "napkin-ai";
 import { findVaultPath } from "../vault-resolve.js";
+
+function loadShowStatus(vaultPath: string): boolean {
+  const configPath = path.join(vaultPath, "config.json");
+  if (!fs.existsSync(configPath)) return true;
+  try {
+    const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    return raw.showStatus !== false;
+  } catch {
+    return true;
+  }
+}
 
 function getNapkin(cwd: string): Napkin {
   const vaultPath = findVaultPath(cwd);
@@ -106,7 +118,7 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    if (ctx.hasUI) {
+    if (ctx.hasUI && loadShowStatus(vaultPath)) {
       const theme = ctx.ui.theme;
       if (hasVault) {
         ctx.ui.setStatus("napkin", `🧻${theme.fg("dim", " napkin")}`);

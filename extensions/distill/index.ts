@@ -12,23 +12,32 @@ interface DistillConfig {
   model: { provider: string; id: string };
 }
 
+interface VaultConfig {
+  showStatus: boolean;
+  distill: DistillConfig;
+}
+
 const MAX_DISTILL_DURATION_MS = 10 * 60 * 1000; // 10 minutes
 
-const DEFAULT_CONFIG: DistillConfig = {
+const DEFAULT_DISTILL: DistillConfig = {
   enabled: false,
   intervalMinutes: 60,
   model: { provider: "anthropic", id: "claude-sonnet-4-6" },
 };
 
-function loadDistillConfig(vaultPath: string): DistillConfig {
+function loadVaultConfig(vaultPath: string): VaultConfig {
   const configPath = path.join(vaultPath, "config.json");
-  if (!fs.existsSync(configPath)) return DEFAULT_CONFIG;
+  if (!fs.existsSync(configPath)) {
+    return { showStatus: true, distill: DEFAULT_DISTILL };
+  }
   try {
     const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    const distill = raw.distill || {};
-    return { ...DEFAULT_CONFIG, ...distill };
+    return {
+      showStatus: raw.showStatus !== false,
+      distill: { ...DEFAULT_DISTILL, ...(raw.distill || {}) },
+    };
   } catch {
-    return DEFAULT_CONFIG;
+    return { showStatus: true, distill: DEFAULT_DISTILL };
   }
 }
 
@@ -111,9 +120,9 @@ export default function (pi: ExtensionAPI) {
     const vaultPath = findVaultPath(ctx.cwd);
     if (!vaultPath) return;
 
-    const config = loadDistillConfig(vaultPath);
+    const { showStatus, distill: config } = loadVaultConfig(vaultPath);
     if (!config.enabled) {
-      if (ctx.hasUI) {
+      if (ctx.hasUI && showStatus) {
         ctx.ui.setStatus(
           "napkin-distill",
           ctx.ui.theme.fg("dim", "distill: off"),
@@ -128,7 +137,7 @@ export default function (pi: ExtensionAPI) {
     lastDistillTimestamp = Date.now();
     const intervalMs = config.intervalMinutes * 60 * 1000;
 
-    if (ctx.hasUI) {
+    if (ctx.hasUI && showStatus) {
       const theme = ctx.ui.theme;
       countdownHandle = setInterval(() => {
         if (isRunning) return;
@@ -183,7 +192,7 @@ export default function (pi: ExtensionAPI) {
     const vaultPath = findVaultPath(ctx.cwd);
     if (!vaultPath) return;
 
-    const config = loadDistillConfig(vaultPath);
+    const { showStatus, distill: config } = loadVaultConfig(vaultPath);
     const sessionFile = ctx.sessionManager.getSessionFile?.();
     if (!sessionFile) return;
 
@@ -198,7 +207,7 @@ export default function (pi: ExtensionAPI) {
 
     const tmpDir = spawnDistill(sessionFile, ctx.cwd, config);
     if (!tmpDir) {
-      if (ctx.hasUI && ctx.ui.theme) {
+      if (ctx.hasUI && ctx.ui.theme && showStatus) {
         ctx.ui.setStatus(
           "napkin-distill",
           ctx.ui.theme.fg("error", "✗") +
@@ -212,7 +221,7 @@ export default function (pi: ExtensionAPI) {
     const startTime = Date.now();
     const theme = ctx.hasUI ? ctx.ui.theme : null;
 
-    if (ctx.hasUI && theme) {
+    if (ctx.hasUI && theme && showStatus) {
       ctx.ui.setStatus(
         "napkin-distill",
         theme.fg("accent", "●") + theme.fg("dim", " distill"),
@@ -226,7 +235,7 @@ export default function (pi: ExtensionAPI) {
 
       if (fs.existsSync(tmpDir) && !timedOut) {
         // Still running — update elapsed time in status bar
-        if (ctx.hasUI && theme) {
+        if (ctx.hasUI && theme && showStatus) {
           ctx.ui.setStatus(
             "napkin-distill",
             theme.fg("accent", "●") + theme.fg("dim", ` distill ${elapsed}s`),
@@ -246,10 +255,12 @@ export default function (pi: ExtensionAPI) {
         // Clean up orphaned temp dir
         fs.rmSync(tmpDir, { recursive: true, force: true });
         if (ctx.hasUI && theme) {
-          ctx.ui.setStatus(
-            "napkin-distill",
-            theme.fg("error", "✗") + theme.fg("dim", " distill: timeout"),
-          );
+          if (showStatus) {
+            ctx.ui.setStatus(
+              "napkin-distill",
+              theme.fg("error", "✗") + theme.fg("dim", " distill: timeout"),
+            );
+          }
           ctx.ui.notify("Distillation timed out (10m)", "error");
         }
         return;
@@ -259,10 +270,13 @@ export default function (pi: ExtensionAPI) {
       lastSessionSize = currentSize;
 
       if (ctx.hasUI && theme) {
-        ctx.ui.setStatus(
-          "napkin-distill",
-          theme.fg("success", "✓") + theme.fg("dim", ` distill ${elapsed}s`),
-        );
+        if (showStatus) {
+          ctx.ui.setStatus(
+            "napkin-distill",
+            theme.fg("success", "✓") +
+              theme.fg("dim", ` distill ${elapsed}s`),
+          );
+        }
         ctx.ui.notify(`Distillation complete (${elapsed}s)`, "success");
       }
     }, 2000);
