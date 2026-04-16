@@ -1,6 +1,6 @@
 # pi-napkin
 
-🧻 [Napkin](https://github.com/Michaelliv/napkin) integration for [pi](https://github.com/badlogic/pi).
+🧻 [Napkin](https://github.com/Michaelliv/napkin) integration for [pi](https://github.com/badlogic/pi-mono).
 
 ## Install
 
