@@ -273,8 +273,7 @@ export default function (pi: ExtensionAPI) {
         if (showStatus) {
           ctx.ui.setStatus(
             "napkin-distill",
-            theme.fg("success", "✓") +
-              theme.fg("dim", ` distill ${elapsed}s`),
+            theme.fg("success", "✓") + theme.fg("dim", ` distill ${elapsed}s`),
           );
         }
         ctx.ui.notify(`Distillation complete (${elapsed}s)`, "success");
