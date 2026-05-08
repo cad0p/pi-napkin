@@ -144,7 +144,7 @@ napkin create --name "My Note" --content "Hello world"
 
 ```bash
 napkin vault                                # Vault info (name, path, files, folders, size)
-napkin version                              # CLI version
+napkin --version                            # CLI version (also -v)
 ```
 
 ### Files & folders — `napkin file`
