@@ -21,10 +21,12 @@ import {
   cleanupStaleWorktrees,
   DistillError,
   type DistillWorkspace,
+  diffWorktreeSinceStart,
   getActiveDistills,
   getUnmergedDistillBranches,
   spawnDistillInWorktree,
 } from "./distill-workspace";
+import { getSessionTouchedFiles } from "./session-touched-files";
 import { shouldDistillOnShutdown } from "./should-distill-on-shutdown";
 
 export interface DistillConfig {
@@ -478,6 +480,87 @@ export default function (pi: ExtensionAPI) {
 
     uiRef = null;
     // No need to kill anything — detached processes survive on their own
+  });
+
+  // ---------------------------------------------------------------------------
+  // before_agent_start: overlap injection
+  //
+  // Fires once per user prompt, before the agent loop starts. When the
+  // current session has written to vault files that a live background
+  // distill is also editing, we append a short notice to `systemPrompt`
+  // so the agent knows its recent writes may be clobbered / merged when
+  // the distill completes.
+  //
+  // Using `systemPrompt` (not `message`) is deliberate:
+  //   - Not persisted — 0 tokens when the next turn has no overlap.
+  //   - Doesn't grow the session file.
+  //   - Cache-friendly: the notice lives at the END of the system prompt,
+  //     so the stable prefix still hits provider caches.
+  //
+  // Session-touched files are extracted by `getSessionTouchedFiles`, a
+  // reimplementation of pi's internal `extractFileOpsFromMessage`
+  //   // Reimplemented from pi's internal extractFileOpsFromMessage
+  //   // Original: @earendil-works/pi-coding-agent ^0.74.0
+  //   // dist/core/compaction/utils.js — extractFileOpsFromMessage / computeFileLists
+  //   // Not exported; sync with pi upstream when tool catalog changes.
+  // Distill-touched files come from `git diff --name-only <startSha>..HEAD`
+  // inside each live distill worktree (falls back to `git status --porcelain`
+  // when startSha is missing from legacy meta.json).
+  //
+  // All failures collapse to "no overlap detected" — this hook must never
+  // block the agent turn.
+  pi.on("before_agent_start", async (event, ctx) => {
+    // Skip injection inside the distill subprocess itself — it's the one
+    // writing the files, talking to itself about overlaps would be noise.
+    if (process.env.NAPKIN_DISTILL_NO_RECURSE) return;
+
+    let vaultPath: string;
+    try {
+      vaultPath = new Napkin(ctx.cwd).vault.contentPath;
+    } catch {
+      return;
+    }
+
+    let sessionTouched: Set<string>;
+    try {
+      sessionTouched = getSessionTouchedFiles(ctx.sessionManager);
+    } catch {
+      return;
+    }
+    if (sessionTouched.size === 0) return;
+
+    let actives: ActiveDistill[];
+    try {
+      actives = getActiveDistills({ contentPath: vaultPath }).filter(
+        (a) => a.alive,
+      );
+    } catch {
+      return;
+    }
+    if (actives.length === 0) return;
+
+    // Union of all paths the live distills have changed since their
+    // startSha. Each entry is a path relative to the worktree root
+    // (== vault root), e.g. `notes/foo.md`.
+    const distillTouched = new Set<string>();
+    for (const a of actives) {
+      try {
+        for (const f of diffWorktreeSinceStart({
+          worktreePath: a.worktreePath,
+          startSha: a.startSha,
+        })) {
+          distillTouched.add(f);
+        }
+      } catch {
+        // swallow — one worktree failing doesn't stop the others
+      }
+    }
+    if (distillTouched.size === 0) return;
+
+    const overlap = intersectFiles(sessionTouched, distillTouched);
+    if (overlap.length === 0) return;
+
+    return { systemPrompt: event.systemPrompt + formatOverlapNotice(overlap) };
   });
 
   function runDistill(ctx: {
@@ -1072,4 +1155,64 @@ export function distillStatusToJson(
     unmerged,
   };
   return JSON.stringify(payload, null, 2);
+}
+
+/**
+ * Compute the intersection of session-touched paths and distill-touched
+ * paths. Matching is symmetric-suffix: we tolerate both absolute session
+ * paths (`/home/user/.napkin/notes/foo.md`) and worktree-relative distill
+ * paths (`notes/foo.md`). Basename-only matching would be too permissive
+ * (two `README.md`s aren't the same file); suffix matching on either
+ * direction handles the common layouts without false positives.
+ *
+ * Exported for unit tests. Output is sorted so the overlap notice is
+ * deterministic across runs.
+ */
+export function intersectFiles(
+  session: ReadonlySet<string>,
+  distill: ReadonlySet<string>,
+): string[] {
+  if (session.size === 0 || distill.size === 0) return [];
+
+  const hits = new Set<string>();
+  for (const d of distill) {
+    for (const s of session) {
+      if (
+        d === s ||
+        d.endsWith(`/${s}`) ||
+        s.endsWith(`/${d}`) ||
+        path.basename(d) === path.basename(s)
+      ) {
+        // Prefer the distill-side (worktree-relative) path for display;
+        // it's shorter and scoped to the vault.
+        hits.add(d);
+      }
+    }
+  }
+  return [...hits].sort();
+}
+
+/**
+ * Format the one-line notice appended to `systemPrompt` when overlap
+ * between session-touched and distill-touched files is non-empty.
+ *
+ * Leading `\n\n` separates it from the preceding system-prompt content
+ * so it can't accidentally run into the last word of whatever the tail
+ * looks like. The warning glyph (⚠️) is there to catch the agent's
+ * attention if it happens to narrate the prompt; agents trained on
+ * markdown treat it as a signal.
+ *
+ * Text is deliberately short (~45 tokens): the point of using
+ * `systemPrompt` instead of `message` is to avoid context bloat on
+ * repeat turns. A single line naming the overlap is enough.
+ */
+export function formatOverlapNotice(overlapFiles: string[]): string {
+  if (overlapFiles.length === 0) return "";
+  const list = overlapFiles.join(", ");
+  return (
+    "\n\n\u26a0\ufe0f Background napkin distill is editing files you've also " +
+    `touched: ${list}. Recent writes to these files may be overwritten or ` +
+    "merged automatically at distill completion; consider re-reading before " +
+    "further edits."
+  );
 }
