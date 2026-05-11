@@ -17,6 +17,7 @@ import {
   type DistillWorkspace,
   spawnDistillInWorktree,
 } from "./distill-workspace";
+import { shouldDistillOnShutdown } from "./should-distill-on-shutdown";
 
 export interface DistillConfig {
   enabled: boolean;
@@ -196,10 +197,10 @@ export default function (pi: ExtensionAPI) {
    * firing between spawn-and-complete dedupes against the in-flight distill
    * without having to wait for it to finish.
    *
-   * Phase A: only written here. Phase B reads it via `shouldDistillOnShutdown`
-   * in the shutdown handler.
+   * Read by `shouldDistillOnShutdown` in the session_shutdown handler
+   * (guard #8). Written by `runDistill`, `runAutoDistill`, and the shutdown
+   * handler itself (after a successful shutdown spawn).
    */
-  // biome-ignore lint/correctness/noUnusedVariables: read in phase B shutdown handler; writing here keeps the two phases independently bisectable.
   let lastSpawnedSize = 0;
   let isRunning = false;
   // Session-scoped suppression of the automatic distill timer.
@@ -319,7 +320,7 @@ export default function (pi: ExtensionAPI) {
     }, intervalMs);
   });
 
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (event, ctx) => {
     if (countdownHandle) {
       clearInterval(countdownHandle);
       countdownHandle = null;
@@ -336,6 +337,71 @@ export default function (pi: ExtensionAPI) {
     // stick as `true` across an in-process session switch and suppress the
     // next session's status-bar rendering.
     isRunning = false;
+
+    // ------- Final shutdown distill (Phase B Item 8) -------------------------
+    //
+    // Spawn one last auto-distill if the session has content that hasn't been
+    // captured yet. Guards live in `shouldDistillOnShutdown` — this block
+    // only assembles inputs and calls it. Any failure logs and falls through;
+    // shutdown must never block.
+    //
+    // Intentionally AFTER the timer cleanup above: clearing intervalHandle
+    // first prevents the rare race where the interval fires during shutdown
+    // and we end up with two concurrent spawns on the same content.
+    //
+    // Config is re-read via loadVaultConfig rather than captured from
+    // session_start — handler scope keeps closures small, and the cost of
+    // one extra JSON parse at shutdown is negligible.
+    try {
+      let vaultConfigPath: string | null = null;
+      try {
+        vaultConfigPath = new Napkin(ctx.cwd).vault.configPath;
+      } catch {
+        // No vault resolvable — skip spawn, proceed to final resets.
+      }
+      if (vaultConfigPath) {
+        const { distill: config } = loadVaultConfig(vaultConfigPath);
+        const sessionFile = ctx.sessionManager.getSessionFile?.();
+        const currentSize =
+          sessionFile && fs.existsSync(sessionFile)
+            ? fs.statSync(sessionFile).size
+            : 0;
+
+        if (
+          shouldDistillOnShutdown(
+            event,
+            config,
+            autoDistillSuppressed,
+            sessionFile,
+            currentSize,
+            lastSpawnedSize,
+            lastSessionSize,
+          )
+        ) {
+          // Guard: we require git for the worktree path. Phase C's auto-init
+          // will ensure this; for Phase B, we silently skip if missing —
+          // shutdown is not the moment to surface UI hints.
+          if (fs.existsSync(path.join(ctx.cwd, ".git")) && sessionFile) {
+            const modelStr = config.model
+              ? `${config.model.provider}/${config.model.id}`
+              : undefined;
+            spawnDistillInWorktree({
+              vault: ctx.cwd,
+              sessionFile,
+              prompt: DISTILL_PROMPT,
+              model: modelStr,
+            });
+            // Mark this size as "spawned" so if the parent re-enters shutdown
+            // (unlikely but possible with session switch), we don't duplicate.
+            lastSpawnedSize = currentSize;
+          }
+        }
+      }
+    } catch (err) {
+      // Never block shutdown. stderr logging only — no UI at this point.
+      console.error("[napkin-distill] shutdown spawn failed:", err);
+    }
+
     uiRef = null;
     // No need to kill anything — detached processes survive on their own
   });
