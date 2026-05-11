@@ -182,6 +182,18 @@ export default function (pi: ExtensionAPI) {
   let pollHandle: ReturnType<typeof setInterval> | null = null;
   let lastDistillTimestamp = Date.now();
   let lastSessionSize = 0;
+  /**
+   * Byte size of the session file at the moment the most recent distill
+   * subprocess was successfully spawned. Separate from `lastSessionSize`
+   * (which updates on completion): this tracks SPAWN so that a shutdown
+   * firing between spawn-and-complete dedupes against the in-flight distill
+   * without having to wait for it to finish.
+   *
+   * Phase A: only written here. Phase B reads it via `shouldDistillOnShutdown`
+   * in the shutdown handler.
+   */
+  // biome-ignore lint/correctness/noUnusedVariables: read in phase B shutdown handler; writing here keeps the two phases independently bisectable.
+  let lastSpawnedSize = 0;
   let isRunning = false;
   // Session-scoped suppression of the automatic distill timer.
   // Toggled via `/distill-auto-this-session` — does NOT affect manual `/distill`.
@@ -362,6 +374,11 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
+
+    // Record the size we spawned on so a shutdown firing between here and
+    // completion dedupes against the in-flight distill. Consumed by
+    // shouldDistillOnShutdown (wired in phase B).
+    lastSpawnedSize = currentSize;
 
     isRunning = true;
     const startTime = Date.now();
