@@ -173,7 +173,10 @@ describe("session_shutdown handler (Item 8)", () => {
   let sm: SessionManager;
   let originalSetInterval: typeof setInterval;
 
+  // Clear the recursion-guard env var — test runner may be inside a distill subprocess.
+  const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
   beforeEach(() => {
+    delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     // Stub setInterval so session_start doesn't leak a real timer; shutdown
     // tests don't need the interval to fire.
     originalSetInterval = globalThis.setInterval;
@@ -189,6 +192,8 @@ describe("session_shutdown handler (Item 8)", () => {
   });
 
   afterEach(() => {
+    if (_savedRecurse !== undefined) process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
+    else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     globalThis.setInterval = originalSetInterval;
     if (vault) {
       cleanupWorktrees(vault);

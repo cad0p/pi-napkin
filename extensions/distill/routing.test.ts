@@ -132,8 +132,10 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
   let sm: SessionManager;
   let capturedInterval: (() => void) | null = null;
   let originalSetInterval: typeof setInterval;
+  const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
 
   beforeEach(() => {
+    delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     vault = createEnabledGitVault(60);
     sm = createSeededSession(vault);
 
@@ -161,6 +163,8 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
   });
 
   afterEach(() => {
+    if (_savedRecurse !== undefined) process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
+    else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     globalThis.setInterval = originalSetInterval;
     // Best-effort cleanup of any dangling worktrees + branches the detached
     // wrapper may have left during the test window.

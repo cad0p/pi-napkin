@@ -54,6 +54,15 @@ function call(overrides: Partial<Inputs> = {}): boolean {
 }
 
 describe("shouldDistillOnShutdown", () => {
+  // Clear the recursion-guard env var before every test — the test runner may
+  // itself be running inside a distill subprocess (NAPKIN_DISTILL_NO_RECURSE=1).
+  const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+  beforeEach(() => { delete process.env.NAPKIN_DISTILL_NO_RECURSE; });
+  afterEach(() => {
+    if (_savedRecurse !== undefined) process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
+    else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+  });
+
   test("baseline: all guards pass \u2192 true", () => {
     expect(call()).toBe(true);
   });
