@@ -10,13 +10,27 @@ import {
  * Default inputs that produce `true`. Each test below flips ONE input at a
  * time and asserts the expected guard fires, proving guard isolation and
  * guard order (earlier guards short-circuit later ones).
+ *
+ * Types are widened to the predicate's parameter types (not narrowed to the
+ * literal values below) so `call({...})` overrides don't collide with the
+ * inferred literal types.
  */
-const DEFAULTS = {
-  event: { reason: undefined } satisfies ShutdownDistillEvent,
+interface Inputs {
+  event: ShutdownDistillEvent;
+  config: ShouldDistillOnShutdownConfig;
+  autoDistillSuppressed: boolean;
+  sessionFile: string | undefined | null;
+  currentSize: number;
+  lastSpawnedSize: number;
+  lastSessionSize: number;
+}
+
+const DEFAULTS: Inputs = {
+  event: {},
   config: {
     enabled: true,
     onShutdown: true,
-  } satisfies ShouldDistillOnShutdownConfig,
+  },
   autoDistillSuppressed: false,
   sessionFile: "/tmp/session.jsonl",
   currentSize: 1024,
@@ -24,7 +38,7 @@ const DEFAULTS = {
   lastSessionSize: 0,
 };
 
-function call(overrides: Partial<typeof DEFAULTS> = {}): boolean {
+function call(overrides: Partial<Inputs> = {}): boolean {
   const i = { ...DEFAULTS, ...overrides };
   return shouldDistillOnShutdown(
     i.event,
