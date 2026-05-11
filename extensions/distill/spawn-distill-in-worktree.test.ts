@@ -395,3 +395,220 @@ describe("distill-wrapper.sh (integration)", () => {
     expect(r.status).toBe(2);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Partial-merge salvage tests. Forces a conflict between main and the distill
+// branch, stubs the merge driver via NAPKIN_DISTILL_MERGE_MOCK=fail so the
+// LLM path always 3-strikes, then verifies that:
+//   - clean files keep the distill's content
+//   - conflicted files revert to main's version
+//   - error log is written with file path + reason
+//   - main still receives a squash commit with the clean-file change
+//
+// Note: the wrapper self-heals .gitattributes via registerMergeDriver. The
+// vault fixture pre-scaffolds the same line so config drift doesn't affect
+// these assertions.
+// ---------------------------------------------------------------------------
+
+describe("distill-wrapper.sh (partial-merge salvage)", () => {
+  let vault: string;
+  let sessionDir: string;
+  let sessionFile: string;
+
+  beforeEach(() => {
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-salvage-src-"));
+    sessionFile = createSeededSessionFile(sessionDir, sessionDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  /**
+   * Run a git command in `dir`, throwing on non-zero exit. Used to build
+   * conflict-inducing state on the vault's main branch before invoking the
+   * wrapper.
+   */
+  function runGitOrThrow(dir: string, args: string[]): string {
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const r = spawnSync("git", ["-C", dir, ...args], {
+      env,
+      encoding: "utf-8",
+    });
+    if (r.status !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
+    }
+    return r.stdout;
+  }
+
+  /**
+   * Run the wrapper with the merge driver mocked to always fail. Pre-stages
+   * the given files in the worktree before invoking. Returns exit code +
+   * error log contents (read post-run from the vault's error dir).
+   */
+  function runWrapperWithMockFail(
+    workspace: DistillWorkspace,
+    worktreeFiles: Record<string, string>,
+  ): { exitCode: number; errorLogs: string[] } {
+    for (const [relPath, content] of Object.entries(worktreeFiles)) {
+      const abs = path.join(workspace.worktreePath, relPath);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content);
+    }
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "sh",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+      ],
+      {
+        cwd: workspace.worktreePath,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "test",
+          GIT_AUTHOR_EMAIL: "test@example.com",
+          GIT_COMMITTER_NAME: "test",
+          GIT_COMMITTER_EMAIL: "test@example.com",
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_SKIP_PI: "1",
+          NAPKIN_DISTILL_MERGE_MOCK: "fail",
+          // Speed up tests: no retry backoff.
+          NAPKIN_GIT_RETRY_MAX: "2",
+          NAPKIN_GIT_RETRY_DELAY: "0",
+        },
+      },
+    );
+    const errorLogs: string[] = [];
+    if (fs.existsSync(errorDir)) {
+      for (const f of fs.readdirSync(errorDir)) {
+        errorLogs.push(fs.readFileSync(path.join(errorDir, f), "utf-8"));
+      }
+    }
+    return { exitCode: r.status ?? -1, errorLogs };
+  }
+
+  test("clean file keeps distill's content, conflicted file reverts to main", () => {
+    // Baseline: main already has `conflict.md` and `clean.md` from the seed
+    // commit. Mutate `conflict.md` on main so the distill's version
+    // conflicts; leave `clean.md` untouched on main.
+    const conflictPath = path.join(vault, "conflict.md");
+    const cleanPath = path.join(vault, "clean.md");
+    fs.writeFileSync(
+      conflictPath,
+      "---\ntitle: conflict\n---\n# initial content\n",
+    );
+    fs.writeFileSync(
+      cleanPath,
+      "---\ntitle: clean\n---\n# initial clean content\n",
+    );
+    runGitOrThrow(vault, ["add", "-A"]);
+    runGitOrThrow(vault, ["commit", "-q", "-m", "add baseline files"]);
+
+    // Create workspace AFTER the baseline commit so the worktree sees both
+    // files. Then mutate main's copy of conflict.md to force a divergence.
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+    );
+
+    fs.writeFileSync(
+      conflictPath,
+      "---\ntitle: conflict\n---\n# MAIN's version after baseline\n",
+    );
+    runGitOrThrow(vault, ["add", "conflict.md"]);
+    runGitOrThrow(vault, ["commit", "-q", "-m", "main mutates conflict.md"]);
+
+    // Stage distill-branch changes in the worktree:
+    //   - conflict.md: different content → merge conflict
+    //   - clean.md:    modified, no conflict on main → clean merge
+    const r = runWrapperWithMockFail(workspace, {
+      "conflict.md":
+        "---\ntitle: conflict\n---\n# DISTILL's different version\n",
+      "clean.md": "---\ntitle: clean\n---\n# distill updated the clean file\n",
+    });
+
+    expect(r.exitCode).toBe(0);
+
+    // Worktree + branch cleaned up.
+    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
+    const branches = runGitOrThrow(vault, ["branch"]);
+    expect(branches).not.toContain(workspace.branchName);
+
+    // conflict.md on main = MAIN's version (salvage reverted distill's).
+    const conflictAfter = fs.readFileSync(conflictPath, "utf-8");
+    expect(conflictAfter).toContain("MAIN's version after baseline");
+    expect(conflictAfter).not.toContain("DISTILL's different version");
+
+    // clean.md on main = distill's version (merged cleanly).
+    const cleanAfter = fs.readFileSync(cleanPath, "utf-8");
+    expect(cleanAfter).toContain("distill updated the clean file");
+
+    // Error log written with the conflicted file path + reason.
+    expect(r.errorLogs.length).toBeGreaterThan(0);
+    const combined = r.errorLogs.join("\n");
+    expect(combined).toContain("conflict.md");
+    expect(combined).toContain("partial-merge");
+
+    // Main has a squash commit.
+    const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "5"]);
+    expect(log).toContain("distill: merge");
+  });
+
+  test("all files conflict: salvage reverts everything, no squash commit created", () => {
+    // Both distill's files collide with main, AND there are no clean files
+    // — the squash merge produces nothing new, so main should NOT get a
+    // distill commit. This verifies the empty-squash guard survives the
+    // salvage path.
+    const a = path.join(vault, "a.md");
+    fs.writeFileSync(a, "---\ntitle: a\n---\n# baseline\n");
+    runGitOrThrow(vault, ["add", "a.md"]);
+    runGitOrThrow(vault, ["commit", "-q", "-m", "add a"]);
+
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+    );
+
+    fs.writeFileSync(a, "---\ntitle: a\n---\n# MAIN's later version\n");
+    runGitOrThrow(vault, ["add", "a.md"]);
+    runGitOrThrow(vault, ["commit", "-q", "-m", "main mutates a"]);
+
+    const logBefore = runGitOrThrow(vault, ["log", "--oneline"]);
+
+    const r = runWrapperWithMockFail(workspace, {
+      "a.md": "---\ntitle: a\n---\n# DISTILL's different version\n",
+    });
+    expect(r.exitCode).toBe(0);
+
+    // Cleanup happened.
+    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
+
+    // Main unchanged: no new squash commit because all content was salvaged
+    // back to main's version.
+    const logAfter = runGitOrThrow(vault, ["log", "--oneline"]);
+    expect(logAfter).toBe(logBefore);
+
+    // Error log records the salvage.
+    expect(r.errorLogs.length).toBeGreaterThan(0);
+    expect(r.errorLogs.join("\n")).toContain("a.md");
+  });
+});
