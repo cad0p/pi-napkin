@@ -13,6 +13,7 @@ import type { AutocompleteItem } from "@mariozechner/pi-tui";
 
 import {
   cleanupDistillWorkspace,
+  cleanupStaleWorktrees,
   DistillError,
   type DistillWorkspace,
   spawnDistillInWorktree,
@@ -254,12 +255,13 @@ export default function (pi: ExtensionAPI) {
     // (if any) is re-read further down when distill is enabled for the session.
     autoDistillSuppressed = false;
 
-    let vaultConfigPath: string;
+    let napkinVault: { configPath: string; contentPath: string };
     try {
-      vaultConfigPath = new Napkin(ctx.cwd).vault.configPath;
+      napkinVault = new Napkin(ctx.cwd).vault;
     } catch {
       return;
     }
+    const vaultConfigPath = napkinVault.configPath;
 
     const { showStatus, distill: config } = loadVaultConfig(vaultConfigPath);
     if (!config.enabled) {
@@ -274,6 +276,14 @@ export default function (pi: ExtensionAPI) {
 
     // Skip if this is a distill subprocess
     if (process.env.NAPKIN_DISTILL_NO_RECURSE) return;
+
+    // Sweep out stale distill worktrees left behind by crashed pi sessions.
+    // Idempotent, best-effort — never throws, never blocks session_start.
+    try {
+      cleanupStaleWorktrees({ contentPath: napkinVault.contentPath });
+    } catch {
+      // swallow — cleanup is non-critical to session lifecycle
+    }
 
     // Restore the per-session pause state from the session file so that
     // resuming a session retains the `/distill-auto-this-session` setting.

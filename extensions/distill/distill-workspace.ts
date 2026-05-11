@@ -407,6 +407,139 @@ export function cleanupDistillWorkspace(
 }
 
 /**
+ * Parse `git worktree list --porcelain` output into a list of
+ * `{ path, branch }` pairs. Only returns entries that have a branch (skips
+ * detached-HEAD worktrees — we never create those for distills).
+ *
+ * Porcelain format is newline-separated records, each record is a block of
+ * `key value` lines terminated by a blank line. We care about `worktree`
+ * (absolute path) and `branch` (full ref, e.g. `refs/heads/distill/abc-1`).
+ */
+export function parseWorktreeList(
+  porcelain: string,
+): Array<{ path: string; branch: string }> {
+  const out: Array<{ path: string; branch: string }> = [];
+  let wt: string | null = null;
+  let branch: string | null = null;
+  const flush = () => {
+    if (wt && branch) out.push({ path: wt, branch });
+    wt = null;
+    branch = null;
+  };
+  for (const line of porcelain.split("\n")) {
+    if (line === "") {
+      flush();
+      continue;
+    }
+    if (line.startsWith("worktree ")) wt = line.slice("worktree ".length);
+    else if (line.startsWith("branch "))
+      branch = line.slice("branch ".length).replace(/^refs\/heads\//, "");
+  }
+  flush();
+  return out;
+}
+
+/**
+ * Liveness check: returns true if `pid` refers to a running process this
+ * user can see. Uses signal 0 (no-op) — throws ESRCH when the pid is dead,
+ * EPERM when it exists but is owned by another user (still "alive" from our
+ * perspective — don't clean up someone else's worktree).
+ */
+function isPidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    const e = err as NodeJS.ErrnoException;
+    // EPERM = exists but not signalable. Treat as alive (don't clobber).
+    return e.code === "EPERM";
+  }
+}
+
+/**
+ * Age threshold past which a worktree with a stale mtime on its meta.json is
+ * considered abandoned even if the meta.json is present. 60 minutes covers
+ * the MAX_DISTILL_DURATION_MS (10 min) with a wide margin — anything older
+ * than this either crashed silently or lost its pid (e.g. kernel reboot).
+ */
+export const STALE_META_AGE_MS = 60 * 60 * 1000;
+
+/**
+ * VaultInfo-shaped handle this module accepts. We rely only on `contentPath`
+ * (the vault root = the git main worktree root) — kept minimal so tests and
+ * callers don't have to construct a full Napkin instance.
+ */
+export interface StaleCleanupVault {
+  contentPath: string;
+}
+
+/**
+ * Remove distill worktrees that belong to dead sessions. Intended to run
+ * once per `session_start` so long-lived vaults don't accumulate debris
+ * from crashed pi instances.
+ *
+ * A worktree (branch matches `^distill/.*`) is removed if ANY of:
+ *   1. `<wt>/.napkin/distill/meta.json` is missing
+ *   2. meta.json's `pid` is not a running process
+ *   3. meta.json's mtime is older than STALE_META_AGE_MS
+ *
+ * Removal is best-effort: failures on one worktree don't abort the sweep.
+ *
+ * @returns number of worktrees removed.
+ */
+export function cleanupStaleWorktrees(vault: StaleCleanupVault): number {
+  const vaultPath = vault.contentPath;
+  // No git in the vault → nothing to clean up. session_start may call us
+  // before auto-init runs on first launch.
+  if (!fs.existsSync(path.join(vaultPath, ".git"))) return 0;
+
+  const listRes = runGit(vaultPath, ["worktree", "list", "--porcelain"]);
+  if (listRes.status !== 0) return 0;
+
+  const entries = parseWorktreeList(listRes.stdout).filter((e) =>
+    e.branch.startsWith("distill/"),
+  );
+
+  let removed = 0;
+  for (const entry of entries) {
+    try {
+      const metaPath = path.join(entry.path, DISTILL_SUBDIR, "meta.json");
+      let shouldRemove = false;
+
+      if (!fs.existsSync(metaPath)) {
+        shouldRemove = true;
+      } else {
+        let mtime = 0;
+        try {
+          mtime = fs.statSync(metaPath).mtimeMs;
+        } catch {
+          shouldRemove = true;
+        }
+        if (!shouldRemove) {
+          const meta = readDistillMeta(entry.path);
+          if (!meta) {
+            shouldRemove = true;
+          } else if (!isPidAlive(meta.pid)) {
+            shouldRemove = true;
+          } else if (Date.now() - mtime > STALE_META_AGE_MS) {
+            shouldRemove = true;
+          }
+        }
+      }
+
+      if (shouldRemove) {
+        removeDistillWorktree(vaultPath, entry.path, entry.branch);
+        removed += 1;
+      }
+    } catch {
+      // Per-worktree failure is non-fatal; keep sweeping.
+    }
+  }
+
+  return removed;
+}
+
+/**
  * Read a workspace's meta.json. Returns null if the file doesn't exist or
  * can't be parsed \u2014 callers treat this as "workspace is gone or stale".
  *

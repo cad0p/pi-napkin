@@ -8,6 +8,7 @@ import { SessionManager } from "@mariozechner/pi-coding-agent";
 
 import {
   cleanupDistillWorkspace,
+  cleanupStaleWorktrees,
   createDistillWorkspace,
   createDistillWorktree,
   DISTILL_SUBDIR,
@@ -15,6 +16,7 @@ import {
   DistillError,
   type DistillMeta,
   generateDistillBranchName,
+  parseWorktreeList,
   readDistillMeta,
   removeDistillWorktree,
 } from "./distill-workspace";
@@ -407,6 +409,202 @@ describe("readDistillMeta", () => {
       expect(readDistillMeta(dir)).toBeNull();
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/**
+ * Pick a pid that is not currently alive. We scan downward from 999999 so
+ * we don't flake on systems where pid_max is low. Signal 0 throws ESRCH
+ * when the pid is dead.
+ */
+function findDeadPid(): number {
+  for (let pid = 999_999; pid > 1000; pid -= 1) {
+    try {
+      process.kill(pid, 0);
+      // alive — keep scanning
+    } catch (err) {
+      const e = err as NodeJS.ErrnoException;
+      if (e.code === "ESRCH") return pid;
+      // EPERM means it exists but we can't signal it — skip
+    }
+  }
+  throw new Error("could not locate a dead pid in test range");
+}
+
+describe("parseWorktreeList", () => {
+  test("parses main + branched worktree entries", () => {
+    const input = [
+      "worktree /tmp/vault",
+      "HEAD abc123",
+      "branch refs/heads/main",
+      "",
+      "worktree /tmp/vault/.napkin/distill-worktrees/aa-1",
+      "HEAD def456",
+      "branch refs/heads/distill/aa-1",
+      "",
+    ].join("\n");
+    const parsed = parseWorktreeList(input);
+    expect(parsed).toEqual([
+      { path: "/tmp/vault", branch: "main" },
+      {
+        path: "/tmp/vault/.napkin/distill-worktrees/aa-1",
+        branch: "distill/aa-1",
+      },
+    ]);
+  });
+
+  test("skips detached-HEAD entries (no branch line)", () => {
+    const input = [
+      "worktree /tmp/detached",
+      "HEAD abc123",
+      "detached",
+      "",
+    ].join("\n");
+    expect(parseWorktreeList(input)).toEqual([]);
+  });
+
+  test("handles trailing record without blank line", () => {
+    const input = [
+      "worktree /tmp/v",
+      "HEAD a",
+      "branch refs/heads/distill/x-1",
+    ].join("\n");
+    expect(parseWorktreeList(input)).toEqual([
+      { path: "/tmp/v", branch: "distill/x-1" },
+    ]);
+  });
+});
+
+describe("cleanupStaleWorktrees", () => {
+  let vault: string;
+  let sessionDir: string;
+  let sourceSession: string;
+
+  beforeEach(() => {
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "stale-wt-src-"));
+    sourceSession = createSeededSessionFile(sessionDir, sessionDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test("no-op when vault has no .git (returns 0)", () => {
+    const noGit = fs.mkdtempSync(path.join(os.tmpdir(), "no-git-vault-"));
+    try {
+      expect(cleanupStaleWorktrees({ contentPath: noGit })).toBe(0);
+    } finally {
+      fs.rmSync(noGit, { recursive: true, force: true });
+    }
+  });
+
+  test("leaves a live worktree alone (pid = self)", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    // createDistillWorkspace already sets meta.pid to process.pid.
+    try {
+      const removed = cleanupStaleWorktrees({ contentPath: vault });
+      expect(removed).toBe(0);
+      expect(fs.existsSync(w.worktreePath)).toBe(true);
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+
+  test("removes a worktree whose pid is dead", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    // Overwrite meta.json with a dead pid.
+    const meta = readDistillMeta(w.worktreePath);
+    if (!meta) throw new Error("meta expected");
+    meta.pid = findDeadPid();
+    fs.writeFileSync(w.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+    const removed = cleanupStaleWorktrees({ contentPath: vault });
+    expect(removed).toBe(1);
+    expect(fs.existsSync(w.worktreePath)).toBe(false);
+    const branches = spawnSync("git", ["-C", vault, "branch"], {
+      encoding: "utf-8",
+    }).stdout;
+    expect(branches).not.toContain(w.branchName);
+  });
+
+  test("removes a worktree whose meta.json is missing", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    fs.rmSync(w.metaPath);
+
+    const removed = cleanupStaleWorktrees({ contentPath: vault });
+    expect(removed).toBe(1);
+    expect(fs.existsSync(w.worktreePath)).toBe(false);
+  });
+
+  test("removes a worktree whose meta.json mtime is beyond the stale threshold", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    // Backdate meta.json by ~2 hours.
+    const old = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
+    fs.utimesSync(w.metaPath, old, old);
+
+    const removed = cleanupStaleWorktrees({ contentPath: vault });
+    expect(removed).toBe(1);
+    expect(fs.existsSync(w.worktreePath)).toBe(false);
+  });
+
+  test("ignores non-distill-branch worktrees", () => {
+    // Create a sibling worktree on a branch NOT under `distill/`.
+    const other = path.join(vault, "other-wt");
+    const res = spawnSync(
+      "git",
+      ["-C", vault, "worktree", "add", "-b", "feature/xyz", other, "HEAD"],
+      { encoding: "utf-8" },
+    );
+    if (res.status !== 0) {
+      throw new Error(`worktree setup failed: ${res.stderr}`);
+    }
+    try {
+      const removed = cleanupStaleWorktrees({ contentPath: vault });
+      expect(removed).toBe(0);
+      expect(fs.existsSync(other)).toBe(true);
+    } finally {
+      spawnSync("git", ["-C", vault, "worktree", "remove", "--force", other]);
+      spawnSync("git", ["-C", vault, "branch", "-D", "feature/xyz"]);
+    }
+  });
+
+  test("sweeps mixed state: live, dead-pid, missing-meta, feature-branch", () => {
+    // live: untouched meta.pid (self)
+    const live = createDistillWorkspace(vault, sourceSession);
+    // dead-pid
+    const deadPid = createDistillWorkspace(vault, sourceSession);
+    const meta = readDistillMeta(deadPid.worktreePath);
+    if (!meta) throw new Error("meta expected");
+    meta.pid = findDeadPid();
+    fs.writeFileSync(deadPid.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+    // missing-meta
+    const missing = createDistillWorkspace(vault, sourceSession);
+    fs.rmSync(missing.metaPath);
+    // feature-branch (not touched)
+    const feat = path.join(vault, "feat-wt");
+    const addRes = spawnSync(
+      "git",
+      ["-C", vault, "worktree", "add", "-b", "feature/unrelated", feat, "HEAD"],
+      { encoding: "utf-8" },
+    );
+    if (addRes.status !== 0) {
+      throw new Error(`worktree setup failed: ${addRes.stderr}`);
+    }
+
+    try {
+      const removed = cleanupStaleWorktrees({ contentPath: vault });
+      expect(removed).toBe(2);
+      expect(fs.existsSync(live.worktreePath)).toBe(true);
+      expect(fs.existsSync(deadPid.worktreePath)).toBe(false);
+      expect(fs.existsSync(missing.worktreePath)).toBe(false);
+      expect(fs.existsSync(feat)).toBe(true);
+    } finally {
+      cleanupDistillWorkspace(vault, live);
+      spawnSync("git", ["-C", vault, "worktree", "remove", "--force", feat]);
+      spawnSync("git", ["-C", vault, "branch", "-D", "feature/unrelated"]);
     }
   });
 });
