@@ -1,25 +1,47 @@
 /**
  * Per-distill workspace management.
  *
- * Each auto-distill invocation gets its own isolated workspace so concurrent
- * distills (interval, shutdown, or multiple pi sessions) don't race on vault
- * files. Phase B milestone 2 is the minimum layout; milestone 3 extends this
- * to use a real git worktree instead of a plain tmp dir.
+ * Each auto-distill invocation gets its own isolated git worktree so
+ * concurrent distills (interval, shutdown, or multiple pi sessions) don't
+ * race on vault files. Napkin resolves the vault from cwd, so a subprocess
+ * launched with cwd = worktree operates on the worktree's copy of the vault.
  *
- * Layout produced here (tmp-dir flavor, pre-worktree):
- *   <workspace-root>/
+ * Layout per worktree:
+ *   <worktree-root>/
  *     .napkin/
  *       distill/
  *         session.jsonl   # forked session, pi subprocess reads this
  *         meta.json       # DistillMeta, see below
+ *
+ * Lifecycle:
+ *   createDistillWorkspace(vault, sessionFile)
+ *     \u2192 createDistillWorktree(vault, branch, path)     (git worktree add -b ...)
+ *     \u2192 SessionManager.forkFrom \u2192 session.jsonl
+ *     \u2192 write meta.json
+ *   ... distill subprocess runs in worktree ...
+ *   removeDistillWorktree(vault, worktreePath, branch)
+ *     \u2192 git worktree remove --force <path>
+ *     \u2192 git branch -D <branch>
  */
 
+import { spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@mariozechner/pi-coding-agent";
+
+/**
+ * Error class thrown by distill-workspace operations. Separate class so
+ * callers can distinguish workspace-layer failures (worktree / git / fs)
+ * from generic Errors raised by the stdlib.
+ */
+export class DistillError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "DistillError";
+  }
+}
 
 /**
  * Metadata written to each distill workspace's `meta.json`. Consumed by the
@@ -43,18 +65,17 @@ export interface DistillMeta {
 }
 
 /**
- * Handle returned by `createDistillWorkspace`. All paths are absolute and live
- * inside the workspace root (which itself is either a tmp dir or a git
- * worktree rooted under `<vault>/.napkin/distill-worktrees/<branch>/`).
+ * Handle returned by `createDistillWorkspace`. All paths are absolute and
+ * live inside the worktree root.
  */
 export interface DistillWorkspace {
-  /** Workspace root (the `cwd` for the distill subprocess). */
+  /** Worktree root (the `cwd` for the distill subprocess). */
   worktreePath: string;
-  /** Branch name chosen for this distill (unique per invocation). */
+  /** Branch name created for this distill (unique per invocation). */
   branchName: string;
-  /** Path to the forked session .jsonl inside the workspace. */
+  /** Path to the forked session .jsonl inside the worktree. */
   sessionForkPath: string;
-  /** Path to meta.json inside the workspace. */
+  /** Path to meta.json inside the worktree. */
   metaPath: string;
 }
 
@@ -75,42 +96,164 @@ export function generateDistillBranchName(
 }
 
 /**
- * Relative path (from workspace root) of the distill `.napkin/distill/` dir.
- * Exported so tests and milestone-3 worktree code can reference the same
- * constant without stringly-typed drift.
+ * Relative path (from worktree root) of the distill `.napkin/distill/` dir.
  */
 export const DISTILL_SUBDIR = path.join(".napkin", "distill");
 
 /**
- * Create a distill workspace.
+ * Root directory where all distill worktrees live, relative to the vault.
+ * Gitignored by the Phase C auto-init scaffolding; worktrees should never be
+ * committed back to the vault.
+ */
+export const DISTILL_WORKTREES_SUBDIR = path.join(
+  ".napkin",
+  "distill-worktrees",
+);
+
+/**
+ * Throws `DistillError` if `vaultPath` is not a git repository. Phase B
+ * requires auto-distill to run in a git context; Phase C's auto-init wires
+ * session_start so this throw should never fire in practice for
+ * distill.enabled vaults.
+ */
+function assertVaultIsGitRepo(vaultPath: string): void {
+  const gitDir = path.join(vaultPath, ".git");
+  if (!fs.existsSync(gitDir)) {
+    throw new DistillError(
+      `vault not a git repo: ${vaultPath} (auto-distill requires git; Phase C wires auto-init)`,
+    );
+  }
+}
+
+/**
+ * Invoke `git` inside a specific cwd. Returns `{status, stdout, stderr}`.
+ * Does not throw on non-zero exit \u2014 callers decide how to react (retry,
+ * translate to DistillError, ignore, \u2026). 30s timeout per call is a sanity
+ * ceiling; normal git invocations complete in milliseconds.
+ */
+function runGit(
+  cwd: string,
+  args: string[],
+): { status: number | null; stdout: string; stderr: string } {
+  const r = spawnSync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    timeout: 30_000,
+  });
+  return {
+    status: r.status,
+    stdout: r.stdout ?? "",
+    stderr: r.stderr ?? "",
+  };
+}
+
+/**
+ * Create a git worktree at `worktreePath` checked out to a fresh branch
+ * `branchName` rooted at the vault's HEAD.
  *
- * Milestone 2 (this function): workspace is a fresh tmp directory under
- * `os.tmpdir()/napkin-distill-<branch-suffix>/`. No git involvement yet.
- * Milestone 3 replaces the tmp-dir creation with `git worktree add` (see
- * `createDistillWorktree`) and routes callers through
- * `spawnDistillInWorktree`.
+ * Precondition: vault is a git repo with at least one commit (HEAD
+ * resolvable). Phase C's auto-init ensures both.
+ *
+ * @throws DistillError if:
+ *   - vault has no `.git/` directory
+ *   - `git worktree add` exits non-zero (branch collision, dirty state, ...)
+ *
+ * @returns absolute worktree path on success (same as input, for chaining).
+ */
+export function createDistillWorktree(
+  vaultPath: string,
+  branchName: string,
+  worktreePath: string,
+): string {
+  assertVaultIsGitRepo(vaultPath);
+  // Ensure the parent of worktreePath exists; `git worktree add` requires a
+  // non-existent target directory but will happily create intermediate dirs
+  // for us \u2014 except when we're writing into `.napkin/distill-worktrees/`
+  // which only exists after first use.
+  fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
+
+  const res = runGit(vaultPath, [
+    "worktree",
+    "add",
+    "-b",
+    branchName,
+    worktreePath,
+    "HEAD",
+  ]);
+  if (res.status !== 0) {
+    throw new DistillError(
+      `git worktree add failed (exit ${res.status}): ${res.stderr.trim() || res.stdout.trim()}`,
+    );
+  }
+  return worktreePath;
+}
+
+/**
+ * Remove a distill worktree and delete its branch. Idempotent \u2014 logs and
+ * swallows errors because cleanup runs in shutdown / trap contexts where
+ * throwing would mask more interesting failures upstream.
+ *
+ * Order matters: remove the worktree first (which releases the branch), then
+ * delete the branch. Calling `git branch -D` while a worktree still holds
+ * the branch fails.
+ */
+export function removeDistillWorktree(
+  vaultPath: string,
+  worktreePath: string,
+  branchName: string,
+): void {
+  // Guard: vault may have been deleted between spawn and cleanup. Don't
+  // throw \u2014 treat as "nothing to clean up".
+  if (!fs.existsSync(path.join(vaultPath, ".git"))) return;
+
+  const rmRes = runGit(vaultPath, [
+    "worktree",
+    "remove",
+    "--force",
+    worktreePath,
+  ]);
+  // If worktree removal fails, try to prune stale entries and continue on to
+  // branch deletion; leaving a dangling branch is worse than a stale worktree.
+  if (rmRes.status !== 0) {
+    runGit(vaultPath, ["worktree", "prune"]);
+  }
+
+  // -D (force) in case the branch has unmerged content (expected: the squash
+  // merge to main doesn't mark it as merged).
+  runGit(vaultPath, ["branch", "-D", branchName]);
+}
+
+/**
+ * Create a distill workspace = a fresh git worktree + session fork + meta.
+ *
+ * Workflow:
+ *   1. Pick a unique branch name (`distill/<hex>-<epoch>`).
+ *   2. Compute worktree path: `<vault>/.napkin/distill-worktrees/<branch-suffix>/`.
+ *   3. `git worktree add -b <branch> <path> HEAD`.
+ *   4. Make `<wt>/.napkin/distill/`, fork the source session into it, write
+ *      meta.json.
+ *   5. Return handle.
+ *
+ * On failure at any step after the worktree exists, the worktree + branch are
+ * torn down via `removeDistillWorktree` so we never leak on throw.
  *
  * @param vault              Absolute path to the main vault (NOT a worktree).
- *                           Stored in meta.json for traceability.
- * @param sourceSessionFile  Absolute path to the parent session .jsonl. Forked
- *                           via `SessionManager.forkFrom` into the workspace.
- * @returns handle with absolute paths; caller spawns pi with
- *          `cwd=worktreePath` and `--session sessionForkPath`.
+ * @param sourceSessionFile  Absolute path to the parent session .jsonl.
  *
- * @throws if `sourceSessionFile` doesn't exist, isn't a valid session, or the
- *         fork itself fails. Partial tmp dirs are cleaned up on throw.
+ * @throws DistillError if vault isn't a git repo, worktree creation fails,
+ *         or session fork fails.
  */
 export function createDistillWorkspace(
   vault: string,
   sourceSessionFile: string,
 ): DistillWorkspace {
+  assertVaultIsGitRepo(vault);
+
   const branchName = generateDistillBranchName();
-  // Use the branch suffix (everything after `distill/`) as the tmp-dir tag so
-  // orphaned workspaces are traceable back to a branch name.
   const branchSuffix = branchName.slice("distill/".length);
-  const worktreePath = fs.mkdtempSync(
-    path.join(os.tmpdir(), `napkin-distill-${branchSuffix}-`),
-  );
+  const worktreePath = path.join(vault, DISTILL_WORKTREES_SUBDIR, branchSuffix);
+
+  createDistillWorktree(vault, branchName, worktreePath);
 
   try {
     const distillDir = path.join(worktreePath, DISTILL_SUBDIR);
@@ -118,8 +261,7 @@ export function createDistillWorkspace(
 
     // SessionManager.forkFrom writes to <sessionDir>/<uuid>.jsonl. We want a
     // deterministic name (`session.jsonl`) so the wrapper script can reference
-    // it without globbing, so we pass sessionDir and then rename the created
-    // file afterwards.
+    // it without globbing.
     const forkedSm = SessionManager.forkFrom(
       sourceSessionFile,
       worktreePath,
@@ -127,13 +269,13 @@ export function createDistillWorkspace(
     );
     const forkedFile = forkedSm.getSessionFile();
     if (!forkedFile) {
-      throw new Error("SessionManager.forkFrom did not produce a session file");
+      throw new DistillError(
+        "SessionManager.forkFrom did not produce a session file",
+      );
     }
 
     const sessionForkPath = path.join(distillDir, "session.jsonl");
     if (forkedFile !== sessionForkPath) {
-      // Idempotent: if a previous run somehow left session.jsonl, we want the
-      // fresh fork.
       if (fs.existsSync(sessionForkPath)) {
         fs.rmSync(sessionForkPath, { force: true });
       }
@@ -152,20 +294,36 @@ export function createDistillWorkspace(
 
     return { worktreePath, branchName, sessionForkPath, metaPath };
   } catch (err) {
-    // Best-effort cleanup; a leaked tmp dir is a minor annoyance, not a
-    // correctness issue.
-    fs.rmSync(worktreePath, { recursive: true, force: true });
+    // Roll back worktree + branch so we never leak on failure. The cleanup is
+    // itself best-effort; if it fails, the original error is what the caller
+    // cares about.
+    try {
+      removeDistillWorktree(vault, worktreePath, branchName);
+    } catch {
+      // ignore
+    }
     throw err;
   }
 }
 
 /**
- * Remove a distill workspace. Idempotent: safe to call multiple times, safe
- * to call on a path that doesn't exist. Used in the `sh -c` wrapper's trap
- * and in test teardown.
+ * Remove a distill workspace. Idempotent: safe to call on partial state and
+ * on a path that doesn't exist. Used by the `sh -c` wrapper's trap.
+ *
+ * Handles both the worktree + branch AND any leftover files inside the
+ * worktree path (e.g., if the worktree was partially torn down by git but the
+ * directory lingers).
  */
-export function cleanupDistillWorkspace(worktreePath: string): void {
-  fs.rmSync(worktreePath, { recursive: true, force: true });
+export function cleanupDistillWorkspace(
+  vault: string,
+  workspace: Pick<DistillWorkspace, "worktreePath" | "branchName">,
+): void {
+  removeDistillWorktree(vault, workspace.worktreePath, workspace.branchName);
+  // Best-effort remove any leftover directory (git worktree remove normally
+  // deletes it, but if the worktree was corrupted it may still exist).
+  if (fs.existsSync(workspace.worktreePath)) {
+    fs.rmSync(workspace.worktreePath, { recursive: true, force: true });
+  }
 }
 
 /**
