@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { SessionShutdownEvent } from "@mariozechner/pi-coding-agent";
 
 import {
   type ShouldDistillOnShutdownConfig,
-  type ShutdownDistillEvent,
   shouldDistillOnShutdown,
 } from "./should-distill-on-shutdown";
 
@@ -16,7 +16,7 @@ import {
  * inferred literal types.
  */
 interface Inputs {
-  event: ShutdownDistillEvent;
+  event: Pick<SessionShutdownEvent, "reason">;
   config: ShouldDistillOnShutdownConfig;
   autoDistillSuppressed: boolean;
   sessionFile: string | undefined | null;
@@ -26,7 +26,9 @@ interface Inputs {
 }
 
 const DEFAULTS: Inputs = {
-  event: {},
+  // pi 0.68+ guarantees a `reason` field \u2014 the baseline uses "quit" since that's the
+  // common path that should distill. Guard 2 (reload) is tested by overriding.
+  event: { reason: "quit" },
   config: {
     enabled: true,
     onShutdown: true,
@@ -112,12 +114,10 @@ describe("shouldDistillOnShutdown", () => {
       expect(call({ event: { reason: "quit" } })).toBe(true);
     });
 
-    test("reason undefined \u2192 true (current pi API has no reason field)", () => {
-      expect(call({ event: {} })).toBe(true);
-    });
-
-    test("reason other strings \u2192 true", () => {
-      for (const reason of ["new", "resume", "fork", "something-else"]) {
+    test("reason non-reload canonical values \u2192 true", () => {
+      // pi 0.68+ types `reason` as a literal union of these five values. Only
+      // "reload" short-circuits; the rest all allow distill.
+      for (const reason of ["quit", "new", "resume", "fork"] as const) {
         expect(call({ event: { reason } })).toBe(true);
       }
     });

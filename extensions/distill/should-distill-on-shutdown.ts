@@ -1,3 +1,5 @@
+import type { SessionShutdownEvent } from "@mariozechner/pi-coding-agent";
+
 /**
  * Pure predicate that decides whether a distill subprocess should be spawned
  * at session shutdown. No I/O, no side effects \u2014 callers assemble the inputs.
@@ -16,11 +18,9 @@
  *   9. currentSize === lastSessionSize     \u2192 false  (previous distill completed on this exact size)
  *   otherwise                              \u2192 true
  *
- * @param event                   Shutdown event. `reason` is optional because pi's
- *                                SessionShutdownEvent carries no `reason` field today
- *                                (checked against pi-coding-agent's types.d.ts). The
- *                                caller in phase B is responsible for populating it
- *                                (e.g., by tracking reload state via session_start).
+ * @param event                   Shutdown event from pi (SessionShutdownEvent). `reason` is
+ *                                a discriminated string present in pi >= 0.68.0 (the peer
+ *                                dep floor). Earlier versions are unsupported.
  * @param config                  Vault distill config.
  * @param autoDistillSuppressed   Session-scoped toggle from /distill-auto-this-session.
  * @param sessionFile             Path to the current session .jsonl, or undefined/empty
@@ -31,22 +31,13 @@
  *                                interval fired" without blocking new-content shutdowns.
  * @param lastSessionSize         Byte size captured at the last successful distill COMPLETION.
  */
-export interface ShutdownDistillEvent {
-  /**
-   * Optional because pi's `SessionShutdownEvent` does not currently include a
-   * `reason` field \u2014 the caller must detect a pending reload externally and
-   * pass it in. When absent, the reload guard is a no-op.
-   */
-  reason?: string;
-}
-
 export interface ShouldDistillOnShutdownConfig {
   enabled: boolean;
   onShutdown: boolean;
 }
 
 export function shouldDistillOnShutdown(
-  event: ShutdownDistillEvent,
+  event: Pick<SessionShutdownEvent, "reason">,
   config: ShouldDistillOnShutdownConfig,
   autoDistillSuppressed: boolean,
   sessionFile: string | undefined | null,

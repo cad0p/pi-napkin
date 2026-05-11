@@ -27,7 +27,7 @@
     "@cad0p/napkin": "*"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-coding-agent": ">=0.68.0",
     "@mariozechner/pi-tui": "*",
     "@sinclair/typebox": "*"
   },
