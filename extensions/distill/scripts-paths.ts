@@ -22,3 +22,9 @@ export const MERGE_DRIVER_SCRIPT: string = path.join(
   SCRIPTS_DIR,
   "napkin-distill-merge",
 );
+
+/** Absolute path to the distill orchestration wrapper (bash). */
+export const DISTILL_WRAPPER_SCRIPT: string = path.join(
+  SCRIPTS_DIR,
+  "distill-wrapper.sh",
+);

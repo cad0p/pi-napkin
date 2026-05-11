@@ -24,14 +24,15 @@
  *     \u2192 git branch -D <branch>
  */
 
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { Napkin } from "@cad0p/napkin";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 
-import { MERGE_DRIVER_SCRIPT } from "./scripts-paths";
+import { DISTILL_WRAPPER_SCRIPT, MERGE_DRIVER_SCRIPT } from "./scripts-paths";
 
 /**
  * Error class thrown by distill-workspace operations. Separate class so
@@ -432,4 +433,110 @@ export function readDistillMeta(worktreePath: string): DistillMeta | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Result of `spawnDistillInWorktree` — returned for bookkeeping and tests.
+ * The caller typically stores nothing beyond `workspace.branchName` so
+ * `/distill-status` can later discover active workspaces by scanning
+ * `.napkin/distill-worktrees/` and reading their `meta.json`.
+ */
+export interface SpawnDistillResult {
+  workspace: DistillWorkspace;
+  /** PID of the detached wrapper. The parent process MUST NOT wait on it. */
+  pid: number;
+}
+
+/**
+ * Arguments to `spawnDistillInWorktree`. Separated as an interface so callers
+ * don't have to remember positional arg order — and so tests can supply the
+ * `spawn` override without pulling in the full function signature.
+ */
+export interface SpawnDistillOptions {
+  /** Absolute path to the main vault (NOT a worktree). */
+  vault: string;
+  /** Absolute path to the current session .jsonl to fork from. */
+  sessionFile: string;
+  /** Prompt passed to `pi -p`. */
+  prompt: string;
+  /** Optional model override, `<provider>/<id>`. Undefined → pi's default. */
+  model?: string;
+  /**
+   * Override for the `spawn` function — wired by unit tests to capture calls
+   * without actually starting processes. Defaults to the node:child_process
+   * export at module load time.
+   */
+  spawnFn?: typeof spawn;
+}
+
+/**
+ * Spawn a detached wrapper that performs the full auto-distill lifecycle
+ * (pi → commit → merge → squash → cleanup) inside a per-distill worktree.
+ *
+ * Parent returns synchronously after the child is `unref`'d; the wrapper
+ * survives parent exit (this is critical for shutdown distill — the parent
+ * pi session is exiting, and the wrapper keeps running). All error paths
+ * write to `<vault>/.napkin/distill/errors/` and do NOT block the parent.
+ *
+ * @throws DistillError if the workspace can't be created (git not a repo,
+ *         branch collision, fork failure, …). Errors at this layer are
+ *         unrecoverable by the caller beyond logging — no child to clean up
+ *         (workspace creation rolled back on throw).
+ */
+export function spawnDistillInWorktree(
+  opts: SpawnDistillOptions,
+): SpawnDistillResult {
+  const { vault, sessionFile, prompt, model } = opts;
+  const spawnFn = opts.spawnFn ?? spawn;
+
+  const workspace = createDistillWorkspace(vault, sessionFile);
+
+  // Error dir lives on the MAIN vault (not in the worktree — worktrees are
+  // removed on cleanup, which would lose the logs). Resolve via Napkin's
+  // configPath so legacy (~/.napkin) and new (<content>/.napkin) layouts
+  // both work.
+  let errorDir: string;
+  try {
+    errorDir = path.join(
+      new Napkin(vault).vault.configPath,
+      "distill",
+      "errors",
+    );
+  } catch {
+    // Fallback: write under the vault itself. Shouldn't happen since the
+    // vault resolved successfully upstream, but defensive — better than
+    // throwing out of a spawn call.
+    errorDir = path.join(vault, ".napkin", "distill", "errors");
+  }
+  fs.mkdirSync(errorDir, { recursive: true });
+
+  const wrapperArgs = [
+    DISTILL_WRAPPER_SCRIPT,
+    vault,
+    workspace.worktreePath,
+    workspace.branchName,
+    workspace.sessionForkPath,
+    prompt,
+    errorDir,
+    model ?? "",
+  ];
+
+  // Detached spawn: stdio "ignore" + unref() so the parent can exit cleanly
+  // while the wrapper continues. cwd is the worktree so if the wrapper itself
+  // crashes before `cd`, any core-dumps etc. land inside the disposable area.
+  const proc = spawnFn("sh", wrapperArgs, {
+    cwd: workspace.worktreePath,
+    detached: true,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      NAPKIN_DISTILL_NO_RECURSE: "1",
+    },
+  });
+  proc.unref();
+
+  return {
+    workspace,
+    pid: proc.pid ?? -1,
+  };
 }
