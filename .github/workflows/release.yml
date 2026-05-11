@@ -13,12 +13,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - run: npm install
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Lint
-        run: npx @biomejs/biome check extensions/
+        run: pnpm lint
 
   release:
     needs: lint
@@ -35,11 +39,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
-      - run: npm install
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - name: Publish to npm
         run: npm publish --access public
         env:

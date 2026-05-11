@@ -16,10 +16,12 @@
   },
   "scripts": {
     "lint": "biome check extensions/",
-    "lint:fix": "biome check --write extensions/"
+    "lint:fix": "biome check --write extensions/",
+    "test": "bun test"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.3.14"
+    "@biomejs/biome": "^2.3.14",
+    "@types/bun": "latest"
   },
   "dependencies": {
     "@cad0p/napkin": "*"
