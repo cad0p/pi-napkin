@@ -10,6 +10,7 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import type { AutocompleteItem } from "@mariozechner/pi-tui";
+import { Type } from "@sinclair/typebox";
 import {
   countTrackedFiles,
   ensureVaultReadyForAutoDistill,
@@ -923,6 +924,40 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
+
+  // Parallel pi tool: the LLM can query the same state the human gets from
+  // /distill-status. Used by agents to decide whether to back off from
+  // vault edits while a background distill is in flight (see also the
+  // before_agent_start overlap injection next commit).
+  pi.registerTool({
+    name: "napkin_distill_status",
+    label: "Napkin distill status",
+    description:
+      "Returns JSON listing active napkin distill subprocesses and unmerged distill branches for the current vault. Useful for checking if background vault writes are in progress before the agent makes concurrent edits.",
+    promptSnippet:
+      "Inspect in-flight napkin distill subprocesses before editing vault files.",
+    parameters: Type.Object({}),
+    async execute(_toolCallId, _params, _signal, _onUpdate, ctx) {
+      const vaultPath = resolveVaultPath(ctx.cwd);
+      if (!vaultPath) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ error: "no vault in cwd" }),
+            },
+          ],
+          details: { vault: null, active: [], unmerged: [] },
+        };
+      }
+      const { active, unmerged } = collectDistillStatus(vaultPath);
+      const json = distillStatusToJson(active, unmerged);
+      return {
+        content: [{ type: "text", text: json }],
+        details: { vault: vaultPath, active, unmerged },
+      };
+    },
+  });
 }
 
 /**
@@ -986,4 +1021,55 @@ export function formatDistillStatus(
   }
 
   return lines.join("\n");
+}
+
+/**
+ * Serialise the same `(active, unmerged)` payload that `/distill-status`
+ * renders to a JSON string for the `napkin_distill_status` pi tool. Pure
+ * function; exported for unit tests.
+ *
+ * Return shape (see shutdown-distill.md — `/distill-status` command):
+ *   {
+ *     "active": [
+ *       {
+ *         pid: number,         // -1 when meta.json is unreadable
+ *         branch: string,
+ *         elapsedSeconds: number,
+ *         session: string|null, // basename of parent session .jsonl
+ *         alive: boolean,
+ *         startedAt: string|null,
+ *         startSha?: string,
+ *       }
+ *     ],
+ *     "unmerged": ["distill/xyz-456", ...]
+ *   }
+ *
+ * `session` is the basename of the parent session file (matching the
+ * human-readable formatter) — the full path isn't useful to the agent and
+ * would leak $HOME. `elapsedSeconds` is an integer (floor).
+ *
+ * `alive` and `startSha` are retained because they materially change how
+ * the agent should interpret an entry (dead distills are candidates for
+ * manual cleanup; `startSha` is a forensic hint for recovery).
+ *
+ * Shape is stable: new keys may be added, existing keys MUST NOT be renamed
+ * or repurposed without a version bump.
+ */
+export function distillStatusToJson(
+  active: ActiveDistill[],
+  unmerged: string[],
+): string {
+  const payload = {
+    active: active.map((d) => ({
+      pid: d.pid,
+      branch: d.branch,
+      elapsedSeconds: Math.floor(d.elapsedMs / 1000),
+      session: d.sessionPath !== null ? path.basename(d.sessionPath) : null,
+      alive: d.alive,
+      startedAt: d.startedAt,
+      startSha: d.startSha,
+    })),
+    unmerged,
+  };
+  return JSON.stringify(payload, null, 2);
 }

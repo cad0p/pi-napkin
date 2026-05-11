@@ -836,3 +836,47 @@ export function getUnmergedDistillBranches(vault: StaleCleanupVault): string[] {
 
   return branches.filter((b) => !inWorktrees.has(b));
 }
+
+/**
+ * Return the list of files an active distill worktree has changed since
+ * it forked from the vault's HEAD. Used by the `before_agent_start`
+ * overlap detector.
+ *
+ * Strategy:
+ *   - When `startSha` is recorded in meta.json (Phase C2+), diff
+ *     `<startSha>..HEAD` inside the worktree. That gives exactly the set
+ *     of files the distill has committed.
+ *   - When `startSha` is absent (legacy meta.json), fall back to
+ *     `git status --porcelain` inside the worktree — captures both
+ *     committed-and-not-merged AND uncommitted changes. Less precise but
+ *     still useful for overlap detection.
+ *
+ * All paths are returned relative to the worktree root (which is the same
+ * as the vault root from a tracking perspective). Returns `[]` on any
+ * error — overlap detection is best-effort and must not throw.
+ */
+export function diffWorktreeSinceStart(
+  active: Pick<ActiveDistill, "worktreePath" | "startSha">,
+): string[] {
+  if (!fs.existsSync(active.worktreePath)) return [];
+  if (active.startSha) {
+    const r = runGit(active.worktreePath, [
+      "diff",
+      "--name-only",
+      `${active.startSha}..HEAD`,
+    ]);
+    if (r.status !== 0) return [];
+    return r.stdout
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0);
+  }
+  // Legacy fallback: uncommitted + committed changes (porcelain lists both).
+  // Format: `XY path` where XY is the 2-char status code.
+  const r = runGit(active.worktreePath, ["status", "--porcelain"]);
+  if (r.status !== 0) return [];
+  return r.stdout
+    .split("\n")
+    .map((l) => l.slice(3).trim())
+    .filter((l) => l.length > 0);
+}
