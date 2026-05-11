@@ -19,6 +19,8 @@ import {
   parseWorktreeList,
   readDistillMeta,
   removeDistillWorktree,
+  STALE_META_AGE_MS,
+  STALE_WORKTREE_MINUTES,
 } from "./distill-workspace";
 
 /**
@@ -606,5 +608,15 @@ describe("cleanupStaleWorktrees", () => {
       spawnSync("git", ["-C", vault, "worktree", "remove", "--force", feat]);
       spawnSync("git", ["-C", vault, "branch", "-D", "feature/unrelated"]);
     }
+  });
+});
+
+describe("STALE_WORKTREE_MINUTES constant", () => {
+  test("STALE_META_AGE_MS equals minutes * 60 * 1000", () => {
+    expect(STALE_META_AGE_MS).toBe(STALE_WORKTREE_MINUTES * 60 * 1000);
+  });
+
+  test("threshold is 60 minutes (documented default)", () => {
+    expect(STALE_WORKTREE_MINUTES).toBe(60);
   });
 });

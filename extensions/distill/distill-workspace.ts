@@ -457,12 +457,24 @@ function isPidAlive(pid: number): boolean {
 }
 
 /**
- * Age threshold past which a worktree with a stale mtime on its meta.json is
- * considered abandoned even if the meta.json is present. 60 minutes covers
- * the MAX_DISTILL_DURATION_MS (10 min) with a wide margin — anything older
- * than this either crashed silently or lost its pid (e.g. kernel reboot).
+ * Number of minutes past which a worktree with a stale mtime on its
+ * meta.json is considered abandoned — even if meta.json is still present.
+ *
+ * Covers `MAX_DISTILL_DURATION_MS` (10 minutes, defined in the extension
+ * factory) with a 6× margin, so a worktree older than this either crashed
+ * silently, lost its pid (e.g. kernel reboot), or somehow outlived its
+ * shutdown timeout. The window is deliberately generous: a false-positive
+ * here would clobber a slow-but-live distill, whereas waiting an extra
+ * 50 minutes to sweep a dead one is harmless.
  */
-export const STALE_META_AGE_MS = 60 * 60 * 1000;
+export const STALE_WORKTREE_MINUTES = 60;
+
+/**
+ * Same threshold expressed in milliseconds for the mtime comparison site.
+ * Kept as a separate export because existing callers (and tests) already
+ * import `STALE_META_AGE_MS` directly.
+ */
+export const STALE_META_AGE_MS = STALE_WORKTREE_MINUTES * 60 * 1000;
 
 /**
  * VaultInfo-shaped handle this module accepts. We rely only on `contentPath`
