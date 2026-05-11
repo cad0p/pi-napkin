@@ -210,7 +210,7 @@ describe("session_shutdown handler (Item 8)", () => {
   async function runLifecycle(
     vaultPath: string,
     sessionManager: SessionManager,
-    shutdownReason: "exit" | "reload" | "switch" | "error",
+    shutdownReason: "quit" | "reload" | "new" | "resume" | "fork",
   ): Promise<number> {
     const { api, captured } = makeMockAPI();
     distillExtension(api as never);
@@ -226,10 +226,21 @@ describe("session_shutdown handler (Item 8)", () => {
     return countWorktrees(vaultPath);
   }
 
-  test("spawns on normal exit with enabled config + git vault + content", async () => {
+  test("spawns on normal quit with enabled config + git vault + content", async () => {
     vault = createVault({ enabled: true });
     sm = createSession(vault);
-    const worktrees = await runLifecycle(vault, sm, "exit");
+    const worktrees = await runLifecycle(vault, sm, "quit");
+    expect(worktrees).toBe(1);
+  });
+
+  test("spawns on 'fork' reason (pi's session-fork shutdown)", async () => {
+    // Guard 2 only short-circuits on "reload"; every other real reason
+    // (quit/new/resume/fork) should let the predicate fall through to the
+    // content-based guards. This pins the behaviour for a reason that
+    // wasn't exercised by the quit-only happy-path test.
+    vault = createVault({ enabled: true });
+    sm = createSession(vault);
+    const worktrees = await runLifecycle(vault, sm, "fork");
     expect(worktrees).toBe(1);
   });
 
@@ -243,14 +254,14 @@ describe("session_shutdown handler (Item 8)", () => {
   test("does NOT spawn when config.onShutdown=false", async () => {
     vault = createVault({ enabled: true, onShutdown: false });
     sm = createSession(vault);
-    const worktrees = await runLifecycle(vault, sm, "exit");
+    const worktrees = await runLifecycle(vault, sm, "quit");
     expect(worktrees).toBe(0);
   });
 
   test("does NOT spawn when config.enabled=false", async () => {
     vault = createVault({ enabled: false });
     sm = createSession(vault);
-    const worktrees = await runLifecycle(vault, sm, "exit");
+    const worktrees = await runLifecycle(vault, sm, "quit");
     expect(worktrees).toBe(0);
   });
 
@@ -260,7 +271,7 @@ describe("session_shutdown handler (Item 8)", () => {
     // not even be flushed to disk yet. Either way, currentSize === 0 trips
     // shouldDistillOnShutdown's guard #7.
     sm = SessionManager.create(vault, vault);
-    const worktrees = await runLifecycle(vault, sm, "exit");
+    const worktrees = await runLifecycle(vault, sm, "quit");
     expect(worktrees).toBe(0);
   });
 
@@ -272,7 +283,7 @@ describe("session_shutdown handler (Item 8)", () => {
     // repo by the time session_shutdown runs.
     vault = createVault({ enabled: true }, /* withGit */ false);
     sm = createSession(vault);
-    const worktrees = await runLifecycle(vault, sm, "exit");
+    const worktrees = await runLifecycle(vault, sm, "quit");
     // Auto-init ran, so .git exists by shutdown, so the shutdown handler
     // does spawn a worktree.
     expect(fs.existsSync(path.join(vault, ".git"))).toBe(true);
@@ -285,7 +296,7 @@ describe("session_shutdown handler (Item 8)", () => {
     const before = process.env.NAPKIN_DISTILL_NO_RECURSE;
     process.env.NAPKIN_DISTILL_NO_RECURSE = "1";
     try {
-      const worktrees = await runLifecycle(vault, sm, "exit");
+      const worktrees = await runLifecycle(vault, sm, "quit");
       expect(worktrees).toBe(0);
     } finally {
       if (before === undefined) delete process.env.NAPKIN_DISTILL_NO_RECURSE;
@@ -310,7 +321,7 @@ describe("session_shutdown handler (Item 8)", () => {
       await captured.handlers.session_start({ reason: "new" }, ctx);
       // If this throws, the test fails \u2014 shutdown must be defensive.
       await expect(
-        captured.handlers.session_shutdown({ reason: "exit" }, ctx),
+        captured.handlers.session_shutdown({ reason: "quit" }, ctx),
       ).resolves.toBeUndefined();
     } finally {
       fs.rmSync(bogusCwd, { recursive: true, force: true });
@@ -330,7 +341,7 @@ describe("session_shutdown handler (Item 8)", () => {
       ui: null,
     };
     await captured.handlers.session_start({ reason: "new" }, ctx);
-    await captured.handlers.session_shutdown({ reason: "exit" }, ctx);
+    await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
     const first = countWorktrees(vault);
     expect(first).toBe(1);
 
@@ -342,7 +353,7 @@ describe("session_shutdown handler (Item 8)", () => {
     // twice in the same closure, but pi only fires it once per session. The
     // behavior is already unit-tested via shouldDistillOnShutdown; here we
     // just confirm the successful-spawn path writes lastSpawnedSize.
-    await captured.handlers.session_shutdown({ reason: "exit" }, ctx);
+    await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
     const second = countWorktrees(vault);
     // Second call in same closure should NOT create a new worktree \u2014
     // currentSize matches lastSpawnedSize from the first call. The first
