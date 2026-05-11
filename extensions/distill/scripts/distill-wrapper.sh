@@ -149,18 +149,12 @@ fi
 
 # --- Step 2: commit distill's changes on the distill branch. ---------------
 #
-# `.napkin/distill/` contains the session fork + meta.json + any error
-# artifacts for THIS distill — never commit them. `.napkin/distill-worktrees/`
-# is the vault's pool of sibling worktrees; belt-and-braces in case another
-# distill wrote files there during our run.
-# Phase C's auto-init will move these to a committed `.gitignore` in the vault;
-# until then, the pathspec excludes self-heal.
+# The vault's `.gitignore` (installed by extensions/distill/auto-setup.ts)
+# already excludes `.napkin/distill/` and `.napkin/distill-worktrees/`, so
+# a plain `git add -A` will not sweep in our session fork, meta.json, or
+# sibling worktrees. No pathspec excludes needed.
 
-git -C "$WORKTREE" add -A -- \
-  ':(exclude).napkin/distill' \
-  ':(exclude).napkin/distill/**' \
-  ':(exclude).napkin/distill-worktrees' \
-  ':(exclude).napkin/distill-worktrees/**'
+git -C "$WORKTREE" add -A
 # `git commit` exits non-zero if nothing is staged, which is legitimate: pi
 # may have concluded there was nothing worth distilling. Detect and continue.
 if git -C "$WORKTREE" diff --cached --quiet; then
