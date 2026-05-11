@@ -15,10 +15,13 @@ import {
   ensureVaultReadyForAutoDistill,
 } from "./auto-setup";
 import {
+  type ActiveDistill,
   cleanupDistillWorkspace,
   cleanupStaleWorktrees,
   DistillError,
   type DistillWorkspace,
+  getActiveDistills,
+  getUnmergedDistillBranches,
   spawnDistillInWorktree,
 } from "./distill-workspace";
 import { shouldDistillOnShutdown } from "./should-distill-on-shutdown";
@@ -870,4 +873,117 @@ export default function (pi: ExtensionAPI) {
       }
     },
   });
+
+  // ---------------------------------------------------------------------------
+  // /distill-status and napkin_distill_status
+  //
+  // Shared state: both surfaces read the exact same data (active worktrees +
+  // unmerged branches) via module-level `collectDistillStatus`. The command
+  // formats it for humans via `formatDistillStatus`; the tool returns the
+  // JSON shape for the agent via `distillStatusToJson`. The formatters are
+  // module-level + exported so tests can verify their output without wiring
+  // a full mock `ExtensionAPI`.
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Resolve the main vault path from a command/tool `ctx`. Returns null when
+   * no vault can be resolved (ctx.cwd isn't inside a napkin vault) — callers
+   * surface a user-facing message in that case.
+   */
+  function resolveVaultPath(cwd: string): string | null {
+    try {
+      return new Napkin(cwd).vault.contentPath;
+    } catch {
+      return null;
+    }
+  }
+
+  pi.registerCommand("distill-status", {
+    description: "Show active auto-distill processes for the current vault",
+    handler: async (_args, ctx) => {
+      const vaultPath = resolveVaultPath(ctx.cwd);
+      if (!vaultPath) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            "No napkin vault resolved from current directory.",
+            "warning",
+          );
+        }
+        return;
+      }
+
+      const { active, unmerged } = collectDistillStatus(vaultPath);
+      const msg = formatDistillStatus(active, unmerged);
+
+      if (ctx.hasUI) {
+        ctx.ui.notify(msg, "info");
+      } else {
+        // Headless pi: surface via stdout so `pi -p /distill-status ...` works.
+        console.log(msg);
+      }
+    },
+  });
+}
+
+/**
+ * Gather the shared status payload consumed by both `/distill-status` and
+ * `napkin_distill_status`. Empty arrays on any error (no git, git failure)
+ * — status surfaces must never throw.
+ *
+ * Exported for unit tests. Callers pass the MAIN vault content path (not a
+ * worktree). Both inspectors return [] when `.git/` is absent.
+ */
+export function collectDistillStatus(vaultPath: string): {
+  active: ActiveDistill[];
+  unmerged: string[];
+} {
+  const active = getActiveDistills({ contentPath: vaultPath });
+  const unmerged = getUnmergedDistillBranches({ contentPath: vaultPath });
+  return { active, unmerged };
+}
+
+/**
+ * Format the `/distill-status` human-readable string. Pure function; exported
+ * for unit tests.
+ *
+ * Output shape (matches the spec "Output format" block in shutdown-distill.md):
+ *
+ *   Active distills (N):
+ *     [PID] Xs  branch=distill/abc-123  session=<basename>
+ *     ...
+ *   Unmerged branches (M):
+ *     distill/xyz-456  (no active process)
+ *
+ * Zero-active case collapses to the single line `"No active distills."`
+ * when there are also zero unmerged branches; otherwise the Unmerged block
+ * still renders so the user can see lingering refs.
+ */
+export function formatDistillStatus(
+  active: ActiveDistill[],
+  unmerged: string[],
+): string {
+  const lines: string[] = [];
+  if (active.length === 0) {
+    lines.push("No active distills.");
+  } else {
+    lines.push(`Active distills (${active.length}):`);
+    for (const d of active) {
+      const elapsed = `${Math.floor(d.elapsedMs / 1000)}s`;
+      const session =
+        d.sessionPath !== null ? path.basename(d.sessionPath) : "unknown";
+      const liveness = d.alive ? "" : " (dead)";
+      lines.push(
+        `  [${d.pid}] ${elapsed}  branch=${d.branch}  session=${session}${liveness}`,
+      );
+    }
+  }
+
+  if (unmerged.length > 0) {
+    lines.push(`Unmerged branches (${unmerged.length}):`);
+    for (const b of unmerged) {
+      lines.push(`  ${b}  (no active process)`);
+    }
+  }
+
+  return lines.join("\n");
 }

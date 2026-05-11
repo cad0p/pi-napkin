@@ -16,6 +16,8 @@ import {
   DistillError,
   type DistillMeta,
   generateDistillBranchName,
+  getActiveDistills,
+  getUnmergedDistillBranches,
   parseWorktreeList,
   readDistillMeta,
   removeDistillWorktree,
@@ -618,5 +620,241 @@ describe("STALE_WORKTREE_MINUTES constant", () => {
 
   test("threshold is 60 minutes (documented default)", () => {
     expect(STALE_WORKTREE_MINUTES).toBe(60);
+  });
+});
+
+describe("createDistillWorkspace records startSha", () => {
+  let vault: string;
+  let sessionDir: string;
+  let sourceSession: string;
+
+  beforeEach(() => {
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "startsha-src-"));
+    sourceSession = createSeededSessionFile(sessionDir, sessionDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test("meta.json.startSha matches vault HEAD at create-time", () => {
+    const headRes = spawnSync("git", ["-C", vault, "rev-parse", "HEAD"], {
+      encoding: "utf-8",
+    });
+    const expectedSha = headRes.stdout.trim();
+
+    const w = createDistillWorkspace(vault, sourceSession);
+    try {
+      const meta = readDistillMeta(w.worktreePath);
+      expect(meta).not.toBeNull();
+      expect(meta?.startSha).toBe(expectedSha);
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+});
+
+describe("getActiveDistills", () => {
+  let vault: string;
+  let sessionDir: string;
+  let sourceSession: string;
+  const toCleanup: { worktreePath: string; branchName: string }[] = [];
+
+  beforeEach(() => {
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "active-src-"));
+    sourceSession = createSeededSessionFile(sessionDir, sessionDir);
+  });
+
+  afterEach(() => {
+    for (const w of toCleanup) {
+      try {
+        cleanupDistillWorkspace(vault, w);
+      } catch {
+        // ignore — test teardown only
+      }
+    }
+    toCleanup.length = 0;
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test("returns [] when vault has no .git", () => {
+    const noGit = fs.mkdtempSync(path.join(os.tmpdir(), "no-git-active-"));
+    try {
+      expect(getActiveDistills({ contentPath: noGit })).toEqual([]);
+    } finally {
+      fs.rmSync(noGit, { recursive: true, force: true });
+    }
+  });
+
+  test("returns [] when there are no distill worktrees", () => {
+    expect(getActiveDistills({ contentPath: vault })).toEqual([]);
+  });
+
+  test("returns one entry per distill worktree with live pid (self)", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    toCleanup.push(w);
+
+    const active = getActiveDistills({ contentPath: vault });
+    expect(active.length).toBe(1);
+    const [a] = active;
+    expect(a.branch).toBe(w.branchName);
+    expect(a.worktreePath).toBe(w.worktreePath);
+    expect(a.pid).toBe(process.pid);
+    expect(a.alive).toBe(true);
+    expect(a.sessionPath).toBe(sourceSession);
+    expect(a.startedAt).not.toBeNull();
+    expect(a.elapsedMs).toBeGreaterThanOrEqual(0);
+    expect(a.startSha).toMatch(/^[0-9a-f]{7,64}$/);
+  });
+
+  test("reports alive=false for worktrees whose pid is dead", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    toCleanup.push(w);
+
+    // Overwrite meta.pid with a dead pid. Reuse test helper.
+    const meta = readDistillMeta(w.worktreePath);
+    if (!meta) throw new Error("meta expected");
+    meta.pid = findDeadPid();
+    fs.writeFileSync(w.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+    const active = getActiveDistills({ contentPath: vault });
+    expect(active.length).toBe(1);
+    expect(active[0].alive).toBe(false);
+  });
+
+  test("ignores non-distill worktrees", () => {
+    const other = path.join(vault, "feat-wt");
+    const addRes = spawnSync(
+      "git",
+      ["-C", vault, "worktree", "add", "-b", "feature/zzz", other, "HEAD"],
+      { encoding: "utf-8" },
+    );
+    if (addRes.status !== 0) throw new Error(addRes.stderr);
+    try {
+      expect(getActiveDistills({ contentPath: vault })).toEqual([]);
+    } finally {
+      spawnSync("git", ["-C", vault, "worktree", "remove", "--force", other]);
+      spawnSync("git", ["-C", vault, "branch", "-D", "feature/zzz"]);
+    }
+  });
+
+  test("mixed state: two distills + one feature branch", () => {
+    const a = createDistillWorkspace(vault, sourceSession);
+    toCleanup.push(a);
+    const b = createDistillWorkspace(vault, sourceSession);
+    toCleanup.push(b);
+    const feat = path.join(vault, "feat-wt-2");
+    spawnSync(
+      "git",
+      ["-C", vault, "worktree", "add", "-b", "feature/other", feat, "HEAD"],
+      { encoding: "utf-8" },
+    );
+
+    try {
+      const active = getActiveDistills({ contentPath: vault });
+      const branches = active.map((e) => e.branch).sort();
+      expect(branches).toEqual([a.branchName, b.branchName].sort());
+    } finally {
+      spawnSync("git", ["-C", vault, "worktree", "remove", "--force", feat]);
+      spawnSync("git", ["-C", vault, "branch", "-D", "feature/other"]);
+    }
+  });
+
+  test("tolerates missing meta.json (reports alive=false, pid=-1)", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    toCleanup.push(w);
+    fs.rmSync(w.metaPath);
+
+    const active = getActiveDistills({ contentPath: vault });
+    expect(active.length).toBe(1);
+    expect(active[0].pid).toBe(-1);
+    expect(active[0].alive).toBe(false);
+    expect(active[0].startedAt).toBeNull();
+    expect(active[0].sessionPath).toBeNull();
+  });
+});
+
+describe("getUnmergedDistillBranches", () => {
+  let vault: string;
+  let sessionDir: string;
+  let sourceSession: string;
+
+  beforeEach(() => {
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "unmerged-src-"));
+    sourceSession = createSeededSessionFile(sessionDir, sessionDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test("returns [] when no distill branches exist", () => {
+    expect(getUnmergedDistillBranches({ contentPath: vault })).toEqual([]);
+  });
+
+  test("returns [] when vault has no .git", () => {
+    const noGit = fs.mkdtempSync(path.join(os.tmpdir(), "unmerged-no-git-"));
+    try {
+      expect(getUnmergedDistillBranches({ contentPath: noGit })).toEqual([]);
+    } finally {
+      fs.rmSync(noGit, { recursive: true, force: true });
+    }
+  });
+
+  test("skips branches that are checked out in a worktree", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    try {
+      // w.branchName is live (in a worktree) → NOT unmerged.
+      expect(getUnmergedDistillBranches({ contentPath: vault })).toEqual([]);
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+
+  test("reports distill branches with no worktree", () => {
+    // Create a distill branch WITHOUT a worktree — simulates a crashed distill
+    // whose worktree was removed but whose branch ref lingers.
+    const branch = "distill/orphan-1700000000";
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const res = spawnSync("git", ["-C", vault, "branch", branch], {
+      encoding: "utf-8",
+      env,
+    });
+    if (res.status !== 0) throw new Error(res.stderr);
+
+    try {
+      expect(getUnmergedDistillBranches({ contentPath: vault })).toEqual([
+        branch,
+      ]);
+    } finally {
+      spawnSync("git", ["-C", vault, "branch", "-D", branch]);
+    }
+  });
+
+  test("mixed: one live worktree + one orphan branch → returns only orphan", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    const orphan = "distill/zz-1700000001";
+    spawnSync("git", ["-C", vault, "branch", orphan]);
+
+    try {
+      expect(getUnmergedDistillBranches({ contentPath: vault })).toEqual([
+        orphan,
+      ]);
+    } finally {
+      spawnSync("git", ["-C", vault, "branch", "-D", orphan]);
+      cleanupDistillWorkspace(vault, w);
+    }
   });
 });

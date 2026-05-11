@@ -65,6 +65,17 @@ export interface DistillMeta {
   startedAt: string;
   /** Absolute path to the parent session's .jsonl (for traceability). */
   parentSession: string;
+  /**
+   * HEAD commit SHA (in the main repo) at the moment the worktree was
+   * created. Used by the `before_agent_start` overlap detector to scope
+   * `git diff` to just the files this distill has written so far:
+   *
+   *   git -C <worktreePath> diff --name-only <startSha>..HEAD
+   *
+   * Absent on meta.json files written by pre-Phase-C2 code paths — readers
+   * MUST tolerate undefined and fall back to scanning the whole worktree.
+   */
+  startSha?: string;
 }
 
 /**
@@ -333,6 +344,20 @@ export function createDistillWorkspace(
   const branchSuffix = branchName.slice("distill/".length);
   const worktreePath = path.join(vault, DISTILL_WORKTREES_SUBDIR, branchSuffix);
 
+  // Capture HEAD SHA BEFORE the worktree is created so meta.json records
+  // the exact commit the distill started from. Used by the overlap detector
+  // (before_agent_start hook) to diff only files this distill has written.
+  // Failure to resolve HEAD is not fatal — leave `startSha` undefined and
+  // let the overlap detector fall back to scanning the whole worktree.
+  let startSha: string | undefined;
+  {
+    const headRes = runGit(vault, ["rev-parse", "HEAD"]);
+    if (headRes.status === 0) {
+      const sha = headRes.stdout.trim();
+      if (/^[0-9a-f]{7,64}$/.test(sha)) startSha = sha;
+    }
+  }
+
   createDistillWorktree(vault, branchName, worktreePath);
 
   try {
@@ -369,6 +394,7 @@ export function createDistillWorkspace(
       branch: branchName,
       startedAt: new Date().toISOString(),
       parentSession: sourceSessionFile,
+      startSha,
     };
     fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
 
@@ -684,4 +710,129 @@ export function spawnDistillInWorktree(
     workspace,
     pid: proc.pid ?? -1,
   };
+}
+
+// ============================================================================
+// Status helpers (/distill-status + napkin_distill_status tool, Phase C2)
+// ============================================================================
+
+/**
+ * Shape returned by `getActiveDistills`. Each entry represents a worktree
+ * currently present under `<vault>/.napkin/distill-worktrees/` on a
+ * `distill/*` branch. Liveness (`alive`) is decided at read time via
+ * `process.kill(pid, 0)`, so a freshly crashed wrapper is reported with
+ * `alive: false` (and `/distill-status` renders it as stale).
+ *
+ * Fields are kept flat + JSON-friendly so the pi tool can serialize the
+ * array directly.
+ */
+export interface ActiveDistill {
+  pid: number;
+  branch: string;
+  worktreePath: string;
+  /** ISO-8601 timestamp from meta.json. Null if meta.json is unparseable. */
+  startedAt: string | null;
+  /** Milliseconds since `startedAt`. 0 when `startedAt` is null. */
+  elapsedMs: number;
+  /** Absolute path to the parent session's .jsonl. Null if unavailable. */
+  sessionPath: string | null;
+  /** `process.kill(pid, 0)` result — true if the pid is signalable. */
+  alive: boolean;
+  /**
+   * HEAD SHA from meta.json when the worktree was created. Undefined for
+   * pre-Phase-C2 meta files. Used by the overlap injector to diff only
+   * files this distill has written.
+   */
+  startSha?: string;
+}
+
+/**
+ * Enumerate active distill worktrees for a vault.
+ *
+ * An "active distill" is a git worktree whose branch is named `distill/*`.
+ * We do NOT filter by pid liveness here — dead entries are still reported
+ * so the UI can distinguish "in flight" from "crashed, needs cleanup". The
+ * caller decides how to render them.
+ *
+ * Returns an empty array on any error (missing .git, `git worktree list`
+ * failure, etc.). Never throws: this is called from UI paths that must not
+ * block on git hiccups.
+ */
+export function getActiveDistills(vault: StaleCleanupVault): ActiveDistill[] {
+  const vaultPath = vault.contentPath;
+  if (!fs.existsSync(path.join(vaultPath, ".git"))) return [];
+
+  const listRes = runGit(vaultPath, ["worktree", "list", "--porcelain"]);
+  if (listRes.status !== 0) return [];
+
+  const entries = parseWorktreeList(listRes.stdout).filter((e) =>
+    e.branch.startsWith("distill/"),
+  );
+
+  const out: ActiveDistill[] = [];
+  for (const entry of entries) {
+    const meta = readDistillMeta(entry.path);
+    const pid = meta?.pid ?? -1;
+    const startedAt = meta?.startedAt ?? null;
+    const elapsedMs =
+      startedAt !== null ? Date.now() - new Date(startedAt).getTime() : 0;
+    const sessionPath = meta?.parentSession ?? null;
+    // Mark as not-alive when pid is missing; liveness check is otherwise
+    // the same one `cleanupStaleWorktrees` uses.
+    const alive = pid > 0 ? isPidAlive(pid) : false;
+    out.push({
+      pid,
+      branch: entry.branch,
+      worktreePath: entry.path,
+      startedAt,
+      elapsedMs: Math.max(0, elapsedMs),
+      sessionPath,
+      alive,
+      startSha: meta?.startSha,
+    });
+  }
+  return out;
+}
+
+/**
+ * Enumerate `distill/*` branches that exist in the vault repo but are NOT
+ * currently checked out in any worktree. These are usually leftover from a
+ * crashed distill whose worktree was removed but whose branch (or, more
+ * often, its squash-merge-candidate commits) lingers pending GC.
+ *
+ * The output is intended for human triage via `/distill-status` — the user
+ * can inspect and `git branch -D` them manually. We do NOT auto-prune
+ * here: that's `cleanupStaleWorktrees`' job, and a lingering branch is
+ * forensic breadcrumb, not debt.
+ *
+ * Returns empty on no-git / git-error. Never throws.
+ */
+export function getUnmergedDistillBranches(vault: StaleCleanupVault): string[] {
+  const vaultPath = vault.contentPath;
+  if (!fs.existsSync(path.join(vaultPath, ".git"))) return [];
+
+  const branchesRes = runGit(vaultPath, [
+    "branch",
+    "--list",
+    "distill/*",
+    "--format=%(refname:short)",
+  ]);
+  if (branchesRes.status !== 0) return [];
+
+  const branches = branchesRes.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+
+  const listRes = runGit(vaultPath, ["worktree", "list", "--porcelain"]);
+  const inWorktrees =
+    listRes.status === 0
+      ? new Set(
+          parseWorktreeList(listRes.stdout)
+            .filter((e) => e.branch.startsWith("distill/"))
+            .map((e) => e.branch),
+        )
+      : new Set<string>();
+
+  return branches.filter((b) => !inWorktrees.has(b));
 }
