@@ -621,3 +621,199 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
     expect(r.errorLogs.join("\n")).toContain("a.md");
   });
 });
+
+// ---------------------------------------------------------------------------
+// End-to-end LLM-resolved conflict tests. Forces a real conflict between main
+// and the distill branch, uses NAPKIN_DISTILL_MERGE_MOCK=ok so the driver
+// emits a plausible merge (ours+theirs concatenated), then verifies that the
+// resolved content SURVIVES the squash-merge to main.
+//
+// Covers the core concurrency story end-to-end: `.gitattributes` routes to
+// the driver, the driver fires during `git merge main` in the wrapper, and
+// the driver's output reaches main. Previous salvage tests only force
+// `fail`; these pin the happy path.
+// ---------------------------------------------------------------------------
+
+describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
+  let vault: string;
+  let sessionDir: string;
+  let sessionFile: string;
+
+  beforeEach(() => {
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-e2e-src-"));
+    sessionFile = createSeededSessionFile(sessionDir, sessionDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  function runGitOrThrow(dir: string, args: string[]): string {
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const r = spawnSync("git", ["-C", dir, ...args], {
+      env,
+      encoding: "utf-8",
+    });
+    if (r.status !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
+    }
+    return r.stdout;
+  }
+
+  /**
+   * Invoke the wrapper against a pre-populated worktree with the `ok`
+   * merge-driver mock enabled, so the LLM driver "resolves" conflicts by
+   * concatenating ours+theirs. Returns the wrapper exit code + any error-log
+   * contents (expected empty on the happy path).
+   */
+  function runWrapperWithMockOk(
+    workspace: DistillWorkspace,
+    worktreeFiles: Record<string, string>,
+    mockOverride?: string,
+  ): { exitCode: number; errorLogs: string[] } {
+    for (const [relPath, content] of Object.entries(worktreeFiles)) {
+      const abs = path.join(workspace.worktreePath, relPath);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, content);
+    }
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "sh",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+      ],
+      {
+        cwd: workspace.worktreePath,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "test",
+          GIT_AUTHOR_EMAIL: "test@example.com",
+          GIT_COMMITTER_NAME: "test",
+          GIT_COMMITTER_EMAIL: "test@example.com",
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_SKIP_PI: "1",
+          NAPKIN_DISTILL_MERGE_MOCK: mockOverride ?? "ok",
+          NAPKIN_GIT_RETRY_MAX: "2",
+          NAPKIN_GIT_RETRY_DELAY: "0",
+        },
+      },
+    );
+    const errorLogs: string[] = [];
+    if (fs.existsSync(errorDir)) {
+      for (const f of fs.readdirSync(errorDir)) {
+        errorLogs.push(fs.readFileSync(path.join(errorDir, f), "utf-8"));
+      }
+    }
+    return { exitCode: r.status ?? -1, errorLogs };
+  }
+
+  test("LLM-resolved conflict: driver output lands on main", () => {
+    // Baseline: a file that both sides will diverge on.
+    const conflictPath = path.join(vault, "shared.md");
+    fs.writeFileSync(
+      conflictPath,
+      "---\ntitle: shared\n---\n# baseline shared content\n",
+    );
+    runGitOrThrow(vault, ["add", "-A"]);
+    runGitOrThrow(vault, ["commit", "-q", "-m", "add shared"]);
+
+    // Create the worktree at this baseline, then mutate main post-hoc so
+    // the divergence is real (same pattern as the salvage tests).
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+    );
+
+    fs.writeFileSync(
+      conflictPath,
+      "---\ntitle: shared\n---\n# MAIN's later addition\n",
+    );
+    runGitOrThrow(vault, ["add", "shared.md"]);
+    runGitOrThrow(vault, ["commit", "-q", "-m", "main mutates shared"]);
+
+    // The distill branch writes its own divergent version. With the `ok`
+    // mock the driver emits ours+theirs concatenated.
+    const r = runWrapperWithMockOk(workspace, {
+      "shared.md":
+        "---\ntitle: shared\n---\n# DISTILL's addition (not the same)\n",
+    });
+    expect(r.exitCode).toBe(0);
+    // No error log on the happy path.
+    expect(r.errorLogs).toEqual([]);
+
+    // Worktree + branch cleaned up.
+    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
+    const branches = runGitOrThrow(vault, ["branch"]);
+    expect(branches).not.toContain(workspace.branchName);
+
+    // Resolved content on main contains BOTH sides' markers (driver=ok
+    // concatenates). Proves: (1) driver fired during git merge in the
+    // worktree, (2) the resolved content survived the squash-merge to main.
+    const finalContent = fs.readFileSync(conflictPath, "utf-8");
+    expect(finalContent).toContain("MAIN's later addition");
+    expect(finalContent).toContain("DISTILL's addition (not the same)");
+
+    // Main has a squash commit.
+    const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "5"]);
+    expect(log).toContain("distill: merge");
+  });
+
+  test("driver retries: ok-after-2 succeeds on the third attempt", () => {
+    // Verifies the 3-strike retry loop bridges transient failures. The
+    // first two attempts fail (exit 1) and the third succeeds — the
+    // resolved content must still land on main.
+    const conflictPath = path.join(vault, "retry.md");
+    fs.writeFileSync(conflictPath, "---\ntitle: retry\n---\n# baseline\n");
+    runGitOrThrow(vault, ["add", "-A"]);
+    runGitOrThrow(vault, ["commit", "-q", "-m", "add retry"]);
+
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+    );
+
+    fs.writeFileSync(
+      conflictPath,
+      "---\ntitle: retry\n---\n# MAIN post-baseline\n",
+    );
+    runGitOrThrow(vault, ["add", "retry.md"]);
+    runGitOrThrow(vault, ["commit", "-q", "-m", "main mutates retry"]);
+
+    const r = runWrapperWithMockOk(
+      workspace,
+      {
+        "retry.md":
+          "---\ntitle: retry\n---\n# DISTILL post-baseline (diverges)\n",
+      },
+      "ok-after-2",
+    );
+    expect(r.exitCode).toBe(0);
+    expect(r.errorLogs).toEqual([]);
+
+    const finalContent = fs.readFileSync(conflictPath, "utf-8");
+    expect(finalContent).toContain("MAIN post-baseline");
+    expect(finalContent).toContain("DISTILL post-baseline (diverges)");
+
+    const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "5"]);
+    expect(log).toContain("distill: merge");
+  });
+});
