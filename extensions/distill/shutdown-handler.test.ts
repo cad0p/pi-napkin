@@ -264,11 +264,19 @@ describe("session_shutdown handler (Item 8)", () => {
     expect(worktrees).toBe(0);
   });
 
-  test("does NOT spawn when vault is not a git repo (needs-git guard)", async () => {
+  test("auto-inits git at session_start when vault is not yet a repo (Phase C1)", async () => {
+    // With Phase C1's auto-setup, a vault without `.git` gets initialized
+    // during session_start, and the shutdown handler then spawns normally.
+    // This replaces the Phase B "needs-git guard" test whose guard is
+    // effectively dead in the happy path now — `ctx.cwd` is always a git
+    // repo by the time session_shutdown runs.
     vault = createVault({ enabled: true }, /* withGit */ false);
     sm = createSession(vault);
     const worktrees = await runLifecycle(vault, sm, "exit");
-    expect(worktrees).toBe(0);
+    // Auto-init ran, so .git exists by shutdown, so the shutdown handler
+    // does spawn a worktree.
+    expect(fs.existsSync(path.join(vault, ".git"))).toBe(true);
+    expect(worktrees).toBe(1);
   });
 
   test("does NOT spawn when NAPKIN_DISTILL_NO_RECURSE is set (recursion guard)", async () => {

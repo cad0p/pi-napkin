@@ -289,9 +289,14 @@ export default function (pi: ExtensionAPI) {
     // worktree operations have the invariants they need. Idempotent and
     // non-throwing — on failure we notify once and disable auto-distill for
     // this session rather than retrying on every interval fire.
+    //
+    // Scope: initialize at `ctx.cwd` (the directory pi was launched in, and
+    // where worktrees will be rooted). `napkinVault.contentPath` may differ
+    // for legacy bare vaults where the vault IS a `.napkin/` subdir —
+    // worktree spawning still uses `ctx.cwd`, so git must live there.
     try {
       const setup = ensureVaultReadyForAutoDistill({
-        contentPath: napkinVault.contentPath,
+        contentPath: ctx.cwd,
       });
       if (setup.error) {
         if (ctx.hasUI) {
@@ -304,7 +309,7 @@ export default function (pi: ExtensionAPI) {
         // user intent; next session will re-try setup.
         autoDistillSuppressed = true;
       } else if (setup.initialized) {
-        const tracked = countTrackedFiles(napkinVault.contentPath);
+        const tracked = countTrackedFiles(ctx.cwd);
         const files = tracked >= 0 ? tracked : setup.scaffolded.length;
         if (ctx.hasUI) {
           ctx.ui.notify(
@@ -312,7 +317,7 @@ export default function (pi: ExtensionAPI) {
               "Initialized git repo in your vault for auto-distill.",
               `Commit: 'napkin: initial vault commit (auto-distill setup)'`,
               `Files tracked: ${files}`,
-              `To undo: rm -rf ${path.join(napkinVault.contentPath, ".git")} (removes history, keeps files)`,
+              `To undo: rm -rf ${path.join(ctx.cwd, ".git")} (removes history, keeps files)`,
               "To opt out: set distill.enabled: false in vault config.json",
             ].join("\n"),
             "info",
@@ -335,7 +340,7 @@ export default function (pi: ExtensionAPI) {
     // Sweep out stale distill worktrees left behind by crashed pi sessions.
     // Idempotent, best-effort — never throws, never blocks session_start.
     try {
-      cleanupStaleWorktrees({ contentPath: napkinVault.contentPath });
+      cleanupStaleWorktrees({ contentPath: ctx.cwd });
     } catch {
       // swallow — cleanup is non-critical to session lifecycle
     }
