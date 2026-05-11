@@ -163,7 +163,8 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
   });
 
   afterEach(() => {
-    if (_savedRecurse !== undefined) process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
+    if (_savedRecurse !== undefined)
+      process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     globalThis.setInterval = originalSetInterval;
     // Best-effort cleanup of any dangling worktrees + branches the detached

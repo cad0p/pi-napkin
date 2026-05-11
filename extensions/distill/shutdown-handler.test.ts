@@ -192,7 +192,8 @@ describe("session_shutdown handler (Item 8)", () => {
   });
 
   afterEach(() => {
-    if (_savedRecurse !== undefined) process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
+    if (_savedRecurse !== undefined)
+      process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     globalThis.setInterval = originalSetInterval;
     if (vault) {
