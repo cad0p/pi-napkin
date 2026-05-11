@@ -132,6 +132,11 @@ const DISTILL_PROMPT = `Distill this conversation into the napkin vault.
    c. Add \`[[wikilinks]]\` to related notes
 5. Append a brief summary of key activities and decisions to today's daily note in the relevant namespace (e.g. \`{namespace}/daily/YYYY-MM-DD.md\`). Follow existing patterns. Create it if it doesn't exist.
 
+Frontmatter convention: when you create a note that replaces an older one, add
+\`supersedes: ["path/to/old/note.md"]\` to its frontmatter. A future janitor will
+archive the superseded note. Leave the field empty or omit it for notes that
+stand alone.
+
 Be selective. Only capture knowledge useful to someone working on this project later. Skip meta-discussion, tool output, and chatter.`;
 
 /**
