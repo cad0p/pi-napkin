@@ -10,7 +10,10 @@ import type {
 } from "@mariozechner/pi-coding-agent";
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import type { AutocompleteItem } from "@mariozechner/pi-tui";
-
+import {
+  countTrackedFiles,
+  ensureVaultReadyForAutoDistill,
+} from "./auto-setup";
 import {
   cleanupDistillWorkspace,
   cleanupStaleWorktrees,
@@ -276,6 +279,53 @@ export default function (pi: ExtensionAPI) {
 
     // Skip if this is a distill subprocess
     if (process.env.NAPKIN_DISTILL_NO_RECURSE) return;
+
+    // Auto-init git + scaffold .gitignore/.gitattributes so subsequent
+    // worktree operations have the invariants they need. Idempotent and
+    // non-throwing — on failure we notify once and disable auto-distill for
+    // this session rather than retrying on every interval fire.
+    try {
+      const setup = ensureVaultReadyForAutoDistill({
+        contentPath: napkinVault.contentPath,
+      });
+      if (setup.error) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
+            "error",
+          );
+        }
+        // Force-suppress without persisting — the issue is vault-level, not
+        // user intent; next session will re-try setup.
+        autoDistillSuppressed = true;
+      } else if (setup.initialized) {
+        const tracked = countTrackedFiles(napkinVault.contentPath);
+        const files = tracked >= 0 ? tracked : setup.scaffolded.length;
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            [
+              "Initialized git repo in your vault for auto-distill.",
+              `Commit: 'napkin: initial vault commit (auto-distill setup)'`,
+              `Files tracked: ${files}`,
+              `To undo: rm -rf ${path.join(napkinVault.contentPath, ".git")} (removes history, keeps files)`,
+              "To opt out: set distill.enabled: false in vault config.json",
+            ].join("\n"),
+            "info",
+          );
+        }
+      } else if (setup.scaffolded.length > 0) {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `Added ${setup.scaffolded.join(", ")} for auto-distill.`,
+            "info",
+          );
+        }
+      }
+    } catch (err) {
+      // Truly unexpected (ensureVaultReadyForAutoDistill is supposed to not
+      // throw). Log + continue, worst case later operations fail gracefully.
+      console.error("[napkin-distill] auto-setup threw:", err);
+    }
 
     // Sweep out stale distill worktrees left behind by crashed pi sessions.
     // Idempotent, best-effort — never throws, never blocks session_start.
