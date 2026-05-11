@@ -11,13 +11,21 @@ import type {
 import { SessionManager } from "@mariozechner/pi-coding-agent";
 import type { AutocompleteItem } from "@mariozechner/pi-tui";
 
-interface DistillConfig {
+export interface DistillConfig {
   enabled: boolean;
   intervalMinutes: number;
+  /**
+   * Whether to run a final distill at session shutdown. Defaults to `true`.
+   *
+   * The shutdown handler consults this via `shouldDistillOnShutdown` — if
+   * false, shutdown distill is skipped even when other guards would allow it.
+   * Does not affect interval distill or manual `/distill`.
+   */
+  onShutdown: boolean;
   model?: { provider: string; id: string };
 }
 
-interface VaultConfig {
+export interface VaultConfig {
   showStatus: boolean;
   distill: DistillConfig;
 }
@@ -79,12 +87,13 @@ function persistSuppressed(sm: unknown, suppressed: boolean): void {
   } satisfies SessionPauseState);
 }
 
-const DEFAULT_DISTILL: DistillConfig = {
+export const DEFAULT_DISTILL: DistillConfig = {
   enabled: false,
   intervalMinutes: 60,
+  onShutdown: true,
 };
 
-function loadVaultConfig(vaultPath: string): VaultConfig {
+export function loadVaultConfig(vaultPath: string): VaultConfig {
   const configPath = path.join(vaultPath, "config.json");
   if (!fs.existsSync(configPath)) {
     return { showStatus: true, distill: DEFAULT_DISTILL };
