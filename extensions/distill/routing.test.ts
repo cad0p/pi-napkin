@@ -123,6 +123,31 @@ function createEnabledGitVault(intervalMinutes: number): string {
   return dir;
 }
 
+/**
+ * Non-git vault fixture with distill.enabled=true. Used to verify that
+ * `/distill` falls back to the legacy tmpdir path when the vault has no
+ * `.git/`. Auto-distill's preflight short-circuits this case so it's
+ * only exercised by manual `/distill`.
+ */
+function createEnabledNonGitVault(intervalMinutes: number): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "routing-nongit-vault-"));
+  fs.writeFileSync(
+    path.join(dir, "seed.md"),
+    "---\ntitle: seed\n---\n# seed\n",
+  );
+  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, ".napkin", "config.json"),
+    JSON.stringify({
+      // Sibling-layout declaration so napkin resolves contentPath=<dir>.
+      vault: { root: ".." },
+      distill: { enabled: true, intervalMinutes, onShutdown: true },
+    }),
+  );
+  // NOTE: no `git init` -- this is the git-less fallback case.
+  return dir;
+}
+
 /** Seed a real SessionManager at `dir` (needed because runAutoDistill forks it). */
 function createSeededSession(dir: string): SessionManager {
   const sm = SessionManager.create(dir, dir);
@@ -228,13 +253,11 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     expect(entries[0]).toMatch(/^[0-9a-f]{6}-\d+$/);
   });
 
-  test("/distill command creates a tmp dir, NOT a worktree (runDistill path)", async () => {
+  test("/distill on a git-backed vault creates a worktree (matches auto-distill)", async () => {
     const { api, captured } = makeMockExtensionAPI();
     distillExtension(api as never);
     expect(captured.commands.distill).toBeDefined();
 
-    // Snapshot /tmp so we can detect new napkin-distill-* dirs created by
-    // the legacy path.
     const tmpBefore = new Set(
       fs
         .readdirSync(os.tmpdir())
@@ -244,21 +267,58 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     const ctx = makeCtx();
     await captured.commands.distill.handler("", ctx);
 
+    const worktreesDir = path.join(vault, ".napkin", "distill-worktrees");
+    expect(fs.existsSync(worktreesDir)).toBe(true);
+    const entries = fs.readdirSync(worktreesDir);
+    expect(entries.length).toBe(1);
+    expect(entries[0]).toMatch(/^[0-9a-f]{6}-\d+$/);
+
+    // No legacy tmp dir was created -- git available routes to worktree.
+    const tmpAfter = fs
+      .readdirSync(os.tmpdir())
+      .filter((n) => n.startsWith("napkin-distill-"));
+    const newTmpDirs = tmpAfter.filter((n) => !tmpBefore.has(n));
+    expect(newTmpDirs.length).toBe(0);
+  });
+
+  test("/distill on a non-git vault falls back to tmp dir (legacy path)", async () => {
+    const { api, captured } = makeMockExtensionAPI();
+    distillExtension(api as never);
+    expect(captured.commands.distill).toBeDefined();
+
+    const nonGitVault = createEnabledNonGitVault(60);
+    const nonGitSm = createSeededSession(nonGitVault);
+    const nonGitCtx = {
+      cwd: nonGitVault,
+      sessionManager: nonGitSm,
+      hasUI: false,
+      ui: null,
+    };
+
+    const tmpBefore = new Set(
+      fs
+        .readdirSync(os.tmpdir())
+        .filter((n) => n.startsWith("napkin-distill-")),
+    );
+
+    // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+    await captured.commands.distill.handler("", nonGitCtx as any);
+
+    // Legacy path: new tmp dir appeared.
     const tmpAfter = fs
       .readdirSync(os.tmpdir())
       .filter((n) => n.startsWith("napkin-distill-"));
     const newTmpDirs = tmpAfter.filter((n) => !tmpBefore.has(n));
     expect(newTmpDirs.length).toBe(1);
 
-    // No worktree under the vault \u2014 the legacy path doesn't touch git.
-    const worktreesDir = path.join(vault, ".napkin", "distill-worktrees");
+    // No worktree under the non-git vault.
+    const worktreesDir = path.join(nonGitVault, ".napkin", "distill-worktrees");
     expect(fs.existsSync(worktreesDir)).toBe(false);
 
-    // Cleanup: the detached wrapper's `rm -rf <tmpDir>` may not have run yet
-    // (depends on how fast the shell can exec `pi`). Force-remove so we don't
-    // leak across tests.
+    // Cleanup
     for (const d of newTmpDirs) {
       fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
     }
+    fs.rmSync(nonGitVault, { recursive: true, force: true });
   });
 });

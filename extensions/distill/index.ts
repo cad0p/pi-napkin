@@ -830,22 +830,28 @@ export default function (pi: ExtensionAPI) {
   }
 
   function runDistill(ctx: RunCtx) {
-    // Legacy git-optional path — used by manual `/distill`. tmpDir under
-    // $TMPDIR; cleanup is a plain rmSync. No preflight (git not required).
+    // Manual `/distill`: use the worktree path when git is available (same
+    // concurrency safety as auto-distill), fall back to the legacy
+    // git-less tmpdir path only when the vault has no `.git/`.
     //
-    // Even though this path doesn't need a git repo, its child process's
-    // cwd is the vault content root so napkin's findVault inside the
-    // subprocess resolves to the same vault that spawned it. Using
-    // `ctx.cwd` here would scope the subprocess to the wrong place when
-    // pi was launched outside the vault.
+    // Why not always worktree? Some users keep their vault outside git
+    // on purpose (mobile-only Obsidian, ephemeral scratch vaults, etc.)
+    // and should still be able to run `/distill` manually without
+    // pi-napkin refusing. The detection is cheap and the fallback is
+    // the original git-less path, preserved unchanged.
+    //
+    // Cross-session concurrency caveat: two concurrent manual /distills
+    // on a git-less vault race on napkin writes because the legacy path
+    // has no worktree isolation. `isRunning` blocks a second /distill
+    // in the same pi session, but not across sessions. If this becomes
+    // a problem, the fix is to add a small flock around the legacy
+    // spawn; for now the design matches the pre-worktree behavior.
     runDistillWith(ctx, {
-      spawnFn: ({ vaultContentPath, sessionFile, config }) => {
-        const tmpDir = spawnDistill(sessionFile, vaultContentPath, config);
-        if (!tmpDir) return null;
-        return {
-          target: tmpDir,
-          cleanup: () => fs.rmSync(tmpDir, { recursive: true, force: true }),
-        };
+      spawnFn: (args) => {
+        if (fs.existsSync(path.join(args.vaultContentPath, ".git"))) {
+          return worktreeSpawnFn(args);
+        }
+        return legacySpawnFn(args);
       },
     });
   }
@@ -869,51 +875,86 @@ export default function (pi: ExtensionAPI) {
         }
         return { ok: true };
       },
-      spawnFn: ({ ctx: c, vaultContentPath, sessionFile, config }) => {
-        try {
-          const modelStr = config.model
-            ? `${config.model.provider}/${config.model.id}`
-            : undefined;
-          const result = spawnDistillInWorktree({
-            vault: vaultContentPath,
-            sessionFile,
-            prompt: DISTILL_PROMPT,
-            model: modelStr,
-          });
-          return {
-            target: result.workspace.worktreePath,
-            cleanup: () => {
-              try {
-                cleanupDistillWorkspace(vaultContentPath, result.workspace);
-              } catch {
-                // ignore
-              }
-            },
-          };
-        } catch (err) {
-          // DistillError from the workspace layer (branch collision, fork
-          // failure, git issue) — bubble up as a spawn failure so the
-          // shared runner paints an error status. We distinguish the
-          // message via the errorStatus in a helper. Instead of a
-          // separate branch, just paint ourselves and return null.
-          const theme = c.hasUI ? c.ui.theme : null;
-          const { showStatus } = loadVaultConfig(
-            new Napkin(c.cwd).vault.configPath,
-          );
-          if (c.hasUI && theme && showStatus) {
-            const msg =
-              err instanceof DistillError
-                ? "distill: setup failed"
-                : "distill: spawn failed";
-            c.ui.setStatus(
-              "napkin-distill",
-              theme.fg("error", "✗") + theme.fg("dim", ` ${msg}`),
-            );
-          }
-          return null;
-        }
-      },
+      spawnFn: worktreeSpawnFn,
     });
+  }
+
+  /**
+   * Legacy tmpdir spawn strategy. Forks the session under `$TMPDIR` and
+   * runs `pi -p` detached; cleanup is a plain `rmSync`. No git, no
+   * concurrency coordination. Only used by manual `/distill` as a
+   * fallback for vaults without `.git/`.
+   */
+  function legacySpawnFn(args: {
+    ctx: RunCtx;
+    vaultContentPath: string;
+    sessionFile: string;
+    config: DistillConfig;
+  }): { target: string; cleanup: () => void } | null {
+    const { vaultContentPath, sessionFile, config } = args;
+    const tmpDir = spawnDistill(sessionFile, vaultContentPath, config);
+    if (!tmpDir) return null;
+    return {
+      target: tmpDir,
+      cleanup: () => fs.rmSync(tmpDir, { recursive: true, force: true }),
+    };
+  }
+
+  /**
+   * Worktree spawn strategy. Creates a per-distill git worktree off the
+   * vault's default branch, runs the detached wrapper that merges back
+   * via the LLM merge driver + squash. Concurrency-safe across sessions.
+   *
+   * Shared by `runDistill` (when git is available) and `runAutoDistill`.
+   * A `DistillError` from the workspace layer (branch collision, fork
+   * failure, invalid HEAD, merge driver missing) is caught and rendered
+   * as an error status; the shared runner treats a null return as a
+   * spawn failure and skips the poll loop.
+   */
+  function worktreeSpawnFn(args: {
+    ctx: RunCtx;
+    vaultContentPath: string;
+    sessionFile: string;
+    config: DistillConfig;
+  }): { target: string; cleanup: () => void } | null {
+    const { ctx: c, vaultContentPath, sessionFile, config } = args;
+    try {
+      const modelStr = config.model
+        ? `${config.model.provider}/${config.model.id}`
+        : undefined;
+      const result = spawnDistillInWorktree({
+        vault: vaultContentPath,
+        sessionFile,
+        prompt: DISTILL_PROMPT,
+        model: modelStr,
+      });
+      return {
+        target: result.workspace.worktreePath,
+        cleanup: () => {
+          try {
+            cleanupDistillWorkspace(vaultContentPath, result.workspace);
+          } catch {
+            // ignore
+          }
+        },
+      };
+    } catch (err) {
+      const theme = c.hasUI ? c.ui.theme : null;
+      const { showStatus } = loadVaultConfig(
+        new Napkin(c.cwd).vault.configPath,
+      );
+      if (c.hasUI && theme && showStatus) {
+        const msg =
+          err instanceof DistillError
+            ? "distill: setup failed"
+            : "distill: spawn failed";
+        c.ui.setStatus(
+          "napkin-distill",
+          theme.fg("error", "✗") + theme.fg("dim", ` ${msg}`),
+        );
+      }
+      return null;
+    }
   }
 
   pi.registerCommand("distill", {
