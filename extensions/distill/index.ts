@@ -530,7 +530,12 @@ export default function (pi: ExtensionAPI) {
 
     let vaultPath: string;
     try {
-      vaultPath = new Napkin(ctx.cwd).vault.contentPath;
+      // Resolve the vault (throws on unresolvable) but use ctx.cwd as the
+      // git root: that's where auto-setup initialized the repo and where
+      // worktrees are created. `napkinVault.contentPath` points at `.napkin`
+      // for content-layout vaults — has no `.git`.
+      new Napkin(ctx.cwd);
+      vaultPath = ctx.cwd;
     } catch {
       return;
     }
