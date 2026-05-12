@@ -6,9 +6,11 @@ import * as path from "node:path";
 
 import {
   countTrackedFiles,
+  detectConflictingMdMergeRule,
   ensureVaultReadyForAutoDistill,
   GITATTRIBUTES_LINES,
   GITIGNORE_LINES,
+  NAPKIN_MERGE_DRIVER,
 } from "./auto-setup";
 
 /**
@@ -265,6 +267,140 @@ describe("ensureVaultReadyForAutoDistill", () => {
       fs.chmodSync(ro, 0o700);
       fs.rmSync(ro, { recursive: true, force: true });
     }
+  });
+
+  // --- G7: conflicting `*.md merge=<X>` detection ------------------------
+
+  test("G7: fresh vault (no conflict) → no `conflict`, scaffolding proceeds", () => {
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.conflict).toBeUndefined();
+    expect(r.scaffolded).toContain(".gitattributes");
+  });
+
+  test("G7: idempotent when our rule already present → no conflict", () => {
+    // First run scaffolds.
+    expect(runSetup().error).toBeUndefined();
+    // Second run: our own `*.md merge=napkin-distill-merge` is NOT a conflict.
+    const r2 = runSetup();
+    expect(r2.error).toBeUndefined();
+    expect(r2.conflict).toBeUndefined();
+    expect(r2.scaffolded).toEqual([]);
+  });
+
+  test("G7: `*.md merge=union` in existing .gitattributes → conflict, no scaffolding", () => {
+    // Existing git repo with a prior `*.md merge=union` rule.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, ".gitattributes"), "*.md merge=union\n");
+    const r = runSetup();
+    expect(r.error).toBeDefined();
+    expect(r.error).toMatch(/conflicting merge rule/);
+    expect(r.conflict).toBeDefined();
+    expect(r.conflict?.driver).toBe("union");
+    expect(r.conflict?.rule).toBe("*.md merge=union");
+    expect(r.conflict?.file).toBe(path.join(vault, ".gitattributes"));
+    // We must not have overridden the user's rule.
+    const ga = fs.readFileSync(path.join(vault, ".gitattributes"), "utf-8");
+    expect(ga).toBe("*.md merge=union\n");
+    expect(ga).not.toContain(NAPKIN_MERGE_DRIVER);
+    // And nothing was scaffolded even for .gitignore (refuse atomically).
+    expect(r.scaffolded).toEqual([]);
+  });
+
+  test("G7: narrower pattern (changelog/**) does NOT trigger conflict, scaffolds normally", () => {
+    // A `changelog/** merge=union` rule exists on a different pattern; our
+    // `*.md` pattern doesn't EXACTLY match it, so detection (narrowly
+    // scoped to literal `*.md`) passes through. Pattern-overlap is out of
+    // scope for G7 by design — too noisy to flag broadly.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(
+      path.join(vault, ".gitattributes"),
+      "changelog/** merge=union\n",
+    );
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.conflict).toBeUndefined();
+    expect(r.scaffolded).toContain(".gitattributes");
+    // User's rule preserved, our rule appended.
+    const ga = fs.readFileSync(path.join(vault, ".gitattributes"), "utf-8");
+    expect(ga).toContain("changelog/** merge=union");
+    expect(ga).toContain(`*.md merge=${NAPKIN_MERGE_DRIVER}`);
+  });
+
+  test("G7: defensive — our rule PLUS a conflicting rule on the same file is flagged", () => {
+    // A vault that has both our driver AND an opposing `*.md merge=union`
+    // (e.g. user edited the file). gitattributes is last-match-wins, so
+    // whichever comes LAST actually takes effect. Our detector walks top
+    // to bottom and reports the FIRST non-napkin driver it encounters —
+    // that's enough to alert the user; precise resolution is their job.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(
+      path.join(vault, ".gitattributes"),
+      `*.md merge=${NAPKIN_MERGE_DRIVER}\n*.md merge=union\n`,
+    );
+    const r = runSetup();
+    expect(r.error).toMatch(/conflicting merge rule/);
+    expect(r.conflict?.driver).toBe("union");
+  });
+});
+
+describe("detectConflictingMdMergeRule (G7)", () => {
+  let vault: string;
+  beforeEach(() => {
+    vault = fs.mkdtempSync(path.join(os.tmpdir(), "g7-detect-"));
+  });
+  afterEach(() => {
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  const ga = () => path.join(vault, ".gitattributes");
+
+  test("missing .gitattributes → null", () => {
+    expect(detectConflictingMdMergeRule(ga())).toBeNull();
+  });
+
+  test("empty .gitattributes → null", () => {
+    fs.writeFileSync(ga(), "");
+    expect(detectConflictingMdMergeRule(ga())).toBeNull();
+  });
+
+  test("only comments → null", () => {
+    fs.writeFileSync(ga(), "# comment\n# another\n");
+    expect(detectConflictingMdMergeRule(ga())).toBeNull();
+  });
+
+  test("our own rule → null (idempotent)", () => {
+    fs.writeFileSync(ga(), `*.md merge=${NAPKIN_MERGE_DRIVER}\n`);
+    expect(detectConflictingMdMergeRule(ga())).toBeNull();
+  });
+
+  test("foreign `*.md merge=union` → conflict", () => {
+    fs.writeFileSync(ga(), "*.md merge=union\n");
+    const r = detectConflictingMdMergeRule(ga());
+    expect(r).not.toBeNull();
+    expect(r?.driver).toBe("union");
+    expect(r?.rule).toBe("*.md merge=union");
+  });
+
+  test("extra attributes on the same line → still detected", () => {
+    // gitattributes allows multiple attributes per line; ours is noise, the
+    // merge= one is what matters. Detection must survive diff=/text/etc.
+    fs.writeFileSync(ga(), "*.md text diff=markdown merge=ours\n");
+    const r = detectConflictingMdMergeRule(ga());
+    expect(r?.driver).toBe("ours");
+  });
+
+  test("different pattern (changelog/**) → null (scope is exact `*.md`)", () => {
+    fs.writeFileSync(ga(), "changelog/** merge=union\n");
+    expect(detectConflictingMdMergeRule(ga())).toBeNull();
+  });
+
+  test("`*.md` rule WITHOUT a merge attribute → null (no driver, no conflict)", () => {
+    fs.writeFileSync(ga(), "*.md text\n");
+    expect(detectConflictingMdMergeRule(ga())).toBeNull();
   });
 });
 

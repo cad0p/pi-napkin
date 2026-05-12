@@ -323,10 +323,28 @@ export default function (pi: ExtensionAPI) {
       if (setup.error) {
         setupFailed = true;
         if (ctx.hasUI) {
-          ctx.ui.notify(
-            `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
-            "error",
-          );
+          if (setup.conflict) {
+            // G7: existing `.gitattributes` already claims `*.md merge=<X>`.
+            // We refuse to scaffold so we don't silently override the
+            // user's chosen driver via last-match-wins. Explain the
+            // options clearly — auto-distill is off for this session, but
+            // manual /distill still works.
+            ctx.ui.notify(
+              [
+                `Auto-distill setup blocked: your .gitattributes already has a merge rule for *.md ('${setup.conflict.rule}').`,
+                "Auto-distill needs its own driver to handle concurrent distill merges safely. To enable:",
+                `  - Remove the conflicting rule from ${setup.conflict.file}, OR`,
+                "  - Set distill.onShutdown: false in vault config.json to disable auto-distill on shutdown",
+                "Manual /distill still works regardless.",
+              ].join("\n"),
+              "error",
+            );
+          } else {
+            ctx.ui.notify(
+              `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
+              "error",
+            );
+          }
         }
       } else if (setup.initialized) {
         const tracked = countTrackedFiles(ctx.cwd);

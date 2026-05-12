@@ -74,11 +74,24 @@ export const GITATTRIBUTES_LINES: readonly string[] = [
  * - `error`: populated on fail-soft paths (git init failed, filesystem
  *   errors writing the scaffolding). If set, other fields reflect partial
  *   progress.
+ * - `conflict`: populated when auto-setup refused to scaffold because the
+ *   existing `.gitattributes` already claims `*.md merge=<something-else>`.
+ *   `error` is also set with a short `"conflicting merge rule…"` message so
+ *   existing fail-soft callers keep working; `conflict` carries the
+ *   diagnostic details (rule text, file path) for a precise notify.
  */
 export interface SetupResult {
   initialized: boolean;
   scaffolded: string[];
   error?: string;
+  conflict?: {
+    /** The full offending line as it appears in `.gitattributes`. */
+    rule: string;
+    /** Absolute path to the `.gitattributes` that contains the conflict. */
+    file: string;
+    /** Just the `<driver>` captured from `*.md merge=<driver>`. */
+    driver: string;
+  };
 }
 
 /**
@@ -173,15 +186,64 @@ function mergeLines(filePath: string, newLines: readonly string[]): boolean {
 }
 
 /**
+ * Expected driver name set by {@link GITATTRIBUTES_LINES}. Exported so tests
+ * can assert the symmetric pair without re-parsing the scaffold string.
+ */
+export const NAPKIN_MERGE_DRIVER = "napkin-distill-merge";
+
+/**
+ * If the vault's `.gitattributes` already contains an `*.md merge=<driver>`
+ * rule whose driver is NOT our `napkin-distill-merge`, return its details.
+ * Returns `null` when there's no conflict (no rule, or the existing rule is
+ * already ours).
+ *
+ * Scope: deliberately narrow. We only check for the EXACT pattern `*.md`
+ * with a `merge=` attribute — pattern-overlap cases (e.g. `notes/** merge=
+ * union` + our `*.md merge=napkin-distill-merge` both matching
+ * `notes/x.md`) are not flagged. Those would need a full gitattributes
+ * parser and are rare enough in practice that the noise of false positives
+ * outweighs the value of catching them. The common case is a user who has
+ * `*.md merge=union` globally and would silently get our driver layered on
+ * top via last-match-wins; that case is what this catches.
+ *
+ * The returned `rule` preserves the full original line (for accurate error
+ * messages) and `driver` is just the captured driver name.
+ */
+export function detectConflictingMdMergeRule(
+  gaPath: string,
+): { rule: string; driver: string } | null {
+  if (!fs.existsSync(gaPath)) return null;
+  const contents = fs.readFileSync(gaPath, "utf-8");
+  for (const rawLine of contents.split("\n")) {
+    const line = rawLine.trim();
+    if (line.length === 0 || line.startsWith("#")) continue;
+    // Match: `*.md` (exactly) followed by whitespace, with a `merge=<name>`
+    // attribute somewhere on the line. Other attributes on the same line
+    // (diff=..., text, etc.) are ignored — only the merge driver conflicts
+    // with ours.
+    const m = line.match(/^\*\.md\s+(?:.*\s+)?merge=([A-Za-z0-9_.-]+)/);
+    if (!m) continue;
+    const driver = m[1];
+    if (driver === NAPKIN_MERGE_DRIVER) continue; // Our own rule, idempotent.
+    return { rule: line, driver };
+  }
+  return null;
+}
+
+/**
  * Ensure `<vaultPath>` is a git repo with a `.gitignore` / `.gitattributes`
  * that cover auto-distill's needs. Called once per `session_start` when
  * `distill.enabled` is true.
  *
  * Lifecycle:
  *   1. If `.git/` is missing → `git init`. Failure here aborts with `error`.
- *   2. Merge scaffolding lines into `.gitignore` and `.gitattributes`
+ *   2. Detect a conflicting `*.md merge=<other>` in an existing
+ *      `.gitattributes`. If present, return `{ error, conflict }` WITHOUT
+ *      writing our rule — gitattributes is last-match-wins and silently
+ *      layering our driver on top would override the user's chosen one.
+ *   3. Merge scaffolding lines into `.gitignore` and `.gitattributes`
  *      (idempotent; no-op if already present).
- *   3. If anything changed:
+ *   4. If anything changed:
  *      - fresh init → `git add .` + commit `"napkin: initial vault commit
  *        (auto-distill setup)"`
  *      - existing repo → `git add .gitignore .gitattributes` + commit
@@ -207,12 +269,31 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
     initialized = true;
   }
 
+  // Guard against silently overriding a user-chosen `*.md merge=...` rule.
+  // gitattributes is last-match-wins, so appending our driver without
+  // warning would bypass their choice the next time they edit a .md file.
+  // Refuse to scaffold and surface a `conflict` so the caller can prompt
+  // the user to resolve it explicitly.
+  const gaPath = path.join(vaultPath, ".gitattributes");
+  const conflict = detectConflictingMdMergeRule(gaPath);
+  if (conflict) {
+    return {
+      initialized,
+      scaffolded: [],
+      error: `conflicting merge rule in .gitattributes: '${conflict.rule}'`,
+      conflict: {
+        rule: conflict.rule,
+        file: gaPath,
+        driver: conflict.driver,
+      },
+    };
+  }
+
   const scaffolded: string[] = [];
 
   try {
     const giPath = path.join(vaultPath, ".gitignore");
     if (mergeLines(giPath, GITIGNORE_LINES)) scaffolded.push(".gitignore");
-    const gaPath = path.join(vaultPath, ".gitattributes");
     if (mergeLines(gaPath, GITATTRIBUTES_LINES))
       scaffolded.push(".gitattributes");
   } catch (err) {
