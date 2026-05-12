@@ -7,35 +7,17 @@ on:
     branches: [main]
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Lint
-        run: pnpm lint
-
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
-      - run: pnpm install --frozen-lockfile
-      - name: Test
-        run: pnpm test
+      - run: bun install
+      - name: Lint
+        run: bunx biome check extensions/
+      - name: Type check
+        run: bunx tsc --noEmit
+      - name: Run tests
+        run: bun test

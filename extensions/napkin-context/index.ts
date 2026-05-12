@@ -5,6 +5,7 @@ import {
   type AgentToolResult,
   type ExtensionAPI,
   keyHint,
+  type SessionManager,
   type Theme,
   type ToolRenderResultOptions,
 } from "@earendil-works/pi-coding-agent";
@@ -81,8 +82,21 @@ export default function (pi: ExtensionAPI) {
         const hint = theme.fg("dim", " — Ctrl+O to expand");
         return new Text(label + hint, 1, 0);
       }
+      // pi typed message.content as `string | (TextContent | ImageContent)[]`;
+      // we only ever set string content via appendCustomMessageEntry so just
+      // narrow here. Fallback to empty string if an image-bearing custom
+      // message sneaks in — the Markdown renderer can't represent images.
+      const body =
+        typeof message.content === "string"
+          ? message.content
+          : message.content
+              .filter(
+                (c): c is { type: "text"; text: string } => c.type === "text",
+              )
+              .map((c) => c.text)
+              .join("");
       return new Markdown(
-        message.content,
+        body,
         1,
         0,
         {
@@ -128,7 +142,10 @@ export default function (pi: ExtensionAPI) {
         );
 
       if (!alreadyInjected) {
-        ctx.sessionManager.appendCustomMessageEntry(
+        // pi's ExtensionContext narrows sessionManager to ReadonlySessionManager,
+        // which omits mutation methods. At runtime it's always the full
+        // SessionManager; cast to access appendCustomMessageEntry.
+        (ctx.sessionManager as SessionManager).appendCustomMessageEntry(
           "napkin-context",
           "## Napkin vault context\n" +
             "You have access to a napkin vault (Obsidian-compatible knowledge base). " +

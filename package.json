@@ -2,9 +2,21 @@
   "name": "pi-napkin",
   "version": "0.2.4",
   "description": "🧻 Napkin integration for pi — vault context, knowledge tools, and automatic distillation",
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
   "keywords": [
     "pi-package"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cad0p/pi-napkin.git"
+  },
+  "homepage": "https://github.com/cad0p/pi-napkin#readme",
+  "bugs": {
+    "url": "https://github.com/cad0p/pi-napkin/issues"
+  },
   "pi": {
     "extensions": [
       "extensions/napkin-context",
@@ -15,13 +27,15 @@
     ]
   },
   "scripts": {
-    "lint": "biome check extensions/",
-    "lint:fix": "biome check --write extensions/",
+    "lint": "bunx biome check extensions/",
+    "lint:fix": "bunx biome check --write extensions/",
+    "typecheck": "bunx tsc --noEmit",
     "test": "bun test"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "typescript": "^5.8.0"
   },
   "dependencies": {
     "@cad0p/napkin": "*"

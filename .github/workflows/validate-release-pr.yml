@@ -1,0 +1,15 @@
+name: Validate Release PR
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: cad0p/semver-calver-release/validate-release-pr@v1

@@ -800,7 +800,7 @@ export default function (pi: ExtensionAPI) {
             theme.fg("success", "✓") + theme.fg("dim", ` distill ${elapsed}s`),
           );
         }
-        ctx.ui.notify(`Distillation complete (${elapsed}s)`, "success");
+        ctx.ui.notify(`Distillation complete (${elapsed}s)`, "info");
       }
     }, 2000);
   }

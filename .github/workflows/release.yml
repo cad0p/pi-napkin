@@ -1,54 +1,34 @@
-name: Release
+name: Auto Release
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main, 'release/*']
 
 permissions:
   contents: write
+  pull-requests: write
+  id-token: write
 
 jobs:
-  lint:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Lint
-        run: pnpm lint
-
   release:
-    needs: lint
     runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      has_changes: ${{ steps.release.outputs.has_changes }}
     steps:
-      - uses: actions/checkout@v4
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+      - id: release
+        uses: cad0p/semver-calver-release/release@v1
         with:
-          generate_release_notes: true
+          skip_release: ${{ github.ref != 'refs/heads/main' }}
 
-  publish-npm:
-    needs: lint
+  publish:
+    needs: release
+    if: github.ref == 'refs/heads/main' && needs.release.outputs.has_changes == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
+      - uses: cad0p/semver-calver-release/npm-publish@v1
         with:
-          version: 10
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          registry-url: https://registry.npmjs.org
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - name: Publish to npm
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          tag: v${{ needs.release.outputs.version }}
