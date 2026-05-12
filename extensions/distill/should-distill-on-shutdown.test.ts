@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import type { SessionShutdownEvent } from "@mariozechner/pi-coding-agent";
+import type { SessionShutdownEvent } from "@earendil-works/pi-coding-agent";
 
 import {
   type ShouldDistillOnShutdownConfig,

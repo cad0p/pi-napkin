@@ -1,4 +1,4 @@
-import type { SessionShutdownEvent } from "@mariozechner/pi-coding-agent";
+import type { SessionShutdownEvent } from "@earendil-works/pi-coding-agent";
 
 /**
  * Pure predicate that decides whether a distill subprocess should be spawned

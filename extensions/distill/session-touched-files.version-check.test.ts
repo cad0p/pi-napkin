@@ -3,7 +3,7 @@
  *
  * Our `extractFileOpsFromMessage` in session-touched-files.ts is a
  * reimplementation of pi's internal helper at:
- *   node_modules/@mariozechner/pi-coding-agent/dist/core/compaction/utils.js
+ *   node_modules/@earendil-works/pi-coding-agent/dist/core/compaction/utils.js
  *
  * If pi upstream renames, relocates, or removes that function, our
  * reimplementation can silently drift from truth (tool catalog adds,
@@ -31,7 +31,7 @@ const PI_UTILS_PATH = join(
   "..",
   "..",
   "node_modules",
-  "@mariozechner",
+  "@earendil-works",
   "pi-coding-agent",
   "dist",
   "core",

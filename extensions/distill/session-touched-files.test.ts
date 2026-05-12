@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, test } from "bun:test";
-import type { SessionEntry } from "@mariozechner/pi-coding-agent";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 import {
   extractBashRedirectionTargets,
   extractFileOpsFromMessage,

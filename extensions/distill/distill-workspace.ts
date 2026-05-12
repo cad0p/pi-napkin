@@ -30,7 +30,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 
 import { Napkin } from "@cad0p/napkin";
-import { SessionManager } from "@mariozechner/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import { DISTILL_WRAPPER_SCRIPT, MERGE_DRIVER_SCRIPT } from "./scripts-paths";
 

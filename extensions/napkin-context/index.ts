@@ -7,8 +7,8 @@ import {
   keyHint,
   type Theme,
   type ToolRenderResultOptions,
-} from "@mariozechner/pi-coding-agent";
-import { Markdown, Text } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 function loadShowStatus(vaultPath: string): boolean {

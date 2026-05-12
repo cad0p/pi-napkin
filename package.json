@@ -27,8 +27,8 @@
     "@cad0p/napkin": "*"
   },
   "peerDependencies": {
-    "@mariozechner/pi-coding-agent": ">=0.68.0",
-    "@mariozechner/pi-tui": "*",
+    "@earendil-works/pi-coding-agent": ">=0.74.0",
+    "@earendil-works/pi-tui": "*",
     "@sinclair/typebox": "*"
   },
   "license": "MIT"

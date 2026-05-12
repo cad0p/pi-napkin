@@ -2,7 +2,7 @@
  * File-write detection for the `before_agent_start` overlap injector.
  *
  * Adapted from pi's internal `extractFileOpsFromMessage`:
- *   @mariozechner/pi-coding-agent@0.74.0
+ *   @earendil-works/pi-coding-agent@0.74.0
  *   dist/core/compaction/utils.js — `extractFileOpsFromMessage`
  *
  * That function is not exported from pi's public API, so we reimplement
@@ -26,7 +26,7 @@
  *     the per-message paths, returns a deduped `Set<string>`.
  */
 
-import type { SessionEntry } from "@mariozechner/pi-coding-agent";
+import type { SessionEntry } from "@earendil-works/pi-coding-agent";
 
 /**
  * Tool names that mutate files, as used by pi's built-in tools. Kept in one
