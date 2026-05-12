@@ -60,6 +60,11 @@
 #                                belt-and-braces "merge did not complete"
 #                                bail-out path, which isn't reliably
 #                                triggerable via real driver output.
+#   NAPKIN_DISTILL_FORCE_MERGE_RC=<n>
+#                                override the captured merge exit code —
+#                                lets tests cover the unexpected-exit-code
+#                                branch (128 etc.) without contriving a
+#                                real git failure of that shape.
 
 set -uo pipefail
 
@@ -223,8 +228,40 @@ fi
 # --- Step 3: merge main into distill. LLM driver handles *.md conflicts. ---
 
 # Merge may return non-zero when conflicts remain after the driver 3-strikes
-# on some files; we don't treat that as fatal — we salvage those files below.
-git_retry git -C "$WORKTREE" merge --no-edit "$DEFAULT_BRANCH" > /dev/null 2>&1 || true
+# on some files; exit 1 is the expected "conflicts remain, salvage below".
+# Any other non-zero exit code (128 for corrupt index, 129+ for option
+# errors, etc.) indicates a REAL failure that salvage can't recover from
+# — log forensic info and bail out.
+#
+# We deliberately do NOT wrap this in git_retry: retrying after a partial
+# conflict leaves git with "you have unmerged files" and the second attempt
+# returns 128 (false positive for our unexpected-failure branch).
+# Transient index.lock contention on this single call isn't a real
+# concern — we're the only writer on the distill branch.
+merge_rc=0
+git -C "$WORKTREE" merge --no-edit "$DEFAULT_BRANCH" > /dev/null 2>&1 || merge_rc=$?
+# Testing hook: override the captured merge rc so tests can cover the
+# unexpected-exit-code branch (128 etc.) without having to contrive a
+# real git failure of that shape.
+if [ -n "${NAPKIN_DISTILL_FORCE_MERGE_RC:-}" ]; then
+  merge_rc="$NAPKIN_DISTILL_FORCE_MERGE_RC"
+fi
+case "$merge_rc" in
+  0)
+    # Clean merge — driver handled every conflict, no salvage needed.
+    ;;
+  1)
+    # Conflicts remain after driver 3-strike. Proceed to salvage below.
+    ;;
+  *)
+    log_error "git merge $DEFAULT_BRANCH failed unexpectedly (exit $merge_rc) — aborting"
+    record_dangling_sha
+    # Leave the merge in progress for forensic inspection; cleanup trap
+    # will wipe the worktree. Do NOT attempt salvage — the failure mode
+    # is unknown.
+    exit 1
+    ;;
+esac
 
 # Partial-merge salvage: any file still marked unmerged (driver gave up) gets
 # reverted to main's version. This preserves the clean distill content while

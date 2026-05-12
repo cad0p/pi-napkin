@@ -815,6 +815,75 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
     const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "10"]);
     expect(log).not.toContain("distill: merge");
   });
+
+  test("git merge returns unexpected exit code (C6): wrapper aborts + logs, no salvage", () => {
+    // Force merge_rc=128 via the testing hook so we exercise the
+    // unexpected-exit-code bail-out path. 128 is git's "general fatal"
+    // (corrupt index, invalid ref, etc.) — distinct from the expected
+    // exit 1 (conflicts remain, salvage). Without this branch the wrapper
+    // would fall through to the empty-UNMERGED salvage and attempt a
+    // spurious squash on a branch that was never actually merged.
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+    );
+    fs.writeFileSync(
+      path.join(workspace.worktreePath, "new.md"),
+      "---\ntitle: new\n---\n# content\n",
+    );
+
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "sh",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+      ],
+      {
+        cwd: workspace.worktreePath,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "test",
+          GIT_AUTHOR_EMAIL: "test@example.com",
+          GIT_COMMITTER_NAME: "test",
+          GIT_COMMITTER_EMAIL: "test@example.com",
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_SKIP_PI: "1",
+          NAPKIN_DISTILL_FORCE_MERGE_RC: "128",
+          NAPKIN_GIT_RETRY_MAX: "2",
+          NAPKIN_GIT_RETRY_DELAY: "0",
+        },
+      },
+    );
+
+    // Wrapper exits 1 via the unexpected-exit branch.
+    expect(r.status).toBe(1);
+
+    const errorLogs = fs.existsSync(errorDir)
+      ? fs
+          .readdirSync(errorDir)
+          .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
+      : [];
+    expect(errorLogs.length).toBeGreaterThan(0);
+    const combined = errorLogs.join("\n");
+    // Explicit diagnostic: unexpected exit code + dangling SHA.
+    expect(combined).toMatch(/failed unexpectedly \(exit 128\)/);
+    expect(combined).toContain("aborting");
+    expect(combined).toContain("dangling distill commit SHA:");
+
+    // No squash to main.
+    const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "10"]);
+    expect(log).not.toContain("distill: merge");
+  });
 });
 
 // ---------------------------------------------------------------------------
