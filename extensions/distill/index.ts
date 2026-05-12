@@ -26,6 +26,7 @@ import {
   getUnmergedDistillBranches,
   spawnDistillInWorktree,
 } from "./distill-workspace";
+import { DISTILL_WRAPPER_LEGACY_SCRIPT } from "./scripts-paths";
 import { getSessionTouchedFiles } from "./session-touched-files";
 import { shouldDistillOnShutdown } from "./should-distill-on-shutdown";
 
@@ -146,21 +147,20 @@ stand alone.
 Be selective. Only capture knowledge useful to someone working on this project later. Skip meta-discussion, tool output, and chatter.`;
 
 /**
- * Escape a string for use in single-quoted shell arguments.
- */
-function shellEscape(s: string): string {
-  return s.replace(/'/g, "'\\''");
-}
-
-/**
  * Spawn a detached pi distill process that survives parent exit.
  * The shell wrapper cleans up the temp dir when pi finishes.
  * Returns the temp dir path (used as a completion marker — when it disappears, distill is done).
+ *
+ * All arguments flow through argv (not `sh -c`) so there's zero shell-string
+ * interpolation in the spawn pipeline. The wrapper script
+ * (`distill-wrapper-legacy.sh`) runs pi and removes the temp dir, matching
+ * the worktree spawn path style.
  */
-function spawnDistill(
+export function spawnDistill(
   sessionFile: string,
   cwd: string,
   config: DistillConfig,
+  spawnFn: typeof spawn = spawn,
 ): string | null {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-distill-"));
 
@@ -172,19 +172,20 @@ function spawnDistill(
       return null;
     }
 
-    const piArgs = ["--session", forkedFile, "-p"];
+    // Positional args for the wrapper: [sessionFile, tmpDir, prompt, model?].
+    // Empty model string tells the wrapper to skip the --model flag.
+    const modelStr = config.model
+      ? `${config.model.provider}/${config.model.id}`
+      : "";
+    const wrapperArgs = [
+      DISTILL_WRAPPER_LEGACY_SCRIPT,
+      forkedFile,
+      tmpDir,
+      DISTILL_PROMPT,
+      modelStr,
+    ];
 
-    if (config.model) {
-      piArgs.push("--model", `${config.model.provider}/${config.model.id}`);
-    }
-
-    piArgs.push(DISTILL_PROMPT);
-
-    // Shell wrapper: run pi, then clean up temp dir regardless of exit code
-    const escapedArgs = piArgs.map((a) => `'${shellEscape(a)}'`).join(" ");
-    const cmd = `pi ${escapedArgs} >/dev/null 2>&1; rm -rf '${shellEscape(tmpDir)}'`;
-
-    const proc = spawn("sh", ["-c", cmd], {
+    const proc = spawnFn("sh", wrapperArgs, {
       cwd,
       detached: true,
       stdio: "ignore",

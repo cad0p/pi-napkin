@@ -28,3 +28,15 @@ export const DISTILL_WRAPPER_SCRIPT: string = path.join(
   SCRIPTS_DIR,
   "distill-wrapper.sh",
 );
+
+/**
+ * Absolute path to the legacy (git-optional) distill wrapper used by manual
+ * `/distill` in vaults without git. Thin shim: runs `pi -p <prompt>` + `rm
+ * -rf <tmpDir>`. Exists so the legacy spawn path uses argv-based
+ * `spawn("sh", [script, ...args])` semantics instead of `sh -c`, removing
+ * all shell-string interpolation from the extension.
+ */
+export const DISTILL_WRAPPER_LEGACY_SCRIPT: string = path.join(
+  SCRIPTS_DIR,
+  "distill-wrapper-legacy.sh",
+);
