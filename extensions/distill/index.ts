@@ -50,7 +50,24 @@ export interface VaultConfig {
   distill: DistillConfig;
 }
 
-const MAX_DISTILL_DURATION_MS = 10 * 60 * 1000; // 10 minutes
+/**
+ * Hard cap on how long we'll poll for a distill subprocess to complete
+ * before declaring it timed out and abandoning the worktree / tmp target.
+ *
+ * 10 minutes is the production default. Tests can override this via
+ * `NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE` so the timeout branch is
+ * exercisable without waiting 10 real minutes. The override is read each
+ * time the value is needed, so a test can set it before registering the
+ * extension and clear it in `afterEach`.
+ */
+export function getMaxDistillDurationMs(): number {
+  const override = process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE;
+  if (override) {
+    const n = Number.parseInt(override, 10);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return 10 * 60 * 1000; // 10 minutes
+}
 
 /**
  * Custom entry type used to persist `/distill-auto-this-session` state into the
@@ -734,7 +751,7 @@ export default function (pi: ExtensionAPI) {
 
     pollHandle = setInterval(() => {
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
-      const timedOut = Date.now() - startTime > MAX_DISTILL_DURATION_MS;
+      const timedOut = Date.now() - startTime > getMaxDistillDurationMs();
 
       if (fs.existsSync(target) && !timedOut) {
         if (ctx.hasUI && theme && showStatus) {
@@ -765,7 +782,10 @@ export default function (pi: ExtensionAPI) {
               theme.fg("error", "✗") + theme.fg("dim", " distill: timeout"),
             );
           }
-          ctx.ui.notify("Distillation timed out (10m)", "error");
+          ctx.ui.notify(
+            `Distillation timed out (${Math.round(getMaxDistillDurationMs() / 60000)}m)`,
+            "error",
+          );
         }
         return;
       }
