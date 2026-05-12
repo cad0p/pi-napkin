@@ -748,7 +748,12 @@ export function spawnDistillInWorktree(
   // Detached spawn: stdio "ignore" + unref() so the parent can exit cleanly
   // while the wrapper continues. cwd is the worktree so if the wrapper itself
   // crashes before `cd`, any core-dumps etc. land inside the disposable area.
-  const proc = spawnFn("sh", wrapperArgs, {
+  //
+  // Invoke via `bash` (not `sh`): the wrapper's shebang is `#!/usr/bin/env
+  // bash` and it relies on bash-specific syntax (arrays `pi_args=(...)`,
+  // `set -o pipefail`). On Ubuntu/Debian, `/bin/sh` is `dash` which
+  // parse-errors on bash syntax and exits 2 before the wrapper runs.
+  const proc = spawnFn("bash", wrapperArgs, {
     cwd: workspace.worktreePath,
     detached: true,
     stdio: "ignore",

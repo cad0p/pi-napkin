@@ -83,7 +83,7 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
     fs.rmSync(sessionDir, { recursive: true, force: true });
   });
 
-  test("spawns `sh` with the legacy wrapper path and positional argv (no sh -c)", () => {
+  test("spawns `bash` with the legacy wrapper path and positional argv (no sh -c)", () => {
     const { spawnFn, calls } = makeMockSpawn();
     const tmpDir = spawnDistill(
       sessionFile,
@@ -100,7 +100,7 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
 
     expect(calls).toHaveLength(1);
     const call = calls[0];
-    expect(call.command).toBe("sh");
+    expect(call.command).toBe("bash");
 
     // The first arg is the wrapper script path — NOT "-c". This is the key
     // regression assertion: the old path passed "-c" + command string.

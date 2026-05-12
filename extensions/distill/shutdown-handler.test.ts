@@ -175,8 +175,23 @@ describe("session_shutdown handler (Item 8)", () => {
 
   // Clear the recursion-guard env var — test runner may be inside a distill subprocess.
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+  // Saved git identity env vars — set dummy values before each test so the
+  // Phase C1 auto-init test (production does `git init` + `git commit` on a
+  // fresh vault) succeeds on CI runners without a global ~/.gitconfig.
+  // Local users already have identity via their gitconfig; this is a
+  // CI-portability safety net, not a production path.
+  const _savedGitEnv = {
+    authorName: process.env.GIT_AUTHOR_NAME,
+    authorEmail: process.env.GIT_AUTHOR_EMAIL,
+    committerName: process.env.GIT_COMMITTER_NAME,
+    committerEmail: process.env.GIT_COMMITTER_EMAIL,
+  };
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    process.env.GIT_AUTHOR_NAME = "Napkin CI";
+    process.env.GIT_AUTHOR_EMAIL = "ci@napkin.test";
+    process.env.GIT_COMMITTER_NAME = "Napkin CI";
+    process.env.GIT_COMMITTER_EMAIL = "ci@napkin.test";
     // Stub setInterval so session_start doesn't leak a real timer; shutdown
     // tests don't need the interval to fire.
     originalSetInterval = globalThis.setInterval;
@@ -195,6 +210,16 @@ describe("session_shutdown handler (Item 8)", () => {
     if (_savedRecurse !== undefined)
       process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    // Restore git identity env
+    for (const [key, val] of [
+      ["GIT_AUTHOR_NAME", _savedGitEnv.authorName],
+      ["GIT_AUTHOR_EMAIL", _savedGitEnv.authorEmail],
+      ["GIT_COMMITTER_NAME", _savedGitEnv.committerName],
+      ["GIT_COMMITTER_EMAIL", _savedGitEnv.committerEmail],
+    ] as const) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
     globalThis.setInterval = originalSetInterval;
     if (vault) {
       cleanupWorktrees(vault);

@@ -159,7 +159,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     return { spawnFn, calls };
   }
 
-  test("spawns `sh` with the wrapper script path and expected positional args", () => {
+  test("spawns `bash` with the wrapper script path and expected positional args", () => {
     const { spawnFn, calls } = makeMockSpawn();
     const result = spawnDistillInWorktree({
       vault,
@@ -171,7 +171,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
 
     expect(calls).toHaveLength(1);
     const call = calls[0];
-    expect(call.command).toBe("sh");
+    expect(call.command).toBe("bash");
 
     // Args: [wrapper, vault, worktree, branch, sessionFork, prompt, errorDir, model, defaultBranch]
     expect(call.args[0]).toBe(DISTILL_WRAPPER_SCRIPT);
@@ -287,7 +287,7 @@ describe("distill-wrapper.sh (integration)", () => {
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
-      "sh",
+      "bash",
       [
         DISTILL_WRAPPER_SCRIPT,
         vault,
@@ -401,7 +401,7 @@ describe("distill-wrapper.sh (integration)", () => {
   });
 
   test("missing required arg: exits 2 without cleanup errors", () => {
-    const r = spawnSync("sh", [DISTILL_WRAPPER_SCRIPT, "only-one-arg"], {
+    const r = spawnSync("bash", [DISTILL_WRAPPER_SCRIPT, "only-one-arg"], {
       encoding: "utf-8",
     });
     expect(r.status).toBe(2);
@@ -434,7 +434,7 @@ describe("distill-wrapper.sh (integration)", () => {
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
-      "sh",
+      "bash",
       [
         DISTILL_WRAPPER_SCRIPT,
         vault,
@@ -555,7 +555,7 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
-      "sh",
+      "bash",
       [
         DISTILL_WRAPPER_SCRIPT,
         vault,
@@ -767,7 +767,7 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
-      "sh",
+      "bash",
       [
         DISTILL_WRAPPER_SCRIPT,
         vault,
@@ -836,7 +836,7 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
-      "sh",
+      "bash",
       [
         DISTILL_WRAPPER_SCRIPT,
         vault,
@@ -951,7 +951,7 @@ describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
-      "sh",
+      "bash",
       [
         DISTILL_WRAPPER_SCRIPT,
         vault,
@@ -1159,7 +1159,7 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
-      "sh",
+      "bash",
       [
         DISTILL_WRAPPER_SCRIPT,
         vault,

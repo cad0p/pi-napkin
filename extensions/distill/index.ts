@@ -184,7 +184,11 @@ export function spawnDistill(
       modelStr,
     ];
 
-    const proc = spawnFn("sh", wrapperArgs, {
+    // Invoke via `bash` (not `sh`): the legacy wrapper's shebang is
+    // `#!/usr/bin/env bash` and it uses bash-specific syntax (arrays
+    // `pi_args=(...)`). On Ubuntu, `/bin/sh` is `dash` which parse-errors
+    // on bash syntax.
+    const proc = spawnFn("bash", wrapperArgs, {
       cwd,
       detached: true,
       stdio: "ignore",

@@ -99,10 +99,16 @@ function runGit(
   cwd: string,
   args: string[],
 ): { status: number | null; stdout: string; stderr: string } {
+  // `env: process.env` is required for Bun: unlike Node, Bun's spawnSync
+  // does NOT propagate mutations to `process.env` to the child unless
+  // `env` is passed explicitly (it snapshots env at runtime startup).
+  // Passing process.env here is a no-op on Node and restores Node-compat
+  // semantics on Bun so tests can control git identity via env vars.
   const r = spawnSync("git", args, {
     cwd,
     encoding: "utf-8",
     timeout: 30_000,
+    env: process.env,
   });
   return {
     status: r.status,
