@@ -206,6 +206,13 @@ export const NAPKIN_MERGE_DRIVER = "napkin-distill-merge";
  * `*.md merge=union` globally and would silently get our driver layered on
  * top via last-match-wins; that case is what this catches.
  *
+ * Pattern matching is case-insensitive (`*.MD` is detected too). On macOS
+ * (APFS default) and Windows (NTFS default) filesystems, git's pattern
+ * matching respects `core.ignorecase=true`, so `*.MD merge=union` DOES
+ * apply to `foo.md` files — silently overriding our driver via
+ * last-match-wins is exactly the scenario this detector exists to
+ * prevent.
+ *
  * The returned `rule` preserves the full original line (for accurate error
  * messages) and `driver` is just the captured driver name.
  */
@@ -220,8 +227,9 @@ export function detectConflictingMdMergeRule(
     // Match: `*.md` (exactly) followed by whitespace, with a `merge=<name>`
     // attribute somewhere on the line. Other attributes on the same line
     // (diff=..., text, etc.) are ignored — only the merge driver conflicts
-    // with ours.
-    const m = line.match(/^\*\.md\s+(?:.*\s+)?merge=([A-Za-z0-9_.-]+)/);
+    // with ours. Case-insensitive to honor `core.ignorecase=true` on
+    // APFS/NTFS (default on macOS and Windows).
+    const m = line.match(/^\*\.md\s+(?:.*\s+)?merge=([A-Za-z0-9_.-]+)/i);
     if (!m) continue;
     const driver = m[1];
     if (driver === NAPKIN_MERGE_DRIVER) continue; // Our own rule, idempotent.

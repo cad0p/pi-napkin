@@ -402,6 +402,28 @@ describe("detectConflictingMdMergeRule (G7)", () => {
     fs.writeFileSync(ga(), "*.md text\n");
     expect(detectConflictingMdMergeRule(ga())).toBeNull();
   });
+
+  test("case-variant `*.MD merge=union` → conflict (R2-1: APFS/NTFS core.ignorecase)", () => {
+    // On macOS (APFS default, case-insensitive) and Windows (NTFS default,
+    // case-insensitive), git's pattern matching respects
+    // `core.ignorecase=true`, so a user's `*.MD merge=union` rule DOES
+    // apply to `foo.md` files. Without case-insensitive detection we'd
+    // silently override via last-match-wins.
+    fs.writeFileSync(ga(), "*.MD merge=union\n");
+    const r = detectConflictingMdMergeRule(ga());
+    expect(r).not.toBeNull();
+    expect(r?.driver).toBe("union");
+    expect(r?.rule).toBe("*.MD merge=union");
+  });
+
+  test("case-variant `*.Md MERGE=Ours` mixed-case attribute → conflict", () => {
+    // Extra paranoia: attribute name is case-insensitive too (git treats
+    // the `.gitattributes` file case-insensitively on ignorecase systems).
+    fs.writeFileSync(ga(), "*.Md MERGE=Ours\n");
+    const r = detectConflictingMdMergeRule(ga());
+    expect(r).not.toBeNull();
+    expect(r?.driver).toBe("Ours");
+  });
 });
 
 describe("countTrackedFiles", () => {
