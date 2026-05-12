@@ -1006,6 +1006,112 @@ describe("getDistillState (consolidated enumeration, CLN-3)", () => {
   });
 });
 
+describe("R2-4: getActiveDistills skips branch listing", () => {
+  // Proves the optimization: `getActiveDistills` must NOT invoke
+  // `git branch --list` (it only needs worktrees + liveness). The
+  // `getUnmergedDistillBranches` and `getDistillState` paths still do,
+  // because a branch can exist without a worktree.
+  //
+  // Observation strategy: prepend a PATH shim that logs each `git <args>`
+  // invocation to a file, then exec the real git. No in-process mocking.
+  let vault: string;
+  let sessionDir: string;
+  let sourceSession: string;
+  let shimDir: string;
+  let gitLog: string;
+  let realGit: string;
+  let origPath: string | undefined;
+
+  beforeEach(() => {
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "r24-src-"));
+    sourceSession = createSeededSessionFile(sessionDir, sessionDir);
+
+    // Resolve absolute path to the real git binary BEFORE the shim hides it.
+    const which = spawnSync("which", ["git"], { encoding: "utf-8" });
+    realGit = which.stdout.trim();
+    if (!realGit) throw new Error("cannot locate real git");
+
+    // Build shim.
+    shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "r24-shim-"));
+    gitLog = path.join(shimDir, "git.log");
+    const gitShim = path.join(shimDir, "git");
+    fs.writeFileSync(
+      gitShim,
+      `#!/bin/bash\nprintf '%s\\n' "$*" >> ${JSON.stringify(gitLog)}\nexec ${JSON.stringify(realGit)} "$@"\n`,
+      { mode: 0o755 },
+    );
+
+    origPath = process.env.PATH;
+    process.env.PATH = `${shimDir}:${origPath ?? ""}`;
+  });
+
+  afterEach(() => {
+    if (origPath === undefined) delete process.env.PATH;
+    else process.env.PATH = origPath;
+    fs.rmSync(shimDir, { recursive: true, force: true });
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  const readLog = (): string[] =>
+    fs.existsSync(gitLog)
+      ? fs
+          .readFileSync(gitLog, "utf-8")
+          .split("\n")
+          .filter((l) => l.length > 0)
+      : [];
+
+  test("getActiveDistills does NOT shell out for `git branch --list`", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    // Drain any setup-phase invocations: only count git calls from
+    // getActiveDistills onward.
+    fs.writeFileSync(gitLog, "");
+
+    try {
+      const active = getActiveDistills({ contentPath: vault });
+      expect(active.length).toBe(1);
+
+      const calls = readLog();
+      // Sanity: worktree-list IS called.
+      expect(calls.some((c) => c.includes("worktree list"))).toBe(true);
+      // R2-4 invariant: branch-list is NOT called.
+      expect(calls.some((c) => c.includes("branch --list"))).toBe(false);
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+
+  test("getUnmergedDistillBranches DOES shell out for `git branch --list`", () => {
+    // Sanity/contrast: the unmerged path genuinely needs branch listing.
+    const w = createDistillWorkspace(vault, sourceSession);
+    fs.writeFileSync(gitLog, "");
+
+    try {
+      getUnmergedDistillBranches({ contentPath: vault });
+      const calls = readLog();
+      expect(calls.some((c) => c.includes("worktree list"))).toBe(true);
+      expect(calls.some((c) => c.includes("branch --list"))).toBe(true);
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+
+  test("getDistillState DOES shell out for `git branch --list` (composed path)", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    fs.writeFileSync(gitLog, "");
+
+    try {
+      getDistillState({ contentPath: vault });
+      const calls = readLog();
+      expect(calls.some((c) => c.includes("worktree list"))).toBe(true);
+      expect(calls.some((c) => c.includes("branch --list"))).toBe(true);
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+});
+
 describe("diffWorktreeSinceStart", () => {
   let vault: string;
   let sessionDir: string;

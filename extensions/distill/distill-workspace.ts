@@ -153,6 +153,12 @@ function assertVaultIsGitRepo(vaultPath: string): void {
  * Does not throw on non-zero exit \u2014 callers decide how to react (retry,
  * translate to DistillError, ignore, \u2026). 30s timeout per call is a sanity
  * ceiling; normal git invocations complete in milliseconds.
+ *
+ * `env: process.env` is required for Bun: unlike Node, Bun's spawnSync
+ * does NOT propagate mutations to `process.env` to the child unless
+ * `env` is passed explicitly (it snapshots env at runtime startup).
+ * Without this, tests that manipulate PATH (e.g. to shim `git`) would
+ * silently exec the real git. Matches the same fix in `auto-setup.ts`.
  */
 function runGit(
   cwd: string,
@@ -162,6 +168,7 @@ function runGit(
     cwd,
     encoding: "utf-8",
     timeout: 30_000,
+    env: process.env,
   });
   return {
     status: r.status,
@@ -816,12 +823,13 @@ export interface ActiveDistill {
  * failure, etc.). Never throws: this is called from UI paths that must not
  * block on git hiccups.
  *
- * Thin wrapper over {@link getDistillState}; prefer that call site when you
- * also need the unmerged-branches list so the two overlap share a single
- * `git worktree list` invocation.
+ * Invokes `git worktree list --porcelain` exactly once and does NOT touch
+ * the branch list — so callers that only need the active set (e.g. the
+ * `before_agent_start` overlap injector) don't pay for a `git branch`
+ * invocation they don't need. (R2-4: restored a pre-CLN-3 fast path.)
  */
 export function getActiveDistills(vault: StaleCleanupVault): ActiveDistill[] {
-  return getDistillState(vault).active;
+  return toActiveDistills(listDistillWorktrees(vault.contentPath));
 }
 
 /**
@@ -837,19 +845,22 @@ export function getActiveDistills(vault: StaleCleanupVault): ActiveDistill[] {
  *
  * Returns empty on no-git / git-error. Never throws.
  *
- * Thin wrapper over {@link getDistillState}; prefer that call site when you
- * also need the active-distill list so the two overlap share a single
- * `git worktree list` invocation.
+ * Calls `git worktree list` + `git branch --list` (both are needed: a
+ * branch can exist without a worktree). Skips the per-entry
+ * meta.json/liveness hydration that `getActiveDistills` does.
  */
 export function getUnmergedDistillBranches(vault: StaleCleanupVault): string[] {
-  return getDistillState(vault).unmerged;
+  const vaultPath = vault.contentPath;
+  const worktrees = listDistillWorktrees(vaultPath);
+  const branches = listDistillBranches(vaultPath);
+  const inWorktrees = new Set(worktrees.map((e) => e.branch));
+  return branches.filter((b) => !inWorktrees.has(b));
 }
 
 /**
  * Combined snapshot of distill state for a vault, returned in a single
- * pass over git plumbing. Used by `/distill-status` and the
- * `before_agent_start` overlap injector — both callers want "what's
- * running" *and* "what's pending cleanup" at the same time.
+ * pass over git plumbing. Used by `/distill-status` — the user wants
+ * "what's running" *and* "what's pending cleanup" at the same time.
  *
  * Behavior is equivalent to calling `getActiveDistills` + `getUnmergedDistillBranches`
  * back-to-back, but we invoke `git worktree list --porcelain` exactly once
@@ -863,22 +874,69 @@ export function getDistillState(vault: StaleCleanupVault): {
   unmerged: string[];
 } {
   const vaultPath = vault.contentPath;
-  if (!fs.existsSync(path.join(vaultPath, ".git"))) {
-    return { active: [], unmerged: [] };
-  }
+  const worktrees = listDistillWorktrees(vaultPath);
+  const active = toActiveDistills(worktrees);
+  const branches = listDistillBranches(vaultPath);
+  const inWorktrees = new Set(worktrees.map((e) => e.branch));
+  const unmerged = branches.filter((b) => !inWorktrees.has(b));
+  return { active, unmerged };
+}
 
-  // Single worktree enumeration; reused for both halves of the result.
+/**
+ * Primitive: enumerate `distill/*` worktree entries for a vault.
+ *
+ * Returns the subset of `git worktree list --porcelain` entries whose
+ * branch is under `distill/*`. Empty on no-git / git-error. Cheap: one
+ * `spawnSync` call plus a string split.
+ *
+ * Used by:
+ *   - {@link getActiveDistills} directly (no branch listing needed).
+ *   - {@link getUnmergedDistillBranches} (combined with branch list).
+ *   - {@link getDistillState} (combined).
+ */
+function listDistillWorktrees(
+  vaultPath: string,
+): { path: string; branch: string }[] {
+  if (!fs.existsSync(path.join(vaultPath, ".git"))) return [];
   const listRes = runGit(vaultPath, ["worktree", "list", "--porcelain"]);
-  const distillWorktrees =
-    listRes.status === 0
-      ? parseWorktreeList(listRes.stdout).filter((e) =>
-          e.branch.startsWith("distill/"),
-        )
-      : [];
+  if (listRes.status !== 0) return [];
+  return parseWorktreeList(listRes.stdout).filter((e) =>
+    e.branch.startsWith("distill/"),
+  );
+}
 
-  // active = every distill/* worktree (liveness decided per-entry below).
+/**
+ * Primitive: enumerate `distill/*` branches (irrespective of worktrees).
+ *
+ * Empty on no-git / git-error. One `git branch --list` invocation.
+ */
+function listDistillBranches(vaultPath: string): string[] {
+  if (!fs.existsSync(path.join(vaultPath, ".git"))) return [];
+  const branchesRes = runGit(vaultPath, [
+    "branch",
+    "--list",
+    "distill/*",
+    "--format=%(refname:short)",
+  ]);
+  if (branchesRes.status !== 0) return [];
+  return branchesRes.stdout
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
+}
+
+/**
+ * Primitive: hydrate worktree entries into `ActiveDistill[]` with
+ * meta.json + pid-liveness.
+ *
+ * Per entry: one `readDistillMeta` (bounded FS read) + one
+ * `isPidAlive` call (`process.kill(pid, 0)`). No git invocation.
+ */
+function toActiveDistills(
+  entries: { path: string; branch: string }[],
+): ActiveDistill[] {
   const active: ActiveDistill[] = [];
-  for (const entry of distillWorktrees) {
+  for (const entry of entries) {
     const meta = readDistillMeta(entry.path);
     const pid = meta?.pid ?? -1;
     const startedAt = meta?.startedAt ?? null;
@@ -897,25 +955,7 @@ export function getDistillState(vault: StaleCleanupVault): {
       startSha: meta?.startSha,
     });
   }
-
-  // unmerged = every distill/* branch that is NOT currently checked out.
-  const branchesRes = runGit(vaultPath, [
-    "branch",
-    "--list",
-    "distill/*",
-    "--format=%(refname:short)",
-  ]);
-  if (branchesRes.status !== 0) {
-    return { active, unmerged: [] };
-  }
-  const branches = branchesRes.stdout
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0);
-  const inWorktrees = new Set(distillWorktrees.map((e) => e.branch));
-  const unmerged = branches.filter((b) => !inWorktrees.has(b));
-
-  return { active, unmerged };
+  return active;
 }
 
 /**
