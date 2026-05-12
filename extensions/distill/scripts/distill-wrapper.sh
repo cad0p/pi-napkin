@@ -45,6 +45,11 @@
 #   NAPKIN_DISTILL_SKIP_PI=1     skip the pi invocation entirely; distill
 #                                wrapper instead expects tests to pre-stage any
 #                                file changes into the worktree.
+#   NAPKIN_DISTILL_HALT_AFTER_META=1
+#                                halt right after rewriting meta.json's pid to
+#                                the wrapper's pid — lets tests inspect the
+#                                updated meta without the cleanup trap
+#                                wiping the worktree.
 
 set -uo pipefail
 
@@ -122,6 +127,38 @@ cleanup() {
   exit "$rc"
 }
 trap cleanup EXIT
+
+# --- Update meta.json's pid to OUR pid ($$) -----------------------------------
+#
+# createDistillWorkspace() writes meta.json before this wrapper starts, with
+# `pid` set to the parent pi session's pid — a pre-spawn placeholder. For
+# liveness checks in `getActiveDistills` / `cleanupStaleWorktrees` to be
+# accurate, the recorded pid must track THIS wrapper's lifetime: when this
+# process dies, the worktree is defunct; when it runs, the worktree is live.
+# Rewrite the pid field in place before doing anything else.
+#
+# The JSON is produced by node's JSON.stringify(obj, null, 2), so the `pid`
+# line always has the shape `  "pid": <number>,`. A targeted sed replaces
+# just that line. We use a temp file + mv for atomicity (cheap since it's
+# same-filesystem).
+META_PATH="$WORKTREE/.napkin/distill/meta.json"
+if [ -f "$META_PATH" ]; then
+  META_TMP="$META_PATH.tmp.$$"
+  if sed -E "s/(\"pid\":[[:space:]]*)[0-9]+/\1$$/" "$META_PATH" > "$META_TMP"; then
+    mv "$META_TMP" "$META_PATH"
+  else
+    rm -f "$META_TMP"
+    log_error "failed to rewrite meta.json pid to wrapper pid ($$)"
+  fi
+fi
+
+# Testing hook: halt right after the meta-pid rewrite so integration tests
+# can inspect the updated meta.json before the cleanup trap removes the
+# worktree. Clears the EXIT trap so cleanup is skipped.
+if [ "${NAPKIN_DISTILL_HALT_AFTER_META:-}" = "1" ]; then
+  trap - EXIT
+  exit 0
+fi
 
 # --- Step 1: run pi in the worktree to perform the distill. -----------------
 

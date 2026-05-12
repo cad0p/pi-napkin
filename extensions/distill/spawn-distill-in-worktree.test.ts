@@ -403,6 +403,83 @@ describe("distill-wrapper.sh (integration)", () => {
     });
     expect(r.status).toBe(2);
   });
+
+  test("wrapper rewrites meta.json pid to its own pid (C2)", () => {
+    // The parent JS side writes meta.json with `pid: process.pid` (the
+    // parent pi session). The wrapper MUST overwrite that with its own
+    // pid ($$) so liveness checks against the recorded pid track the
+    // wrapper's lifetime, not the long-lived parent session's.
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+    );
+    const metaPath = path.join(
+      workspace.worktreePath,
+      ".napkin",
+      "distill",
+      "meta.json",
+    );
+
+    // Before wrapper runs: meta.pid = parent (this process).
+    const beforeMeta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+    expect(beforeMeta.pid).toBe(process.pid);
+
+    // Run the wrapper with HALT_AFTER_META so it updates meta.json then
+    // exits 0 without touching pi, git, or the cleanup trap. The worktree
+    // survives so we can inspect meta.json.
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "sh",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+      ],
+      {
+        cwd: workspace.worktreePath,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_HALT_AFTER_META: "1",
+        },
+      },
+    );
+    expect(r.status).toBe(0);
+
+    // After wrapper runs: meta.pid should NOT be this process's pid.
+    // (The wrapper's pid is distinct from the test's pid; spawnSync
+    // exits the child before returning, so we can't compare to a live
+    // pid — but we CAN confirm it's no longer the parent's.)
+    const afterMeta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+    expect(typeof afterMeta.pid).toBe("number");
+    expect(afterMeta.pid).not.toBe(process.pid);
+    expect(afterMeta.pid).toBeGreaterThan(0);
+
+    // Other meta fields unchanged by the pid rewrite.
+    expect(afterMeta.vault).toBe(beforeMeta.vault);
+    expect(afterMeta.branch).toBe(beforeMeta.branch);
+    expect(afterMeta.startedAt).toBe(beforeMeta.startedAt);
+    expect(afterMeta.parentSession).toBe(beforeMeta.parentSession);
+
+    // Clean up — HALT_AFTER_META skipped the trap so we must manually
+    // tear down the worktree and branch.
+    spawnSync(
+      "git",
+      ["-C", vault, "worktree", "remove", "--force", workspace.worktreePath],
+      { encoding: "utf-8" },
+    );
+    spawnSync("git", ["-C", vault, "branch", "-D", workspace.branchName], {
+      encoding: "utf-8",
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -55,7 +55,16 @@ export class DistillError extends Error {
  * Schema is append-only. Readers MUST tolerate unknown fields.
  */
 export interface DistillMeta {
-  /** PID of the detached `sh -c` wrapper spawned by spawnDistillInWorktree. */
+  /**
+   * PID of the detached wrapper shell. Written first as a pre-spawn
+   * placeholder (= `process.pid` of the parent pi session) by
+   * `createDistillWorkspace`, then OVERWRITTEN by the wrapper itself
+   * (`$$`) immediately after it installs its cleanup trap. Readers see the
+   * wrapper's pid for the vast majority of the distill's lifetime; only a
+   * brief window (≲ 100ms between JS write and wrapper's rewrite) shows the
+   * parent pid. Liveness checks (`/distill-status.alive`,
+   * `cleanupStaleWorktrees`) use this field via `process.kill(pid, 0)`.
+   */
   pid: number;
   /** Absolute path to the main vault (NOT the worktree). */
   vault: string;
