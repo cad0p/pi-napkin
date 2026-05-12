@@ -16,14 +16,25 @@ pnpm add -g @cad0p/napkin
 Then install the pi-napkin extension:
 
 ```bash
-pi install @cad0p/pi-napkin
+pi install npm:@cad0p/pi-napkin
 ```
 
 <details>
 <summary>Pre-release / dev installs</summary>
 
-- Pre-release versions (when published): `pi install @cad0p/pi-napkin@next`
-- Install from source (for local development): `pi install git:github.com/cad0p/pi-napkin`
+- Pre-release (calver snapshots from `main`, published to npm `@next` on every push):
+
+  ```bash
+  pi install npm:@cad0p/pi-napkin@next
+  ```
+
+  pi pins npm installs with an explicit tag or version — `pi update` won't auto-bump this. Re-run the install to pick up newer `@next` builds.
+
+- Install from source for local development:
+
+  ```bash
+  pi install git:github.com/cad0p/pi-napkin
+  ```
 
 </details>
 
