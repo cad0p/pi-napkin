@@ -6,6 +6,8 @@ import { Napkin } from "@cad0p/napkin";
 import type {
   CustomEntry,
   ExtensionAPI,
+  ExtensionContext,
+  ExtensionUIContext,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
@@ -228,13 +230,17 @@ export default function (pi: ExtensionAPI) {
 
   // Refs captured from session_start so `/distill-auto-this-session` can refresh
   // the status bar immediately without waiting for the next countdown tick.
-  let uiRef: {
+  //
+  // `ExtensionUIContext` is pi's public UI surface (setStatus, theme, …). We keep
+  // the whole thing instead of a narrow subset so future status-bar tweaks don't
+  // need to widen the type — and so TS catches method renames at the pi boundary.
+  type DistillUIRef = {
     hasUI: boolean;
-    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
-    ui: any;
+    ui: ExtensionUIContext;
     showStatus: boolean;
     intervalMs: number;
-  } | null = null;
+  };
+  let uiRef: DistillUIRef | null = null;
 
   function renderIdleStatus(): void {
     if (!uiRef?.hasUI || !uiRef.showStatus) return;
@@ -586,17 +592,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   /**
-   * Ctx shape shared by the two run-distill paths. Kept structural because
-   * the real pi context is a superset; we only need these four fields.
+   * Ctx shape shared by the two run-distill paths. Kept as a `Pick` of
+   * pi's real `ExtensionContext` so the four fields we care about stay
+   * in sync with pi at the type level (any rename upstream surfaces as
+   * a compile error here rather than silently widening to `any`).
    */
-  interface RunCtx {
-    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
-    sessionManager: any;
-    hasUI: boolean;
-    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
-    ui: any;
-    cwd: string;
-  }
+  type RunCtx = Pick<
+    ExtensionContext,
+    "sessionManager" | "hasUI" | "ui" | "cwd"
+  >;
 
   /**
    * Strategy bundle for the shared runner. Each caller (legacy or worktree)
