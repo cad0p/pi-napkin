@@ -92,6 +92,17 @@ export interface SetupResult {
     /** Just the `<driver>` captured from `*.md merge=<driver>`. */
     driver: string;
   };
+  /**
+   * Set to `true` when the vault had a `.git/` but no commits (HEAD
+   * unresolvable) and auto-setup synthesized an empty initial commit to
+   * make HEAD valid. Distinct from `initialized` (which is "we ran
+   * `git init`"): this path fires on an existing-but-empty repo where
+   * someone ran `git init` by hand and never committed. Without the
+   * seed, `git worktree add ... HEAD` in createDistillWorktree would
+   * fail with `fatal: invalid reference: HEAD` — the bug that
+   * motivated FB-2.
+   */
+  seededCommit?: boolean;
 }
 
 /**
@@ -364,7 +375,37 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
     }
   }
 
-  return { initialized, scaffolded };
+  // HEAD-valid invariant: createDistillWorktree requires HEAD to resolve
+  // to a commit. The paths above (fresh init OR existing repo + scaffolded
+  // files) produce a commit; the idempotent path (existing repo, nothing
+  // to scaffold) does NOT — so a vault where someone ran `git init` by
+  // hand and never committed leaves HEAD unresolvable. Seed an empty
+  // initial commit so `git worktree add ... HEAD` has something to pin to.
+  // This also covers the narrow window where `git init` succeeded above
+  // (we set `initialized = true`) but scaffolding wrote zero lines (both
+  // .gitignore and .gitattributes already present with our exact content)
+  // — that would fall into neither branch and leave a commit-less repo.
+  let seededCommit: SetupResult["seededCommit"];
+  const headAfter = runGit(vaultPath, ["rev-parse", "--verify", "HEAD"]);
+  if (headAfter.status !== 0) {
+    const seed = runGit(vaultPath, [
+      "commit",
+      "--allow-empty",
+      "-q",
+      "-m",
+      "napkin: initial vault commit (auto-distill setup)",
+    ]);
+    if (seed.status !== 0) {
+      return {
+        initialized,
+        scaffolded,
+        error: `git seed commit failed: ${seed.stderr.trim() || "unknown error"}`,
+      };
+    }
+    seededCommit = true;
+  }
+
+  return { initialized, scaffolded, seededCommit };
 }
 
 /**

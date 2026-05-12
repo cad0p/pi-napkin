@@ -345,6 +345,71 @@ describe("ensureVaultReadyForAutoDistill", () => {
     expect(r.error).toMatch(/conflicting merge rule/);
     expect(r.conflict?.driver).toBe("union");
   });
+
+  // --- FB-2: HEAD-valid invariant ------------------------------------------
+  //
+  // `createDistillWorktree` runs `git worktree add ... HEAD`, which fails
+  // with `fatal: invalid reference: HEAD` when the repo has no commits.
+  // Auto-setup must NEVER leave the vault in a `.git` + empty state —
+  // otherwise the FIRST auto-distill after session_start crashes. The
+  // three tests below pin each entry path.
+
+  test("FB-2: existing empty repo, idempotent scaffolding — seeds empty commit so HEAD is valid", () => {
+    // Setup: run `git init` in the vault, then pre-install BOTH our
+    // scaffolding files with exact content — so mergeLines appends
+    // nothing and the existing-repo commit branch is SKIPPED. This is
+    // the idempotent re-run path on a vault that happens to have no
+    // commits yet. Pre-FB-2 this branch left HEAD unresolvable.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    // Pre-populate .gitignore + .gitattributes with our exact content so
+    // the scaffold is a no-op.
+    const giContent = `${GITIGNORE_LINES.filter(
+      (l) => l.trim().length > 0 && !l.startsWith("#"),
+    ).join("\n")}\n`;
+    const gaContent = `${GITATTRIBUTES_LINES.filter(
+      (l) => l.trim().length > 0 && !l.startsWith("#"),
+    ).join("\n")}\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), giContent);
+    fs.writeFileSync(path.join(vault, ".gitattributes"), gaContent);
+
+    // Pre-condition: HEAD does not resolve (no commits).
+    const beforeHead = git(vault, ["rev-parse", "--verify", "HEAD"]);
+    expect(beforeHead.status).not.toBe(0);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.initialized).toBe(false);
+    expect(r.scaffolded).toEqual([]); // nothing to scaffold
+    expect(r.seededCommit).toBe(true);
+
+    // Post-condition: HEAD resolves — subsequent createDistillWorktree
+    // won't explode.
+    const afterHead = git(vault, ["rev-parse", "--verify", "HEAD"]);
+    expect(afterHead.status).toBe(0);
+  });
+
+  test("FB-2: existing empty repo, new scaffolding — normal scaffold+commit path still works", () => {
+    // Pre-FB-2 this path was fine: the scaffold-commit creates HEAD. We
+    // pin it to make sure the FB-2 change doesn't accidentally double-
+    // commit (scaffold commit + seeded empty commit).
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    // No pre-existing scaffolding — mergeLines will write both.
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.initialized).toBe(false);
+    expect(r.scaffolded.sort()).toEqual([".gitattributes", ".gitignore"]);
+    // The scaffold commit provides HEAD; no empty seed needed.
+    expect(r.seededCommit).toBeUndefined();
+
+    const log = git(vault, ["log", "--oneline"]).stdout.trim().split("\n");
+    // Exactly one commit: the scaffold commit. No seeded-empty commit on
+    // top of it.
+    expect(log.length).toBe(1);
+    expect(log[0]).toContain("napkin: scaffold auto-distill git config");
+  });
 });
 
 describe("detectConflictingMdMergeRule (G7)", () => {

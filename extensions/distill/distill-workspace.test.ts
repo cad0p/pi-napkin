@@ -138,6 +138,43 @@ describe("createDistillWorktree", () => {
     }
   });
 
+  test("FB-2: throws DistillError with helpful message if vault repo has no commits (HEAD unresolvable)", () => {
+    // Pre-FB-2 `git worktree add ... HEAD` would bubble up the raw
+    // 'fatal: invalid reference: HEAD' (exit 128) as a generic
+    // DistillError message. Now we pre-validate and throw a targeted
+    // message the shutdown handler / interval handler logs instead.
+    const emptyRepo = fs.mkdtempSync(path.join(os.tmpdir(), "empty-repo-"));
+    try {
+      // git init but NO commit — HEAD points at refs/heads/main but
+      // refs/heads/main does not exist.
+      spawnSync("git", ["-C", emptyRepo, "init", "-q", "-b", "main"], {
+        encoding: "utf-8",
+      });
+      expect(() =>
+        createDistillWorktree(
+          emptyRepo,
+          "distill/fb2-1",
+          path.join(emptyRepo, "wt"),
+        ),
+      ).toThrow(DistillError);
+      // Confirm the message is the FB-2 diagnostic, not the raw git exit.
+      try {
+        createDistillWorktree(
+          emptyRepo,
+          "distill/fb2-2",
+          path.join(emptyRepo, "wt2"),
+        );
+        throw new Error("expected throw");
+      } catch (err) {
+        expect(err).toBeInstanceOf(DistillError);
+        expect((err as Error).message).toMatch(/no commits yet/);
+        expect((err as Error).message).toMatch(/HEAD unresolvable/);
+      }
+    } finally {
+      fs.rmSync(emptyRepo, { recursive: true, force: true });
+    }
+  });
+
   test("throws DistillError if branch name already taken", () => {
     const branch = generateDistillBranchName();
     const wt1 = path.join(vault, DISTILL_WORKTREES_SUBDIR, "wt1");

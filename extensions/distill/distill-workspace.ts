@@ -263,6 +263,27 @@ export function createDistillWorktree(
   worktreePath: string,
 ): string {
   assertVaultIsGitRepo(vaultPath);
+
+  // Verify HEAD resolves to a valid commit. An empty repo (git init
+  // without any commit) has .git/HEAD pointing at refs/heads/main but no
+  // commits to resolve to. `git worktree add ... HEAD` fails with exit
+  // 128: "fatal: invalid reference: HEAD". Surface this as a DistillError
+  // the caller can catch and log gracefully rather than a cryptic git
+  // exit.
+  //
+  // auto-setup seeds an empty commit so the happy path never hits this,
+  // but the guard stays cheap and catches vaults where .git came from
+  // outside auto-setup (user's own `git init`, brazil workspace
+  // scaffolding, etc.) and never got a commit.
+  const headCheck = runGit(vaultPath, ["rev-parse", "--verify", "HEAD"]);
+  if (headCheck.status !== 0) {
+    throw new DistillError(
+      `vault git repo has no commits yet (HEAD unresolvable); ` +
+        `auto-distill can't create a worktree. Make an initial commit in ` +
+        `${vaultPath} before using auto-distill, or rerun setup.`,
+    );
+  }
+
   // Ensure the parent of worktreePath exists; `git worktree add` requires a
   // non-existent target directory but will happily create intermediate dirs
   // for us \u2014 except when we're writing into `.napkin/distill-worktrees/`
