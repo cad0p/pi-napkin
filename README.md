@@ -100,6 +100,12 @@ Or edit `<vault>/.napkin/config.json` directly:
 | `distill.model.provider` | `"anthropic"` | Model provider for the distill subprocess. |
 | `distill.model.id` | `"claude-sonnet-4-6"` | Model ID. Prefer a cheap, fast model — distill is automated, not interactive. |
 
+### Environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE` | `600000` (10 min) | Override the maximum wall-clock duration a detached distill subprocess is allowed before the parent's poll loop declares it stuck and force-cleans its worktree. Value is milliseconds as a positive integer; invalid values (`0`, negative, non-numeric, NaN) are silently ignored and the 10-minute default is used. Lower this for short-session vaults where a 10-minute hang is unacceptable; raise it for vaults with large merge windows. |
+
 ### How it works
 
 When enabled, on session start the extension:
