@@ -300,20 +300,24 @@ export default function (pi: ExtensionAPI) {
     // where worktrees will be rooted). `napkinVault.contentPath` may differ
     // for legacy bare vaults where the vault IS a `.napkin/` subdir —
     // worktree spawning still uses `ctx.cwd`, so git must live there.
+    //
+    // `setupFailed` is the load-bearing signal for the suppression logic
+    // below: once setup has failed, we MUST NOT re-read the persisted
+    // suppression state, because a `false` there would re-enable
+    // auto-distill on a vault that isn't actually usable.
+    let setupFailed = false;
     try {
       const setup = ensureVaultReadyForAutoDistill({
         contentPath: ctx.cwd,
       });
       if (setup.error) {
+        setupFailed = true;
         if (ctx.hasUI) {
           ctx.ui.notify(
             `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
             "error",
           );
         }
-        // Force-suppress without persisting — the issue is vault-level, not
-        // user intent; next session will re-try setup.
-        autoDistillSuppressed = true;
       } else if (setup.initialized) {
         const tracked = countTrackedFiles(ctx.cwd);
         const files = tracked >= 0 ? tracked : setup.scaffolded.length;
@@ -353,7 +357,16 @@ export default function (pi: ExtensionAPI) {
 
     // Restore the per-session pause state from the session file so that
     // resuming a session retains the `/distill-auto-this-session` setting.
-    autoDistillSuppressed = readPersistedSuppressed(ctx.sessionManager);
+    //
+    // BUT: when setup failed above, we must keep the safety flag ON. The
+    // persisted value reflects USER intent (opted out for this session);
+    // setup failure is a VAULT-level problem that should override user
+    // intent for this session only — next session will re-try setup.
+    if (setupFailed) {
+      autoDistillSuppressed = true;
+    } else {
+      autoDistillSuppressed = readPersistedSuppressed(ctx.sessionManager);
+    }
 
     lastDistillTimestamp = Date.now();
     const intervalMs = config.intervalMinutes * 60 * 1000;

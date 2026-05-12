@@ -328,6 +328,32 @@ describe("session_shutdown handler (Item 8)", () => {
     }
   });
 
+  test("setup failure: suppresses shutdown distill AND overrides persisted suppression=false (C1)", async () => {
+    // Simulate a vault-level setup failure: create a directory where
+    // `.gitignore` is supposed to be a file. `ensureVaultReadyForAutoDistill`
+    // tries `fs.writeFileSync(.gitignore, ...)` which fails with EISDIR —
+    // the function returns `{ error: ... }`.
+    //
+    // The previous (buggy) implementation set `autoDistillSuppressed = true`
+    // inside the setup-failure branch but then OVERWROTE that flag ~40
+    // lines later with `readPersistedSuppressed(...)`, which returns `false`
+    // for a fresh session. Net effect: a vault-level failure didn't
+    // actually suppress anything. This test pins the fixed ordering.
+    vault = createVault({ enabled: true });
+    // Remove the .gitignore file that createVault's git init+commit added,
+    // and replace it with a directory to force mergeLines to fail.
+    const giPath = path.join(vault, ".gitignore");
+    if (fs.existsSync(giPath)) fs.rmSync(giPath, { force: true });
+    fs.mkdirSync(giPath, { recursive: true });
+
+    sm = createSession(vault);
+    const worktrees = await runLifecycle(vault, sm, "quit");
+
+    // Setup failed — shutdown distill must NOT have spawned. The
+    // suppression is the user-visible fail-safe.
+    expect(worktrees).toBe(0);
+  });
+
   test("sets lastSpawnedSize so a re-entry of shutdown on same content is a no-op", async () => {
     vault = createVault({ enabled: true });
     sm = createSession(vault);
