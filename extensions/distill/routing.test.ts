@@ -148,6 +148,44 @@ function createEnabledNonGitVault(intervalMinutes: number): string {
   return dir;
 }
 
+/**
+ * Git vault fixture with distill.enabled=FALSE. Used to verify that
+ * manual `/distill` refuses to use the worktree path (and its scaffolding
+ * side effects) when the user has explicitly opted out of auto-distill.
+ */
+function createDisabledGitVault(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "routing-disabled-vault-"));
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "test",
+    GIT_AUTHOR_EMAIL: "t@e",
+    GIT_COMMITTER_NAME: "test",
+    GIT_COMMITTER_EMAIL: "t@e",
+  };
+  const git = (args: string[]) =>
+    spawnSync("git", ["-C", dir, ...args], { env, encoding: "utf-8" });
+  git(["init", "-q", "-b", "main"]);
+  git(["config", "commit.gpgsign", "false"]);
+  git(["config", "user.name", "t"]);
+  git(["config", "user.email", "t@e"]);
+  fs.writeFileSync(
+    path.join(dir, "seed.md"),
+    "---\ntitle: seed\n---\n# seed\n",
+  );
+  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, ".napkin", "config.json"),
+    JSON.stringify({
+      vault: { root: ".." },
+      // ENABLED=FALSE — user has explicitly opted out of auto-distill.
+      distill: { enabled: false, intervalMinutes: 60, onShutdown: true },
+    }),
+  );
+  git(["add", "-A"]);
+  git(["commit", "-q", "-m", "seed"]);
+  return dir;
+}
+
 /** Seed a real SessionManager at `dir` (needed because runAutoDistill forks it). */
 function createSeededSession(dir: string): SessionManager {
   const sm = SessionManager.create(dir, dir);
@@ -320,5 +358,64 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
       fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
     }
     fs.rmSync(nonGitVault, { recursive: true, force: true });
+
+  });
+
+  test("/distill on a git vault with distill.enabled=false falls back to tmp dir (no git side effects)", async () => {
+    const { api, captured } = makeMockExtensionAPI();
+    distillExtension(api as never);
+    expect(captured.commands.distill).toBeDefined();
+
+    const disabledVault = createDisabledGitVault();
+    const disabledSm = createSeededSession(disabledVault);
+    const disabledCtx = {
+      cwd: disabledVault,
+      sessionManager: disabledSm,
+      hasUI: false,
+      ui: null,
+    };
+
+    // Snapshot .gitattributes BEFORE the call — the gate should prevent
+    // the worktree path from writing the merge-driver rule to it.
+    const gaBefore = fs.existsSync(path.join(disabledVault, ".gitattributes"))
+      ? fs.readFileSync(path.join(disabledVault, ".gitattributes"), "utf-8")
+      : null;
+
+    const tmpBefore = new Set(
+      fs
+        .readdirSync(os.tmpdir())
+        .filter((n) => n.startsWith("napkin-distill-")),
+    );
+
+    // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+    await captured.commands.distill.handler("", disabledCtx as any);
+
+    // Legacy path: new tmp dir appeared.
+    const tmpAfter = fs
+      .readdirSync(os.tmpdir())
+      .filter((n) => n.startsWith("napkin-distill-"));
+    const newTmpDirs = tmpAfter.filter((n) => !tmpBefore.has(n));
+    expect(newTmpDirs.length).toBe(1);
+
+    // No worktree under the disabled-auto-distill vault.
+    const worktreesDir = path.join(
+      disabledVault,
+      ".napkin",
+      "distill-worktrees",
+    );
+    expect(fs.existsSync(worktreesDir)).toBe(false);
+
+    // No git side effects: .gitattributes unchanged (still null — the
+    // worktree path would have written our merge-driver rule here).
+    const gaAfter = fs.existsSync(path.join(disabledVault, ".gitattributes"))
+      ? fs.readFileSync(path.join(disabledVault, ".gitattributes"), "utf-8")
+      : null;
+    expect(gaAfter).toBe(gaBefore);
+
+    // Cleanup
+    for (const d of newTmpDirs) {
+      fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
+    }
+    fs.rmSync(disabledVault, { recursive: true, force: true });
   });
 });

@@ -830,9 +830,18 @@ export default function (pi: ExtensionAPI) {
   }
 
   function runDistill(ctx: RunCtx) {
-    // Manual `/distill`: use the worktree path when git is available (same
-    // concurrency safety as auto-distill), fall back to the legacy
-    // git-less tmpdir path only when the vault has no `.git/`.
+    // Manual `/distill`: use the worktree path only when the user has
+    // opted into auto-distill (`distill.enabled=true` in vault config)
+    // AND git is available. Otherwise fall back to the legacy git-less
+    // tmpdir path, which never touches git config.
+    //
+    // Why gate on `config.enabled`? The worktree path calls
+    // `registerMergeDriver()` which writes to `.gitattributes` and may
+    // produce a commit to scaffold the driver rule. A user who has
+    // explicitly set `distill.enabled: false` has opted OUT of
+    // auto-distill's infrastructure — running `/distill` manually should
+    // still work (they invoked it explicitly) but must not silently
+    // modify their git state. Legacy path has zero git side effects.
     //
     // Why not always worktree? Some users keep their vault outside git
     // on purpose (mobile-only Obsidian, ephemeral scratch vaults, etc.)
@@ -840,15 +849,19 @@ export default function (pi: ExtensionAPI) {
     // pi-napkin refusing. The detection is cheap and the fallback is
     // the original git-less path, preserved unchanged.
     //
-    // Cross-session concurrency caveat: two concurrent manual /distills
-    // on a git-less vault race on napkin writes because the legacy path
-    // has no worktree isolation. `isRunning` blocks a second /distill
-    // in the same pi session, but not across sessions. If this becomes
-    // a problem, the fix is to add a small flock around the legacy
-    // spawn; for now the design matches the pre-worktree behavior.
+    // Cross-session concurrency caveat: this only applies to the legacy
+    // fallback. Two concurrent manual /distills on a git-less vault (or
+    // on a vault where `distill.enabled=false`) race on napkin writes
+    // because the legacy path has no worktree isolation. `isRunning`
+    // blocks a second /distill in the same pi session, but not across
+    // sessions. With `distill.enabled=true` and git available, both
+    // manual and auto paths merge serially through the merge driver.
     runDistillWith(ctx, {
       spawnFn: (args) => {
-        if (fs.existsSync(path.join(args.vaultContentPath, ".git"))) {
+        const gitPresent = fs.existsSync(
+          path.join(args.vaultContentPath, ".git"),
+        );
+        if (gitPresent && args.config.enabled) {
           return worktreeSpawnFn(args);
         }
         return legacySpawnFn(args);

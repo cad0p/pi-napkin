@@ -56,7 +56,7 @@
     "typescript": "^5.8.0"
   },
   "dependencies": {
-    "@cad0p/napkin": ">=0.8.0"
+    "@cad0p/napkin": "^0.8.1"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0",
