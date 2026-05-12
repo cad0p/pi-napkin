@@ -703,6 +703,121 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// MERGE_HEAD escape-hatch. The wrapper's last-line defense (after salvage)
+// covers the case where the driver returned exit 0 but its output still
+// contained conflict markers — git then sees MERGE_HEAD still present and
+// the merge is incomplete. The wrapper bails and writes to error log.
+// Previously dead code in CI (no mock mode emitted conflict markers).
+// Covers coverage-review G4.
+// ---------------------------------------------------------------------------
+
+describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
+  let vault: string;
+  let sessionDir: string;
+  let sessionFile: string;
+
+  beforeEach(() => {
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-mh-src-"));
+    sessionFile = createSeededSessionFile(sessionDir, sessionDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  function runGitOrThrow(dir: string, args: string[]): string {
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const r = spawnSync("git", ["-C", dir, ...args], {
+      env,
+      encoding: "utf-8",
+    });
+    if (r.status !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
+    }
+    return r.stdout;
+  }
+
+  test("MERGE_HEAD persists after merge: wrapper bails + logs", () => {
+    // Real-world triggering (driver writes conflict-markers and git still
+    // marks merge incomplete) requires a specific git internals state
+    // that CI can't reliably stage: driver exit 0 clears MERGE_HEAD. Use
+    // the NAPKIN_DISTILL_FORCE_MERGE_HEAD=1 testing hook so the wrapper
+    // creates MERGE_HEAD immediately before its escape-hatch check.
+    //
+    // Pre-stage a simple change so the wrapper runs past the no-op early
+    // exit.
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+    );
+    fs.writeFileSync(
+      path.join(workspace.worktreePath, "new.md"),
+      "---\ntitle: new\n---\n# content\n",
+    );
+
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "sh",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+      ],
+      {
+        cwd: workspace.worktreePath,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "test",
+          GIT_AUTHOR_EMAIL: "test@example.com",
+          GIT_COMMITTER_NAME: "test",
+          GIT_COMMITTER_EMAIL: "test@example.com",
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_SKIP_PI: "1",
+          NAPKIN_DISTILL_FORCE_MERGE_HEAD: "1",
+          NAPKIN_GIT_RETRY_MAX: "2",
+          NAPKIN_GIT_RETRY_DELAY: "0",
+        },
+      },
+    );
+
+    // Wrapper exits 1 because the escape-hatch fires.
+    expect(r.status).toBe(1);
+
+    // Error log contains the MERGE_HEAD diagnostic.
+    const errorLogs = fs.existsSync(errorDir)
+      ? fs
+          .readdirSync(errorDir)
+          .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
+      : [];
+    expect(errorLogs.length).toBeGreaterThan(0);
+    expect(errorLogs.join("\n")).toContain("MERGE_HEAD still present");
+
+    // Dangling SHA recorded for forensic recovery.
+    expect(errorLogs.join("\n")).toContain("dangling distill commit SHA:");
+
+    // No distill squash commit on main — the content was never merged.
+    const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "10"]);
+    expect(log).not.toContain("distill: merge");
+  });
+});
+
+// ---------------------------------------------------------------------------
 // End-to-end LLM-resolved conflict tests. Forces a real conflict between main
 // and the distill branch, uses NAPKIN_DISTILL_MERGE_MOCK=ok so the driver
 // emits a plausible merge (ours+theirs concatenated), then verifies that the

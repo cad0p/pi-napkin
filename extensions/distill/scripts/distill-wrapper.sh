@@ -54,6 +54,12 @@
 #                                the wrapper's pid — lets tests inspect the
 #                                updated meta without the cleanup trap
 #                                wiping the worktree.
+#   NAPKIN_DISTILL_FORCE_MERGE_HEAD=1
+#                                force MERGE_HEAD to exist right before the
+#                                escape-hatch check — lets tests cover the
+#                                belt-and-braces "merge did not complete"
+#                                bail-out path, which isn't reliably
+#                                triggerable via real driver output.
 
 set -uo pipefail
 
@@ -238,6 +244,17 @@ if [ -n "$UNMERGED" ]; then
     log_error "failed to complete partial-merge commit"
     record_dangling_sha
     exit 1
+  fi
+fi
+
+# Testing hook: force a MERGE_HEAD file to exist so the escape-hatch check
+# below fires. Lets tests cover the path without relying on a race between
+# git's merge logic and the driver's output (which real-world tests can't
+# reliably stage — git clears MERGE_HEAD on driver exit 0).
+if [ "${NAPKIN_DISTILL_FORCE_MERGE_HEAD:-}" = "1" ]; then
+  _gitdir="$(git -C "$WORKTREE" rev-parse --git-dir 2>/dev/null || true)"
+  if [ -n "$_gitdir" ]; then
+    echo "deadbeefcafebabe" > "$_gitdir/MERGE_HEAD"
   fi
 fi
 

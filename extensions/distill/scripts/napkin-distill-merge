@@ -41,6 +41,7 @@
 #     NAPKIN_DISTILL_MERGE_MOCK=no-fm       \u2192 exit 0, print content without the frontmatter
 #     NAPKIN_DISTILL_MERGE_MOCK=ok          \u2192 exit 0, print a plausible merge (ours+theirs concatenated)
 #     NAPKIN_DISTILL_MERGE_MOCK=ok-after-N  \u2192 first N attempts behave like `fail`, subsequent like `ok`
+#     NAPKIN_DISTILL_MERGE_MOCK=conflict-markers  → exit 0 but emit output that still contains conflict markers
 #
 # Model selection:
 #   NAPKIN_DISTILL_MODEL  \u2014 optional "<provider>/<id>" passed to `pi --model`.
@@ -149,6 +150,23 @@ call_pi_or_mock() {
         return 1
       fi
       printf '%s\n%s' "$ours_content" "$theirs_content"
+      return 0
+      ;;
+    conflict-markers)
+      # Emit output that still contains git conflict markers. Passes the
+      # merge driver's length + frontmatter sanity checks (so it slips
+      # through to the final `printf > OURS`), but git sees MERGE_HEAD
+      # still set because these strings match the conflict-marker
+      # pattern. The wrapper's escape-hatch catches this (G4 regression).
+      printf '%s' '---
+title: fake
+---
+<<<<<<< ours
+ours content line
+=======
+theirs content line
+>>>>>>> theirs
+'
       return 0
       ;;
     *)
