@@ -201,11 +201,17 @@ function registerMergeDriver(worktreePath: string): void {
       `failed to configure merge driver name: ${nameRes.stderr.trim()}`,
     );
   }
+  // Quote the driver path so spaces / shell metacharacters in the path
+  // don't break git's sh -c invocation of the driver command, and so a
+  // malicious path prefix (unlikely locally, possible in CI with a
+  // runner-controlled workspace path) can't inject arguments.
+  // Single-quote the path and escape any literal ' as '\''.
+  const quotedDriverPath = `'${MERGE_DRIVER_SCRIPT.replace(/'/g, "'\\''")}'`;
   const driverRes = runGit(worktreePath, [
     "config",
     "--local",
     "merge.napkin-distill-merge.driver",
-    `${MERGE_DRIVER_SCRIPT} %O %A %B %P`,
+    `${quotedDriverPath} %O %A %B %P`,
   ]);
   if (driverRes.status !== 0) {
     throw new DistillError(
