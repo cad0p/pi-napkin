@@ -46,6 +46,13 @@
 # Model selection:
 #   NAPKIN_DISTILL_MODEL  \u2014 optional "<provider>/<id>" passed to `pi --model`.
 #                           If unset, uses pi's default.
+#
+# Timeout:
+#   NAPKIN_DISTILL_MERGE_TIMEOUT_SECS \u2014 per-attempt pi timeout (default 60s).
+#                                       Uses coreutils `timeout` when
+#                                       available, perl alarm() as
+#                                       fallback; if neither is present
+#                                       the call runs unbounded.
 
 set -uo pipefail
 
@@ -151,16 +158,33 @@ done
 call_pi_or_mock() {
   local mock="${NAPKIN_DISTILL_MERGE_MOCK:-}"
   if [ -z "$mock" ]; then
-    # Real path: invoke pi with the prompt on stdin (-p flag takes prompt as
-    # arg though; we pass it as arg).
+    # Real path: invoke pi with the prompt as arg (-p takes prompt as arg).
     local extra_args=()
     if [ -n "${NAPKIN_DISTILL_MODEL:-}" ]; then
       extra_args+=("--model" "$NAPKIN_DISTILL_MODEL")
     fi
     # NAPKIN_DISTILL_NO_RECURSE is already set by the parent spawn; this call
     # inherits it so the nested pi won't try to auto-distill itself.
-    pi "${extra_args[@]}" -p "$prompt"
-    return $?
+    #
+    # Timeout: if pi stalls (network hang, provider throttle, stuck stdin),
+    # each attempt would block indefinitely. 3 attempts per conflicted file
+    # times N files can easily exhaust the parent wrapper's 10-min budget
+    # on a single hang. Cap each attempt via coreutils `timeout` when
+    # available; fall back to `perl -e 'alarm'` which is widely installed;
+    # final fallback: no timeout (log a note so operators know).
+    local merge_timeout="${NAPKIN_DISTILL_MERGE_TIMEOUT_SECS:-60}"
+    if command -v timeout > /dev/null 2>&1; then
+      timeout "$merge_timeout" pi "${extra_args[@]}" -p "$prompt"
+      return $?
+    elif command -v perl > /dev/null 2>&1; then
+      perl -e "alarm($merge_timeout); exec @ARGV" -- \
+        pi "${extra_args[@]}" -p "$prompt"
+      return $?
+    else
+      # No timeout available — best-effort, hang risk acknowledged.
+      pi "${extra_args[@]}" -p "$prompt"
+      return $?
+    fi
   fi
 
   # Mock path \u2014 test harness only.

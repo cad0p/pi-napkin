@@ -154,6 +154,51 @@ describe("napkin-distill-merge", () => {
     });
   });
 
+  test("C7: timeout fires when pi stalls, bounding per-attempt wall time", () => {
+    // If the real pi hangs (network stall, provider throttle), each merge
+    // attempt would block indefinitely. Cover the timeout path by placing
+    // a stub `pi` in PATH that sleeps far longer than the configured
+    // timeout, setting NAPKIN_DISTILL_MERGE_TIMEOUT_SECS=1, and asserting
+    // the driver returns in well under the stub's sleep time.
+    //
+    // Skip cleanly if neither `timeout` nor `perl` is available on the
+    // runner: the driver falls back to unbounded in that case.
+    const hasTimeout =
+      spawnSync("command", ["-v", "timeout"], { shell: true }).status === 0;
+    const hasPerl =
+      spawnSync("command", ["-v", "perl"], { shell: true }).status === 0;
+    if (!hasTimeout && !hasPerl) return;
+
+    const stubDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-stub-"));
+    const stubPath = path.join(stubDir, "pi");
+    // Stub pi sleeps 30s, well beyond the 1s test timeout.
+    fs.writeFileSync(stubPath, "#!/usr/bin/env bash\nsleep 30\n");
+    fs.chmodSync(stubPath, 0o755);
+
+    withFixture("# base\n", "# ours\n", "# theirs\n", (base, ours, theirs) => {
+      const t0 = Date.now();
+      const r = spawnSync(MERGE_DRIVER_SCRIPT, [base, ours, theirs, "f.md"], {
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          PATH: `${stubDir}:${process.env.PATH}`,
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_MERGE_TIMEOUT_SECS: "1",
+          // Explicitly unset any mock so the real pi path runs (and hits
+          // the stub).
+          NAPKIN_DISTILL_MERGE_MOCK: "",
+        },
+      });
+      const elapsed = Date.now() - t0;
+      fs.rmSync(stubDir, { recursive: true, force: true });
+
+      // Driver should exit non-zero (all 3 attempts timed out) well under
+      // 30s (stub sleep). Budget: 3 attempts * 1s timeout + overhead.
+      expect(r.status).not.toBe(0);
+      expect(elapsed).toBeLessThan(15_000);
+    });
+  });
+
   test("SEC-3: input containing the old static delimiter does NOT corrupt output", () => {
     // Pre-fix, the driver fenced sections with a static "<<<<<<<< BASE"
     // marker. If an input file contained that marker, a malicious crafter
