@@ -111,7 +111,11 @@ function createGitVault(): string {
     ".napkin/distill/\n.napkin/distill-worktrees/\n",
   );
   fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
-  fs.writeFileSync(path.join(dir, ".napkin", "config.json"), "{}");
+  fs.writeFileSync(
+    path.join(dir, ".napkin", "config.json"),
+    // Sibling-layout declaration so napkin resolves contentPath=<dir>.
+    JSON.stringify({ vault: { root: ".." } }),
+  );
   run(["add", "-A"]);
   run(["commit", "-q", "-m", "seed"]);
   return dir;

@@ -111,6 +111,9 @@ function createVault(intervalMinutes: number): string {
   fs.writeFileSync(
     path.join(dir, ".napkin", "config.json"),
     JSON.stringify({
+      // Sibling-layout declaration so napkin resolves contentPath=<dir>
+      // (where `.git` and notes live).
+      vault: { root: ".." },
       distill: { enabled: true, onShutdown: true, intervalMinutes },
     }),
   );

@@ -323,19 +323,24 @@ export default function (pi: ExtensionAPI) {
     // non-throwing — on failure we notify once and disable auto-distill for
     // this session rather than retrying on every interval fire.
     //
-    // Scope: initialize at `ctx.cwd` (the directory pi was launched in, and
-    // where worktrees will be rooted). `napkinVault.contentPath` may differ
-    // for legacy bare vaults where the vault IS a `.napkin/` subdir —
-    // worktree spawning still uses `ctx.cwd`, so git must live there.
+    // Scope: operate on `napkinVault.contentPath` — the vault root as
+    // napkin resolves it from cwd. This is cwd-independent: when pi is
+    // launched outside the vault (e.g. in another project directory),
+    // findVault still resolves to the user's real vault via a global
+    // config fallback at `~/.config/napkin/config.json`. Using `ctx.cwd`
+    // here would scaffold `.git` in the WRONG directory and leave the
+    // real vault untouched — breaking both auto-init and later worktree
+    // operations that (now also correctly) target the vault.
     //
     // `setupFailed` is the load-bearing signal for the suppression logic
     // below: once setup has failed, we MUST NOT re-read the persisted
     // suppression state, because a `false` there would re-enable
     // auto-distill on a vault that isn't actually usable.
+    const vaultContentPath = napkinVault.contentPath;
     let setupFailed = false;
     try {
       const setup = ensureVaultReadyForAutoDistill({
-        contentPath: ctx.cwd,
+        contentPath: vaultContentPath,
       });
       if (setup.error) {
         setupFailed = true;
@@ -364,7 +369,7 @@ export default function (pi: ExtensionAPI) {
           }
         }
       } else if (setup.initialized) {
-        const tracked = countTrackedFiles(ctx.cwd);
+        const tracked = countTrackedFiles(vaultContentPath);
         const files = tracked >= 0 ? tracked : setup.scaffolded.length;
         if (ctx.hasUI) {
           ctx.ui.notify(
@@ -372,7 +377,7 @@ export default function (pi: ExtensionAPI) {
               "Initialized git repo in your vault for auto-distill.",
               `Commit: 'napkin: initial vault commit (auto-distill setup)'`,
               `Files tracked: ${files}`,
-              `To undo: rm -rf ${path.join(ctx.cwd, ".git")} (removes history, keeps files)`,
+              `To undo: rm -rf ${path.join(vaultContentPath, ".git")} (removes history, keeps files)`,
               "To opt out: set distill.enabled: false in vault config.json",
             ].join("\n"),
             "info",
@@ -395,7 +400,7 @@ export default function (pi: ExtensionAPI) {
     // Sweep out stale distill worktrees left behind by crashed pi sessions.
     // Idempotent, best-effort — never throws, never blocks session_start.
     try {
-      cleanupStaleWorktrees({ contentPath: ctx.cwd });
+      cleanupStaleWorktrees({ contentPath: vaultContentPath });
     } catch {
       // swallow — cleanup is non-critical to session lifecycle
     }
@@ -487,14 +492,14 @@ export default function (pi: ExtensionAPI) {
     // session_start — handler scope keeps closures small, and the cost of
     // one extra JSON parse at shutdown is negligible.
     try {
-      let vaultConfigPath: string | null = null;
+      let vaultInfo: { configPath: string; contentPath: string } | null = null;
       try {
-        vaultConfigPath = new Napkin(ctx.cwd).vault.configPath;
+        vaultInfo = new Napkin(ctx.cwd).vault;
       } catch {
         // No vault resolvable — skip spawn, proceed to final resets.
       }
-      if (vaultConfigPath) {
-        const { distill: config } = loadVaultConfig(vaultConfigPath);
+      if (vaultInfo) {
+        const { distill: config } = loadVaultConfig(vaultInfo.configPath);
         const sessionFile = ctx.sessionManager.getSessionFile?.();
         const currentSize =
           sessionFile && fs.existsSync(sessionFile)
@@ -512,15 +517,19 @@ export default function (pi: ExtensionAPI) {
             lastSessionSize,
           )
         ) {
-          // Guard: we require git for the worktree path. Phase C's auto-init
-          // will ensure this; for Phase B, we silently skip if missing —
-          // shutdown is not the moment to surface UI hints.
-          if (fs.existsSync(path.join(ctx.cwd, ".git")) && sessionFile) {
+          // Guard: we require git for the worktree path, rooted at the
+          // vault's content directory (where auto-init placed `.git`).
+          // Using `ctx.cwd` here would miss the repo when pi was launched
+          // outside the vault — the very bug this change fixes.
+          if (
+            fs.existsSync(path.join(vaultInfo.contentPath, ".git")) &&
+            sessionFile
+          ) {
             const modelStr = config.model
               ? `${config.model.provider}/${config.model.id}`
               : undefined;
             spawnDistillInWorktree({
-              vault: ctx.cwd,
+              vault: vaultInfo.contentPath,
               sessionFile,
               prompt: DISTILL_PROMPT,
               model: modelStr,
@@ -574,12 +583,10 @@ export default function (pi: ExtensionAPI) {
 
     let vaultPath: string;
     try {
-      // Resolve the vault (throws on unresolvable) but use ctx.cwd as the
-      // git root: that's where auto-setup initialized the repo and where
-      // worktrees are created. `napkinVault.contentPath` points at `.napkin`
-      // for content-layout vaults — has no `.git`.
-      new Napkin(ctx.cwd);
-      vaultPath = ctx.cwd;
+      // Resolve the vault's content root — auto-setup placed `.git` and
+      // worktrees there. `contentPath` is cwd-independent: it points at
+      // the user's actual vault even when pi is launched elsewhere.
+      vaultPath = new Napkin(ctx.cwd).vault.contentPath;
     } catch {
       return;
     }
@@ -643,6 +650,13 @@ export default function (pi: ExtensionAPI) {
    * target, and a timeout cleanup step. Everything else (config load,
    * size dedup, status-bar painting, poll loop wiring, completion
    * bookkeeping) is common.
+   *
+   * All strategy callbacks receive `vaultContentPath` — the vault's content
+   * root as resolved by napkin, NOT `ctx.cwd`. This is what makes the
+   * whole auto-distill pipeline cwd-independent: worktrees, git, and the
+   * legacy spawn all target the user's actual vault even when pi is
+   * launched from another directory (napkin's findVault walks up from
+   * `ctx.cwd` and falls back to the global config).
    */
   interface DistillStrategy {
     /**
@@ -652,6 +666,7 @@ export default function (pi: ExtensionAPI) {
      */
     preflight?: (args: {
       ctx: RunCtx;
+      vaultContentPath: string;
       theme: unknown;
     }) => { ok: true } | { ok: false; errorStatus?: string };
     /**
@@ -662,6 +677,7 @@ export default function (pi: ExtensionAPI) {
      */
     spawnFn: (args: {
       ctx: RunCtx;
+      vaultContentPath: string;
       sessionFile: string;
       config: DistillConfig;
     }) => {
@@ -687,14 +703,17 @@ export default function (pi: ExtensionAPI) {
   function runDistillWith(ctx: RunCtx, strategy: DistillStrategy): void {
     if (isRunning) return;
 
-    let vaultConfigPath: string;
+    let vaultInfo: { configPath: string; contentPath: string };
     try {
-      vaultConfigPath = new Napkin(ctx.cwd).vault.configPath;
+      vaultInfo = new Napkin(ctx.cwd).vault;
     } catch {
       return;
     }
+    const vaultContentPath = vaultInfo.contentPath;
 
-    const { showStatus, distill: config } = loadVaultConfig(vaultConfigPath);
+    const { showStatus, distill: config } = loadVaultConfig(
+      vaultInfo.configPath,
+    );
     const sessionFile = ctx.sessionManager.getSessionFile?.();
     if (!sessionFile) return;
 
@@ -711,7 +730,7 @@ export default function (pi: ExtensionAPI) {
 
     // Strategy-specific pre-flight.
     if (strategy.preflight) {
-      const pre = strategy.preflight({ ctx, theme });
+      const pre = strategy.preflight({ ctx, vaultContentPath, theme });
       if (!pre.ok) {
         if (ctx.hasUI && theme && showStatus && pre.errorStatus) {
           ctx.ui.setStatus(
@@ -723,7 +742,12 @@ export default function (pi: ExtensionAPI) {
       }
     }
 
-    const spawned = strategy.spawnFn({ ctx, sessionFile, config });
+    const spawned = strategy.spawnFn({
+      ctx,
+      vaultContentPath,
+      sessionFile,
+      config,
+    });
     if (!spawned) {
       if (ctx.hasUI && theme && showStatus) {
         ctx.ui.setStatus(
@@ -808,9 +832,15 @@ export default function (pi: ExtensionAPI) {
   function runDistill(ctx: RunCtx) {
     // Legacy git-optional path — used by manual `/distill`. tmpDir under
     // $TMPDIR; cleanup is a plain rmSync. No preflight (git not required).
+    //
+    // Even though this path doesn't need a git repo, its child process's
+    // cwd is the vault content root so napkin's findVault inside the
+    // subprocess resolves to the same vault that spawned it. Using
+    // `ctx.cwd` here would scope the subprocess to the wrong place when
+    // pi was launched outside the vault.
     runDistillWith(ctx, {
-      spawnFn: ({ ctx: c, sessionFile, config }) => {
-        const tmpDir = spawnDistill(sessionFile, c.cwd, config);
+      spawnFn: ({ vaultContentPath, sessionFile, config }) => {
+        const tmpDir = spawnDistill(sessionFile, vaultContentPath, config);
         if (!tmpDir) return null;
         return {
           target: tmpDir,
@@ -830,22 +860,22 @@ export default function (pi: ExtensionAPI) {
    */
   function runAutoDistill(ctx: RunCtx) {
     runDistillWith(ctx, {
-      preflight: ({ ctx: c }) => {
+      preflight: ({ vaultContentPath }) => {
         // Auto-distill requires the vault to be a git repo. Phase C1
         // auto-init wires this at session_start; we surface a one-shot
         // status-bar hint here for belt-and-braces.
-        if (!fs.existsSync(path.join(c.cwd, ".git"))) {
+        if (!fs.existsSync(path.join(vaultContentPath, ".git"))) {
           return { ok: false, errorStatus: "distill: needs git" };
         }
         return { ok: true };
       },
-      spawnFn: ({ ctx: c, sessionFile, config }) => {
+      spawnFn: ({ ctx: c, vaultContentPath, sessionFile, config }) => {
         try {
           const modelStr = config.model
             ? `${config.model.provider}/${config.model.id}`
             : undefined;
           const result = spawnDistillInWorktree({
-            vault: c.cwd,
+            vault: vaultContentPath,
             sessionFile,
             prompt: DISTILL_PROMPT,
             model: modelStr,
@@ -854,7 +884,7 @@ export default function (pi: ExtensionAPI) {
             target: result.workspace.worktreePath,
             cleanup: () => {
               try {
-                cleanupDistillWorkspace(c.cwd, result.workspace);
+                cleanupDistillWorkspace(vaultContentPath, result.workspace);
               } catch {
                 // ignore
               }

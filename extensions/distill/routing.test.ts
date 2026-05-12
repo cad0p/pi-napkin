@@ -111,6 +111,10 @@ function createEnabledGitVault(intervalMinutes: number): string {
   fs.writeFileSync(
     path.join(dir, ".napkin", "config.json"),
     JSON.stringify({
+      // Sibling-layout declaration so napkin resolves contentPath=<dir>
+      // (where `.git` and notes live). Without this, napkin treats this
+      // as a legacy embedded vault and resolves contentPath=<dir>/.napkin.
+      vault: { root: ".." },
       distill: { enabled: true, intervalMinutes, onShutdown: true },
     }),
   );

@@ -111,6 +111,11 @@ function createVault(
     fs.writeFileSync(
       path.join(dir, ".napkin", "config.json"),
       JSON.stringify({
+        // Sibling layout: notes live at <dir>/ (the vault content root),
+        // config lives at <dir>/.napkin/. Without `vault.root`, napkin
+        // would treat this as a legacy embedded vault and resolve
+        // contentPath to <dir>/.napkin — which is where git is NOT.
+        vault: { root: ".." },
         distill: {
           enabled: config.enabled,
           onShutdown: config.onShutdown ?? true,
@@ -125,6 +130,7 @@ function createVault(
     fs.writeFileSync(
       path.join(dir, ".napkin", "config.json"),
       JSON.stringify({
+        vault: { root: ".." },
         distill: {
           enabled: config.enabled,
           onShutdown: config.onShutdown ?? true,
@@ -664,6 +670,7 @@ describe("session_shutdown handler — conflicting .gitattributes blocks setup (
     fs.writeFileSync(
       path.join(vault, ".napkin", "config.json"),
       JSON.stringify({
+        vault: { root: ".." },
         distill: { enabled: true, onShutdown: true, intervalMinutes: 60 },
       }),
     );
