@@ -358,7 +358,6 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
       fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
     }
     fs.rmSync(nonGitVault, { recursive: true, force: true });
-
   });
 
   test("/distill on a git vault with distill.enabled=false falls back to tmp dir (no git side effects)", async () => {
