@@ -38,6 +38,21 @@ export const GITIGNORE_LINES: readonly string[] = [
   "# Local tmp/cache",
   "search-cache.json",
   ".DS_Store",
+  "",
+  "# Common secrets — belt-and-braces for vaults that end up alongside dev",
+  "# work. Auto-distill commits 'git add .' on first run; these patterns",
+  "# keep credentials out of the initial commit even if a user's vault",
+  "# happens to contain them.",
+  ".env",
+  ".env.local",
+  ".env.*.local",
+  "*.pem",
+  "*.key",
+  "id_rsa",
+  "id_ecdsa",
+  "id_ed25519",
+  "secrets.json",
+  ".aws/credentials",
 ];
 
 /**

@@ -100,6 +100,60 @@ describe("ensureVaultReadyForAutoDistill", () => {
     expect(log).toContain("napkin: initial vault commit (auto-distill setup)");
   });
 
+  test("fresh vault: .gitignore contains common secret patterns (SEC-5)", () => {
+    // Auto-distill commits 'git add .' on first init; belt-and-braces
+    // patterns here keep credentials out of the initial commit even when
+    // a user's vault happens to coexist with dev work. Pattern list is
+    // intentionally stable — this test pins it so a future refactor
+    // doesn't silently drop protections.
+    fs.writeFileSync(path.join(vault, "notes.md"), "# notes\n");
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    for (const pattern of [
+      ".env",
+      ".env.local",
+      ".env.*.local",
+      "*.pem",
+      "*.key",
+      "id_rsa",
+      "id_ecdsa",
+      "id_ed25519",
+      "secrets.json",
+      ".aws/credentials",
+    ]) {
+      expect(gi).toContain(pattern);
+    }
+  });
+
+  test("fresh vault: secret files already present at init are NOT committed (SEC-5)", () => {
+    // End-to-end check: create .env and id_rsa alongside a normal note,
+    // run setup, assert the secrets were excluded from the initial
+    // commit's tracked files. Prevents the scenario where a user's
+    // first-run commit silently captures credentials.
+    fs.writeFileSync(path.join(vault, "notes.md"), "# notes\n");
+    fs.writeFileSync(path.join(vault, ".env"), "API_KEY=secret\n");
+    fs.writeFileSync(
+      path.join(vault, "id_rsa"),
+      "-----BEGIN PRIVATE KEY-----\n",
+    );
+    fs.writeFileSync(
+      path.join(vault, "cert.pem"),
+      "-----BEGIN CERTIFICATE-----\n",
+    );
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.initialized).toBe(true);
+
+    const tracked = git(vault, ["ls-files"]).stdout;
+    expect(tracked).toContain("notes.md");
+    expect(tracked).not.toContain(".env");
+    expect(tracked).not.toContain("id_rsa");
+    expect(tracked).not.toContain("cert.pem");
+  });
+
   test("vault with git but no .gitignore: writes scaffolds, commits", () => {
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
