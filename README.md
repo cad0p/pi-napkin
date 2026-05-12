@@ -6,15 +6,26 @@ Gives a pi agent first-class access to an Obsidian-compatible knowledge vault, w
 
 ## Install
 
+pi-napkin depends on the [`@cad0p/napkin`](https://github.com/cad0p/napkin) CLI. Install it first:
+
 ```bash
-# pnpm
 pnpm add -g @cad0p/napkin
-
-# npm
-npm install -g @cad0p/napkin
-
-pi install git:github.com/cad0p/pi-napkin
+# or: npm install -g @cad0p/napkin
 ```
+
+Then install the pi-napkin extension:
+
+```bash
+pi install @cad0p/pi-napkin
+```
+
+<details>
+<summary>Pre-release / dev installs</summary>
+
+- Pre-release versions (when published): `pi install @cad0p/pi-napkin@next`
+- Install from source (for local development): `pi install git:github.com/cad0p/pi-napkin`
+
+</details>
 
 ## What you get
 
