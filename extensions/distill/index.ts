@@ -20,7 +20,6 @@ import {
   cleanupDistillWorkspace,
   cleanupStaleWorktrees,
   DistillError,
-  type DistillWorkspace,
   diffWorktreeSinceStart,
   getActiveDistills,
   getUnmergedDistillBranches,
@@ -582,14 +581,67 @@ export default function (pi: ExtensionAPI) {
     return { systemPrompt: event.systemPrompt + formatOverlapNotice(overlap) };
   });
 
-  function runDistill(ctx: {
+  /**
+   * Ctx shape shared by the two run-distill paths. Kept structural because
+   * the real pi context is a superset; we only need these four fields.
+   */
+  interface RunCtx {
     // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
     sessionManager: any;
     hasUI: boolean;
     // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
     ui: any;
     cwd: string;
-  }) {
+  }
+
+  /**
+   * Strategy bundle for the shared runner. Each caller (legacy or worktree)
+   * supplies a preflight check, a spawn invocation, a poll-completion
+   * target, and a timeout cleanup step. Everything else (config load,
+   * size dedup, status-bar painting, poll loop wiring, completion
+   * bookkeeping) is common.
+   */
+  interface DistillStrategy {
+    /**
+     * Optional pre-flight check. Return `{ ok: false, errorStatus }` to
+     * short-circuit with a status-bar message, or `{ ok: true }` to
+     * continue. Invoked after config load + size dedup, before spawn.
+     */
+    preflight?: (args: {
+      ctx: RunCtx;
+      theme: unknown;
+    }) => { ok: true } | { ok: false; errorStatus?: string };
+    /**
+     * Spawn the distill subprocess. Returns `{ target }` on success — a
+     * filesystem path whose disappearance marks completion. Returns null
+     * to signal a spawn failure (caller paints an error in the status
+     * bar).
+     */
+    spawnFn: (args: {
+      ctx: RunCtx;
+      sessionFile: string;
+      config: DistillConfig;
+    }) => {
+      target: string;
+      cleanup: () => void;
+      spawnErrorMsg?: string;
+    } | null;
+  }
+
+  /**
+   * Shared runner for the two distill paths. Encodes the full lifecycle:
+   *   1. Early-return if isRunning.
+   *   2. Resolve vault config; bail silently if cwd isn't a vault.
+   *   3. Read session file; size-dedup against lastSessionSize.
+   *   4. Run strategy.preflight; short-circuit on failure.
+   *   5. strategy.spawn; on failure paint error status.
+   *   6. Bookkeeping: lastSpawnedSize = currentSize, isRunning = true,
+   *      start polling for target disappearance.
+   *   7. On completion: update lastSessionSize + lastDistillTimestamp, paint
+   *      success status, notify.
+   *   8. On timeout: invoke strategy's cleanup callback and paint error.
+   */
+  function runDistillWith(ctx: RunCtx, strategy: DistillStrategy): void {
     if (isRunning) return;
 
     let vaultConfigPath: string;
@@ -603,7 +655,7 @@ export default function (pi: ExtensionAPI) {
     const sessionFile = ctx.sessionManager.getSessionFile?.();
     if (!sessionFile) return;
 
-    // Skip if session hasn't changed since last distill
+    // Skip if session hasn't changed since last distill.
     const currentSize = fs.existsSync(sessionFile)
       ? fs.statSync(sessionFile).size
       : 0;
@@ -612,26 +664,40 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const tmpDir = spawnDistill(sessionFile, ctx.cwd, config);
-    if (!tmpDir) {
-      if (ctx.hasUI && ctx.ui.theme && showStatus) {
+    const theme = ctx.hasUI ? ctx.ui.theme : null;
+
+    // Strategy-specific pre-flight.
+    if (strategy.preflight) {
+      const pre = strategy.preflight({ ctx, theme });
+      if (!pre.ok) {
+        if (ctx.hasUI && theme && showStatus && pre.errorStatus) {
+          ctx.ui.setStatus(
+            "napkin-distill",
+            theme.fg("error", "✗") + theme.fg("dim", ` ${pre.errorStatus}`),
+          );
+        }
+        return;
+      }
+    }
+
+    const spawned = strategy.spawnFn({ ctx, sessionFile, config });
+    if (!spawned) {
+      if (ctx.hasUI && theme && showStatus) {
         ctx.ui.setStatus(
           "napkin-distill",
-          ctx.ui.theme.fg("error", "✗") +
-            ctx.ui.theme.fg("dim", " distill: spawn failed"),
+          theme.fg("error", "✗") + theme.fg("dim", " distill: spawn failed"),
         );
       }
       return;
     }
+    const { target, cleanup: spawnCleanup } = spawned;
 
     // Record the size we spawned on so a shutdown firing between here and
-    // completion dedupes against the in-flight distill. Consumed by
-    // shouldDistillOnShutdown (wired in phase B).
+    // completion dedupes against the in-flight distill.
     lastSpawnedSize = currentSize;
 
     isRunning = true;
     const startTime = Date.now();
-    const theme = ctx.hasUI ? ctx.ui.theme : null;
 
     if (ctx.hasUI && theme && showStatus) {
       ctx.ui.setStatus(
@@ -640,13 +706,11 @@ export default function (pi: ExtensionAPI) {
       );
     }
 
-    // Poll for completion: temp dir disappears when the shell wrapper finishes
     pollHandle = setInterval(() => {
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
       const timedOut = Date.now() - startTime > MAX_DISTILL_DURATION_MS;
 
-      if (fs.existsSync(tmpDir) && !timedOut) {
-        // Still running — update elapsed time in status bar
+      if (fs.existsSync(target) && !timedOut) {
         if (ctx.hasUI && theme && showStatus) {
           ctx.ui.setStatus(
             "napkin-distill",
@@ -656,7 +720,6 @@ export default function (pi: ExtensionAPI) {
         return;
       }
 
-      // Done or timed out
       if (pollHandle) {
         clearInterval(pollHandle);
         pollHandle = null;
@@ -664,8 +727,11 @@ export default function (pi: ExtensionAPI) {
       isRunning = false;
 
       if (timedOut) {
-        // Clean up orphaned temp dir
-        fs.rmSync(tmpDir, { recursive: true, force: true });
+        try {
+          spawnCleanup();
+        } catch {
+          // ignore — best-effort cleanup on timeout
+        }
         if (ctx.hasUI && theme) {
           if (showStatus) {
             ctx.ui.setStatus(
@@ -693,174 +759,85 @@ export default function (pi: ExtensionAPI) {
     }, 2000);
   }
 
+  function runDistill(ctx: RunCtx) {
+    // Legacy git-optional path — used by manual `/distill`. tmpDir under
+    // $TMPDIR; cleanup is a plain rmSync. No preflight (git not required).
+    runDistillWith(ctx, {
+      spawnFn: ({ ctx: c, sessionFile, config }) => {
+        const tmpDir = spawnDistill(sessionFile, c.cwd, config);
+        if (!tmpDir) return null;
+        return {
+          target: tmpDir,
+          cleanup: () => fs.rmSync(tmpDir, { recursive: true, force: true }),
+        };
+      },
+    });
+  }
+
   /**
    * Worktree-backed auto-distill path — used by the interval timer and the
-   * shutdown handler (Item 8). Concurrency-safe via per-distill git worktrees:
-   * each call spawns a detached wrapper that operates on its own branch, so
-   * overlapping distills (interval + shutdown, or multiple pi sessions on
-   * the same vault) merge serially on main via the LLM merge driver.
-   *
-   * Deliberately parallel to `runDistill` rather than a refactor — the spec's
-   * Phase B Item 7 calls for additive implementation so manual `/distill`
-   * keeps working in vaults without git. Phase C may unify the two once
-   * auto-init ensures git is always available.
-   *
-   * Bookkeeping contract matches `runDistill`:
-   *   - `lastSpawnedSize` set on successful spawn (pre-poll dedup for shutdown)
-   *   - `isRunning` true while the wrapper's worktree exists
-   *   - `lastSessionSize` set on successful completion (post-completion dedup)
-   *   - `lastDistillTimestamp` updated on completion or no-op skip
+   * shutdown handler (Item 8). Concurrency-safe via per-distill git
+   * worktrees: each call spawns a detached wrapper that operates on its
+   * own branch, so overlapping distills (interval + shutdown, or multiple
+   * pi sessions on the same vault) merge serially on main via the LLM
+   * merge driver.
    */
-  function runAutoDistill(ctx: {
-    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
-    sessionManager: any;
-    hasUI: boolean;
-    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
-    ui: any;
-    cwd: string;
-  }) {
-    if (isRunning) return;
-
-    let vaultConfigPath: string;
-    try {
-      vaultConfigPath = new Napkin(ctx.cwd).vault.configPath;
-    } catch {
-      return;
-    }
-
-    const { showStatus, distill: config } = loadVaultConfig(vaultConfigPath);
-    const sessionFile = ctx.sessionManager.getSessionFile?.();
-    if (!sessionFile) return;
-
-    // Skip if session hasn't changed since last distill.
-    const currentSize = fs.existsSync(sessionFile)
-      ? fs.statSync(sessionFile).size
-      : 0;
-    if (currentSize > 0 && currentSize === lastSessionSize) {
-      lastDistillTimestamp = Date.now();
-      return;
-    }
-
-    const theme = ctx.hasUI ? ctx.ui.theme : null;
-
-    // Pre-flight: auto-distill requires the vault to be a git repo. Phase C's
-    // auto-init will wire this at session_start; for Phase B, surface a
-    // one-shot UI hint and return quietly — don't throw out of setInterval.
-    if (!fs.existsSync(path.join(ctx.cwd, ".git"))) {
-      if (ctx.hasUI && theme && showStatus) {
-        ctx.ui.setStatus(
-          "napkin-distill",
-          theme.fg("error", "✗") + theme.fg("dim", " distill: needs git"),
-        );
-      }
-      return;
-    }
-
-    let result: {
-      workspace: DistillWorkspace;
-      pid: number;
-    };
-    try {
-      const modelStr = config.model
-        ? `${config.model.provider}/${config.model.id}`
-        : undefined;
-      result = spawnDistillInWorktree({
-        vault: ctx.cwd,
-        sessionFile,
-        prompt: DISTILL_PROMPT,
-        model: modelStr,
-      });
-    } catch (err) {
-      // DistillError from workspace layer (branch collision, fork failure,
-      // git issue) — don't update state, surface in the status bar, let the
-      // next interval try again.
-      if (ctx.hasUI && theme && showStatus) {
-        const msg =
-          err instanceof DistillError
-            ? "distill: setup failed"
-            : "distill: spawn failed";
-        ctx.ui.setStatus(
-          "napkin-distill",
-          theme.fg("error", "✗") + theme.fg("dim", ` ${msg}`),
-        );
-      }
-      return;
-    }
-
-    // Mirror runDistill's bookkeeping: record spawn size so a shutdown
-    // firing between here and completion dedupes against this in-flight run.
-    lastSpawnedSize = currentSize;
-    const workspace = result.workspace;
-
-    isRunning = true;
-    const startTime = Date.now();
-
-    if (ctx.hasUI && theme && showStatus) {
-      ctx.ui.setStatus(
-        "napkin-distill",
-        theme.fg("accent", "●") + theme.fg("dim", " distill"),
-      );
-    }
-
-    // Poll for completion by watching the worktree path. The wrapper's EXIT
-    // trap calls `git worktree remove --force` which deletes the directory;
-    // once the dir is gone the distill lifecycle (commit + merge + squash)
-    // is complete.
-    pollHandle = setInterval(() => {
-      const elapsed = Math.floor((Date.now() - startTime) / 1000);
-      const timedOut = Date.now() - startTime > MAX_DISTILL_DURATION_MS;
-
-      if (fs.existsSync(workspace.worktreePath) && !timedOut) {
-        if (ctx.hasUI && theme && showStatus) {
-          ctx.ui.setStatus(
-            "napkin-distill",
-            theme.fg("accent", "●") + theme.fg("dim", ` distill ${elapsed}s`),
-          );
+  function runAutoDistill(ctx: RunCtx) {
+    runDistillWith(ctx, {
+      preflight: ({ ctx: c }) => {
+        // Auto-distill requires the vault to be a git repo. Phase C1
+        // auto-init wires this at session_start; we surface a one-shot
+        // status-bar hint here for belt-and-braces.
+        if (!fs.existsSync(path.join(c.cwd, ".git"))) {
+          return { ok: false, errorStatus: "distill: needs git" };
         }
-        return;
-      }
-
-      if (pollHandle) {
-        clearInterval(pollHandle);
-        pollHandle = null;
-      }
-      isRunning = false;
-
-      if (timedOut) {
-        // Force-cleanup the worktree + branch if the wrapper stalled. Best
-        // effort — if the wrapper is still active inside the worktree, the
-        // force-remove may leave it flailing against deleted files, but it'll
-        // exit on its own once its next git command fails.
+        return { ok: true };
+      },
+      spawnFn: ({ ctx: c, sessionFile, config }) => {
         try {
-          cleanupDistillWorkspace(ctx.cwd, workspace);
-        } catch {
-          // ignore — status bar still reports timeout below
-        }
-        if (ctx.hasUI && theme) {
-          if (showStatus) {
-            ctx.ui.setStatus(
+          const modelStr = config.model
+            ? `${config.model.provider}/${config.model.id}`
+            : undefined;
+          const result = spawnDistillInWorktree({
+            vault: c.cwd,
+            sessionFile,
+            prompt: DISTILL_PROMPT,
+            model: modelStr,
+          });
+          return {
+            target: result.workspace.worktreePath,
+            cleanup: () => {
+              try {
+                cleanupDistillWorkspace(c.cwd, result.workspace);
+              } catch {
+                // ignore
+              }
+            },
+          };
+        } catch (err) {
+          // DistillError from the workspace layer (branch collision, fork
+          // failure, git issue) — bubble up as a spawn failure so the
+          // shared runner paints an error status. We distinguish the
+          // message via the errorStatus in a helper. Instead of a
+          // separate branch, just paint ourselves and return null.
+          const theme = c.hasUI ? c.ui.theme : null;
+          const { showStatus } = loadVaultConfig(
+            new Napkin(c.cwd).vault.configPath,
+          );
+          if (c.hasUI && theme && showStatus) {
+            const msg =
+              err instanceof DistillError
+                ? "distill: setup failed"
+                : "distill: spawn failed";
+            c.ui.setStatus(
               "napkin-distill",
-              theme.fg("error", "✗") + theme.fg("dim", " distill: timeout"),
+              theme.fg("error", "✗") + theme.fg("dim", ` ${msg}`),
             );
           }
-          ctx.ui.notify("Distillation timed out (10m)", "error");
+          return null;
         }
-        return;
-      }
-
-      lastDistillTimestamp = Date.now();
-      lastSessionSize = currentSize;
-
-      if (ctx.hasUI && theme) {
-        if (showStatus) {
-          ctx.ui.setStatus(
-            "napkin-distill",
-            theme.fg("success", "✓") + theme.fg("dim", ` distill ${elapsed}s`),
-          );
-        }
-        ctx.ui.notify(`Distillation complete (${elapsed}s)`, "success");
-      }
-    }, 2000);
+      },
+    });
   }
 
   pi.registerCommand("distill", {
