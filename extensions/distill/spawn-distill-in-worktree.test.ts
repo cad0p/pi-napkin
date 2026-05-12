@@ -173,7 +173,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     const call = calls[0];
     expect(call.command).toBe("sh");
 
-    // Args: [wrapper, vault, worktree, branch, sessionFork, prompt, errorDir, model]
+    // Args: [wrapper, vault, worktree, branch, sessionFork, prompt, errorDir, model, defaultBranch]
     expect(call.args[0]).toBe(DISTILL_WRAPPER_SCRIPT);
     expect(call.args[1]).toBe(vault);
     expect(call.args[2]).toBe(result.workspace.worktreePath);
@@ -186,6 +186,9 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     expect(call.args[6].endsWith(path.join("distill", "errors"))).toBe(true);
     // Empty model string when model is omitted.
     expect(call.args[7]).toBe("");
+    // Default branch resolved from the vault — createGitVault() uses
+    // `git init -b main` so this should be `main`.
+    expect(call.args[8]).toBe("main");
   });
 
   test("sets detached, stdio:ignore, and NAPKIN_DISTILL_NO_RECURSE", () => {
@@ -892,5 +895,133 @@ describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
 
     const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "5"]);
     expect(log).toContain("distill: merge");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Default-branch detection + respect. Hardcoding `main` silently corrupts
+// vaults that use `master` (older git, users with init.defaultBranch=master
+// in global config). Verify the wrapper works end-to-end on a `master`-
+// default vault.
+// ---------------------------------------------------------------------------
+
+describe("distill-wrapper.sh (non-main default branch)", () => {
+  let vault: string;
+  let sessionDir: string;
+  let sessionFile: string;
+
+  function createMasterDefaultVault(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "distill-master-vault-"));
+    const env = {
+      ...process.env,
+      GIT_AUTHOR_NAME: "test",
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+    };
+    const run = (args: string[]) => {
+      const r = spawnSync("git", args, { cwd: dir, env, encoding: "utf-8" });
+      if (r.status !== 0) {
+        throw new Error(
+          `git ${args.join(" ")} failed: ${r.stderr || r.stdout}`,
+        );
+      }
+    };
+    run(["init", "-q", "-b", "master"]);
+    run(["config", "commit.gpgsign", "false"]);
+    run(["config", "user.name", "test"]);
+    run(["config", "user.email", "test@example.com"]);
+    fs.writeFileSync(path.join(dir, "seed.md"), "# seed\n");
+    fs.writeFileSync(
+      path.join(dir, ".gitattributes"),
+      "*.md merge=napkin-distill-merge\n",
+    );
+    fs.writeFileSync(
+      path.join(dir, ".gitignore"),
+      ".napkin/distill/\n.napkin/distill-worktrees/\n",
+    );
+    fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+    fs.writeFileSync(path.join(dir, ".napkin", "config.json"), "{}");
+    run(["add", "-A"]);
+    run(["commit", "-q", "-m", "seed"]);
+    return dir;
+  }
+
+  beforeEach(() => {
+    vault = createMasterDefaultVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-master-src-"));
+    sessionFile = createSeededSessionFile(sessionDir, sessionDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test("detectDefaultBranch returns 'master' for a master-default vault", () => {
+    const { detectDefaultBranch } = require("./distill-workspace");
+    expect(detectDefaultBranch(vault)).toBe("master");
+  });
+
+  test("wrapper squash-merges into master when default branch is master", () => {
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+    );
+    const stagedFile = path.join(workspace.worktreePath, "new-note.md");
+    fs.writeFileSync(stagedFile, "---\ntitle: new\n---\n# new note\n");
+
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "sh",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+        "master", // 8th arg: default branch
+      ],
+      {
+        cwd: workspace.worktreePath,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "test",
+          GIT_AUTHOR_EMAIL: "test@example.com",
+          GIT_COMMITTER_NAME: "test",
+          GIT_COMMITTER_EMAIL: "test@example.com",
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_SKIP_PI: "1",
+          NAPKIN_GIT_RETRY_MAX: "2",
+          NAPKIN_GIT_RETRY_DELAY: "0",
+        },
+      },
+    );
+    expect(r.status).toBe(0);
+
+    // No error log entries.
+    const errorLogs = fs.existsSync(errorDir)
+      ? fs
+          .readdirSync(errorDir)
+          .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
+      : [];
+    expect(errorLogs).toEqual([]);
+
+    // master has the squash commit.
+    const log = spawnSync(
+      "git",
+      ["-C", vault, "log", "--oneline", "master", "-n", "5"],
+      { encoding: "utf-8" },
+    ).stdout;
+    expect(log).toContain("distill: merge");
+
+    // The new note lands on master.
+    expect(fs.existsSync(path.join(vault, "new-note.md"))).toBe(true);
   });
 });

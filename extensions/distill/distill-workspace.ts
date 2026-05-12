@@ -650,6 +650,43 @@ export interface SpawnDistillOptions {
 }
 
 /**
+ * Detect the vault's default mainline branch. Strategy (first hit wins):
+ *   1. `git symbolic-ref refs/remotes/origin/HEAD` — when the vault has a
+ *      remote `origin`, its HEAD points at the conventional default.
+ *   2. Current branch via `git symbolic-ref --short HEAD` — for local-only
+ *      vaults (fresh `git init` on a user's machine, no remote), the
+ *      currently checked-out branch IS the default.
+ *   3. Fall back to `main` — matches our `git init -b main` in auto-setup.
+ *
+ * Never throws. Returns a plain short branch name (e.g. `main`, `master`,
+ * `trunk`) with no `refs/heads/` prefix.
+ *
+ * The return value is passed to the wrapper so the `git merge <default>`
+ * step inside the worktree targets the vault's actual mainline —
+ * hardcoding `main` silently corrupts vaults that use `master` or any
+ * other default-branch convention.
+ */
+export function detectDefaultBranch(vaultPath: string): string {
+  // origin/HEAD gives `refs/remotes/origin/<branch>` when set.
+  const originRes = runGit(vaultPath, [
+    "symbolic-ref",
+    "refs/remotes/origin/HEAD",
+  ]);
+  if (originRes.status === 0) {
+    const ref = originRes.stdout.trim();
+    const match = ref.match(/^refs\/remotes\/origin\/(.+)$/);
+    if (match && match[1].length > 0) return match[1];
+  }
+  // HEAD gives `<branch>` directly when --short is used.
+  const headRes = runGit(vaultPath, ["symbolic-ref", "--short", "HEAD"]);
+  if (headRes.status === 0) {
+    const branch = headRes.stdout.trim();
+    if (branch.length > 0) return branch;
+  }
+  return "main";
+}
+
+/**
  * Spawn a detached wrapper that performs the full auto-distill lifecycle
  * (pi → commit → merge → squash → cleanup) inside a per-distill worktree.
  *
@@ -699,6 +736,7 @@ export function spawnDistillInWorktree(
     prompt,
     errorDir,
     model ?? "",
+    detectDefaultBranch(vault),
   ];
 
   // Detached spawn: stdio "ignore" + unref() so the parent can exit cleanly

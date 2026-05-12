@@ -3,7 +3,7 @@
 # per-distill git worktree.
 #
 # Usage:
-#   distill-wrapper.sh <vault> <worktree> <branch> <sessionFork> <prompt> <errorDir> [<model>]
+#   distill-wrapper.sh <vault> <worktree> <branch> <sessionFork> <prompt> <errorDir> [<model>] [<defaultBranch>]
 #
 # Arguments:
 #   <vault>         absolute path to the main vault (NOT the worktree)
@@ -13,6 +13,10 @@
 #   <prompt>        prompt passed to `pi -p`
 #   <errorDir>      absolute path to `<vault.configPath>/distill/errors/`
 #   <model>         optional "<provider>/<id>" to pass to `pi --model`
+#   <defaultBranch> optional name of the vault's mainline branch (e.g. `main`,
+#                   `master`). When empty/absent, defaults to `main`. The JS
+#                   side resolves this via `git symbolic-ref refs/remotes/origin/HEAD`
+#                   or a HEAD-ref lookup so the wrapper doesn't hardcode `main`.
 #
 # Lifecycle (happy path):
 #   1. cd <worktree>
@@ -65,6 +69,11 @@ SESSION_FORK="${4:-}"
 PROMPT="${5:-}"
 ERROR_DIR="${6:-}"
 MODEL="${7:-}"
+DEFAULT_BRANCH="${8:-main}"
+# Treat empty string as "use fallback", not "literal empty branch name".
+if [ -z "$DEFAULT_BRANCH" ]; then
+  DEFAULT_BRANCH="main"
+fi
 
 if [ -z "$VAULT" ] || [ -z "$WORKTREE" ] || [ -z "$BRANCH" ] || \
    [ -z "$SESSION_FORK" ] || [ -z "$PROMPT" ] || [ -z "$ERROR_DIR" ]; then
@@ -209,7 +218,7 @@ fi
 
 # Merge may return non-zero when conflicts remain after the driver 3-strikes
 # on some files; we don't treat that as fatal — we salvage those files below.
-git_retry git -C "$WORKTREE" merge --no-edit main > /dev/null 2>&1 || true
+git_retry git -C "$WORKTREE" merge --no-edit "$DEFAULT_BRANCH" > /dev/null 2>&1 || true
 
 # Partial-merge salvage: any file still marked unmerged (driver gave up) gets
 # reverted to main's version. This preserves the clean distill content while
@@ -218,9 +227,9 @@ UNMERGED="$(git -C "$WORKTREE" diff --name-only --diff-filter=U 2>/dev/null || t
 if [ -n "$UNMERGED" ]; then
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    log_error "partial-merge: reverted '$f' to main's version (LLM driver 3-strike)"
-    git -C "$WORKTREE" checkout main -- "$f" > /dev/null 2>&1 || \
-      log_error "  failed to checkout main:$f"
+    log_error "partial-merge: reverted '$f' to $DEFAULT_BRANCH's version (LLM driver 3-strike)"
+    git -C "$WORKTREE" checkout "$DEFAULT_BRANCH" -- "$f" > /dev/null 2>&1 || \
+      log_error "  failed to checkout $DEFAULT_BRANCH:$f"
     git -C "$WORKTREE" add -- "$f" > /dev/null 2>&1 || true
   done <<< "$UNMERGED"
   # Complete the merge commit with whatever's now staged. --no-edit reuses
@@ -242,9 +251,21 @@ if [ -f "$WORKTREE/.git/MERGE_HEAD" ] || \
   exit 1
 fi
 
-# --- Step 4: squash distill into main from the main vault. -----------------
+# --- Step 4: squash distill into $DEFAULT_BRANCH from the main vault. ------
 
 cd "$VAULT" || { log_error "cd vault failed"; exit 1; }
+
+# Defensive: refuse to squash if the vault's HEAD isn't on the default branch.
+# `git merge --squash <branch>` stages changes onto whatever is checked out;
+# if the user has a feature branch in the main vault while auto-distill
+# fires, the squash would corrupt that branch's history with distill commits.
+# The spec's "Main history stays linear" invariant assumes HEAD == main.
+VAULT_HEAD="$(git symbolic-ref --short HEAD 2>/dev/null || true)"
+if [ -n "$VAULT_HEAD" ] && [ "$VAULT_HEAD" != "$DEFAULT_BRANCH" ]; then
+  log_error "vault HEAD is '$VAULT_HEAD', expected '$DEFAULT_BRANCH' — refusing to squash-merge distill into the wrong branch"
+  record_dangling_sha
+  exit 1
+fi
 
 if ! git_retry git merge --squash "$BRANCH" > /dev/null 2>&1; then
   log_error "git merge --squash failed"
