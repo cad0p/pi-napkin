@@ -1,13 +1,22 @@
 {
-  "name": "pi-napkin",
-  "version": "0.2.4",
-  "description": "🧻 Napkin integration for pi — vault context, knowledge tools, and automatic distillation",
+  "name": "@cad0p/pi-napkin",
+  "version": "0.3.0",
+  "description": "🧻 Napkin integration for pi — vault context, knowledge tools, and automatic distillation with git-worktree concurrency safety",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"
   },
   "keywords": [
-    "pi-package"
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "napkin",
+    "obsidian",
+    "knowledge-vault",
+    "markdown",
+    "session-distill",
+    "llm",
+    "agent-memory"
   ],
   "repository": {
     "type": "git",
@@ -17,6 +26,15 @@
   "bugs": {
     "url": "https://github.com/cad0p/pi-napkin/issues"
   },
+  "files": [
+    "extensions/**/*.ts",
+    "!extensions/**/*.test.ts",
+    "extensions/**/scripts/**",
+    "extensions/**/README.md",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
   "pi": {
     "extensions": [
       "extensions/napkin-context",
@@ -38,7 +56,7 @@
     "typescript": "^5.8.0"
   },
   "dependencies": {
-    "@cad0p/napkin": "*"
+    "@cad0p/napkin": ">=0.8.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0",
