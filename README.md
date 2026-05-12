@@ -172,7 +172,7 @@ Toggles back on with `/distill-auto-this-session on`. State persists across pi r
 
 ## Concurrency
 
-Running multiple pi sessions against the same vault (e.g., via `cr-auto-action`) or having Obsidian open while a distill is running would race on file writes. pi-napkin uses git worktrees to make this safe.
+Running multiple pi sessions against the same vault (for example, autonomous agent fleets spawning many sessions in parallel) or having Obsidian open while a distill is running would race on file writes. pi-napkin uses git worktrees to make this safe.
 
 ### Worktree per distill
 
