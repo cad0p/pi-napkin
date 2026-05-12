@@ -18,6 +18,7 @@ import {
   diffWorktreeSinceStart,
   generateDistillBranchName,
   getActiveDistills,
+  getDistillState,
   getUnmergedDistillBranches,
   parseWorktreeList,
   readDistillMeta,
@@ -923,6 +924,81 @@ describe("getUnmergedDistillBranches", () => {
       expect(getUnmergedDistillBranches({ contentPath: vault })).toEqual([
         orphan,
       ]);
+    } finally {
+      spawnSync("git", ["-C", vault, "branch", "-D", orphan]);
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+});
+
+describe("getDistillState (consolidated enumeration, CLN-3)", () => {
+  let vault: string;
+  let sessionDir: string;
+  let sourceSession: string;
+
+  beforeEach(() => {
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "state-src-"));
+    sourceSession = createSeededSessionFile(sessionDir, sessionDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test("no .git → both halves empty", () => {
+    const noGit = fs.mkdtempSync(path.join(os.tmpdir(), "state-no-git-"));
+    try {
+      expect(getDistillState({ contentPath: noGit })).toEqual({
+        active: [],
+        unmerged: [],
+      });
+    } finally {
+      fs.rmSync(noGit, { recursive: true, force: true });
+    }
+  });
+
+  test("fresh vault, no distills → both halves empty", () => {
+    expect(getDistillState({ contentPath: vault })).toEqual({
+      active: [],
+      unmerged: [],
+    });
+  });
+
+  test("mixed: one live worktree + one orphan branch → active=[live], unmerged=[orphan]", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    const orphan = "distill/zz-1700000002";
+    spawnSync("git", ["-C", vault, "branch", orphan]);
+
+    try {
+      const state = getDistillState({ contentPath: vault });
+      // active: only the live worktree
+      expect(state.active.length).toBe(1);
+      expect(state.active[0].branch).toBe(w.branchName);
+      // unmerged: only the orphan (live worktree's branch is excluded)
+      expect(state.unmerged).toEqual([orphan]);
+    } finally {
+      spawnSync("git", ["-C", vault, "branch", "-D", orphan]);
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+
+  test("agrees with getActiveDistills + getUnmergedDistillBranches on the same state", () => {
+    const w = createDistillWorkspace(vault, sourceSession);
+    const orphan = "distill/zz-1700000003";
+    spawnSync("git", ["-C", vault, "branch", orphan]);
+
+    try {
+      const combined = getDistillState({ contentPath: vault });
+      const active = getActiveDistills({ contentPath: vault });
+      const unmerged = getUnmergedDistillBranches({ contentPath: vault });
+      // Both enumerations see the same worktree/branch set; the consolidated
+      // call's output must match the sum of the thin wrappers.
+      expect(combined.active.map((a) => a.branch)).toEqual(
+        active.map((a) => a.branch),
+      );
+      expect(combined.unmerged).toEqual(unmerged);
     } finally {
       spawnSync("git", ["-C", vault, "branch", "-D", orphan]);
       cleanupDistillWorkspace(vault, w);

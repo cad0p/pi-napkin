@@ -24,7 +24,7 @@ import {
   DistillError,
   diffWorktreeSinceStart,
   getActiveDistills,
-  getUnmergedDistillBranches,
+  getDistillState,
   spawnDistillInWorktree,
 } from "./distill-workspace";
 import { DISTILL_WRAPPER_LEGACY_SCRIPT } from "./scripts-paths";
@@ -1059,9 +1059,7 @@ export function collectDistillStatus(vaultPath: string): {
   active: ActiveDistill[];
   unmerged: string[];
 } {
-  const active = getActiveDistills({ contentPath: vaultPath });
-  const unmerged = getUnmergedDistillBranches({ contentPath: vaultPath });
-  return { active, unmerged };
+  return getDistillState({ contentPath: vaultPath });
 }
 
 /**
