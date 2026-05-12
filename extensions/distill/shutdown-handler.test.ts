@@ -412,3 +412,164 @@ describe("session_shutdown handler (Item 8)", () => {
     expect(second).toBe(first);
   });
 });
+
+/**
+ * G5 — interval-fires-shortly-before-shutdown race. The scenario:
+ *
+ *   1. Auto-distill interval ticks. `runAutoDistill` spawns worktree A and
+ *      captures `lastSpawnedSize = S1`.
+ *   2. User continues typing for a second or two; session grows to S2 > S1.
+ *   3. User quits. `session_shutdown` fires.
+ *
+ * Expected: the shutdown handler spawns a SECOND worktree B to capture the
+ * (S1 → S2) delta. Worktree-queueing + the per-distill `startSha` isolates
+ * the two, so concurrent merges don't clobber each other.
+ *
+ * Contrast: if nothing happened between the interval tick and the quit
+ * (S2 === S1), the shutdown handler must NOT spawn a duplicate of A.
+ *
+ * These tests drive the scenario end-to-end by capturing the registered
+ * auto-distill interval callback (via a setInterval stub) and firing it
+ * manually, so we exercise the REAL `runAutoDistill` → `lastSpawnedSize =
+ * currentSize` wiring rather than relying on the predicate-level test in
+ * should-distill-on-shutdown.test.ts (guard 8).
+ */
+describe("session_shutdown handler — interval-fires-before-shutdown race (G5)", () => {
+  let vault: string;
+  let originalSetInterval: typeof setInterval;
+
+  const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+  const _savedGitEnv = {
+    authorName: process.env.GIT_AUTHOR_NAME,
+    authorEmail: process.env.GIT_AUTHOR_EMAIL,
+    committerName: process.env.GIT_COMMITTER_NAME,
+    committerEmail: process.env.GIT_COMMITTER_EMAIL,
+  };
+
+  /**
+   * Captured intervals registered during session_start / runDistillWith.
+   * The auto-distill tick is the one with `ms === intervalMinutes*60_000`;
+   * poll-loop intervals (runDistillWith's pollHandle, 500 ms) land here too
+   * but we don't drive them — we only need to simulate the auto tick.
+   */
+  let capturedIntervals: Array<{ cb: () => void; ms: number }> = [];
+
+  beforeEach(() => {
+    delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    process.env.GIT_AUTHOR_NAME = "Napkin CI";
+    process.env.GIT_AUTHOR_EMAIL = "ci@napkin.test";
+    process.env.GIT_COMMITTER_NAME = "Napkin CI";
+    process.env.GIT_COMMITTER_EMAIL = "ci@napkin.test";
+
+    capturedIntervals = [];
+    originalSetInterval = globalThis.setInterval;
+    globalThis.setInterval = ((
+      cb: () => void,
+      ms: number,
+      ..._rest: unknown[]
+    ) => {
+      capturedIntervals.push({ cb, ms });
+      return {
+        unref: () => {},
+        ref: () => {},
+      } as unknown as NodeJS.Timeout;
+    }) as typeof setInterval;
+  });
+
+  afterEach(() => {
+    if (_savedRecurse !== undefined)
+      process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
+    else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    for (const [key, val] of [
+      ["GIT_AUTHOR_NAME", _savedGitEnv.authorName],
+      ["GIT_AUTHOR_EMAIL", _savedGitEnv.authorEmail],
+      ["GIT_COMMITTER_NAME", _savedGitEnv.committerName],
+      ["GIT_COMMITTER_EMAIL", _savedGitEnv.committerEmail],
+    ] as const) {
+      if (val === undefined) delete process.env[key];
+      else process.env[key] = val;
+    }
+    globalThis.setInterval = originalSetInterval;
+    if (vault) {
+      cleanupWorktrees(vault);
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  test("interval fires at S1, content grows to S2>S1, shutdown spawns delta worktree", async () => {
+    vault = createVault({ enabled: true, intervalMinutes: 1 });
+    const sm = SessionManager.create(vault, vault);
+    // Seed session so the file exists + size > 0 by the time the interval
+    // callback runs.
+    sm.appendMessage({ role: "user", content: "hello" });
+    sm.appendMessage({ role: "assistant", content: "hi" });
+
+    const { api, captured } = makeMockAPI();
+    distillExtension(api as never);
+    // biome-ignore lint/suspicious/noExplicitAny: partial ctx
+    const ctx: any = {
+      cwd: vault,
+      sessionManager: sm,
+      hasUI: false,
+      ui: null,
+    };
+    await captured.handlers.session_start({ reason: "new" }, ctx);
+
+    // Locate the auto-distill interval. intervalMinutes=1 → ms=60_000.
+    const autoInterval = capturedIntervals.find((i) => i.ms === 60_000);
+    expect(autoInterval).toBeDefined();
+
+    // Fire it: `runAutoDistill` spawns worktree A and records
+    // `lastSpawnedSize = <sessionFile size at this tick>`.
+    // biome-ignore lint/style/noNonNullAssertion: verified above
+    autoInterval!.cb();
+    const afterInterval = countWorktrees(vault);
+    expect(afterInterval).toBe(1);
+
+    // Grow the session between the interval tick and the quit. Must grow
+    // the file size (which is what the handler reads via fs.statSync),
+    // so we append real messages rather than mutating in memory.
+    sm.appendMessage({
+      role: "user",
+      content: "more content typed after tick",
+    });
+    sm.appendMessage({
+      role: "assistant",
+      content: "response that pushes the file size past the interval mark",
+    });
+
+    // Shutdown. currentSize (S2) > lastSpawnedSize (S1) → guard 8 passes,
+    // the handler spawns worktree B to capture the (S1 → S2) delta.
+    await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
+    expect(countWorktrees(vault)).toBe(2);
+  });
+
+  test("interval fires at S1, no new content, shutdown does NOT spawn duplicate", async () => {
+    vault = createVault({ enabled: true, intervalMinutes: 1 });
+    const sm = SessionManager.create(vault, vault);
+    sm.appendMessage({ role: "user", content: "hello" });
+    sm.appendMessage({ role: "assistant", content: "hi" });
+
+    const { api, captured } = makeMockAPI();
+    distillExtension(api as never);
+    // biome-ignore lint/suspicious/noExplicitAny: partial ctx
+    const ctx: any = {
+      cwd: vault,
+      sessionManager: sm,
+      hasUI: false,
+      ui: null,
+    };
+    await captured.handlers.session_start({ reason: "new" }, ctx);
+
+    const autoInterval = capturedIntervals.find((i) => i.ms === 60_000);
+    expect(autoInterval).toBeDefined();
+    // biome-ignore lint/style/noNonNullAssertion: verified above
+    autoInterval!.cb();
+    expect(countWorktrees(vault)).toBe(1);
+
+    // No new content between interval and quit → currentSize ===
+    // lastSpawnedSize, guard 8 trips, shutdown is a no-op.
+    await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
+    expect(countWorktrees(vault)).toBe(1);
+  });
+});
