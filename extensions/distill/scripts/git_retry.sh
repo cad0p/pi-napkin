@@ -29,9 +29,20 @@
 # Environment override:
 #   NAPKIN_GIT_RETRY_MAX  \u2014 override retry count (default 5)
 #   NAPKIN_GIT_RETRY_DELAY \u2014 override base delay in seconds (default 0.5)
+
+# Defaults for git_retry. 5 retries \u00d7 0.5s base delay (linear backoff:
+# 0.5s + 1.0s + 1.5s + 2.0s = ~5s between attempts, ~7.5s worst-case
+# wall wait once the command-runtime fraction is factored in) is long
+# enough to outlast typical index.lock contention from the Obsidian git
+# plugin / an autocommit cron, while still failing fast on real errors
+# (the command is re-run, not the lock specifically, so a deterministic
+# failure fails all 5 attempts in roughly the same time).
+GIT_RETRY_MAX=5
+GIT_RETRY_DELAY_S=0.5
+
 git_retry() {
-  local max="${NAPKIN_GIT_RETRY_MAX:-5}"
-  local base="${NAPKIN_GIT_RETRY_DELAY:-0.5}"
+  local max="${NAPKIN_GIT_RETRY_MAX:-$GIT_RETRY_MAX}"
+  local base="${NAPKIN_GIT_RETRY_DELAY:-$GIT_RETRY_DELAY_S}"
   local attempt=1
   local status=0
   while [ "$attempt" -le "$max" ]; do
