@@ -581,7 +581,7 @@ function isPidAlive(pid: number): boolean {
 
 /**
  * Number of minutes past which a worktree with a stale mtime on its
- * meta.json is considered abandoned — even if meta.json is still present.
+ * meta.json is considered abandoned — even if its pid is still alive.
  *
  * Covers `MAX_DISTILL_DURATION_MS` (10 minutes, defined in the extension
  * factory) with a 6× margin, so a worktree older than this either crashed
