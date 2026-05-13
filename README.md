@@ -9,8 +9,8 @@ Gives a pi agent first-class access to an Obsidian-compatible knowledge vault, w
 pi-napkin depends on the [`@cad0p/napkin`](https://github.com/cad0p/napkin) CLI. Install it first:
 
 ```bash
-pnpm add -g @cad0p/napkin
-# or: npm install -g @cad0p/napkin
+npm install -g @cad0p/napkin
+# or: bun add -g @cad0p/napkin
 ```
 
 Then install the pi-napkin extension:
