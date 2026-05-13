@@ -5,13 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-
+import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
 /**
  * Tests that verify Item 7 routing:
  *   - the interval timer set up by `session_start` calls `runAutoDistill`,
- *     which creates a git worktree under `.napkin/distill-worktrees/`
+ *     which creates a git worktree under `$XDG_CACHE_HOME/napkin-distill/<hash>/`
  *   - the `/distill` command handler calls the legacy `runDistill`, which
  *     creates a tmp directory under `os.tmpdir()` (not a worktree)
  *
@@ -199,10 +199,14 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
   let sm: SessionManager;
   let capturedInterval: (() => void) | null = null;
   let originalSetInterval: typeof setInterval;
+  let xdgCacheDir: string;
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+  const _savedXdgCache = process.env.XDG_CACHE_HOME;
 
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "routing-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     vault = createEnabledGitVault(60);
     sm = createSeededSession(vault);
 
@@ -235,8 +239,9 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     globalThis.setInterval = originalSetInterval;
     // Best-effort cleanup of any dangling worktrees + branches the detached
-    // wrapper may have left during the test window.
-    const worktreesDir = path.join(vault, ".napkin", "distill-worktrees");
+    // wrapper may have left during the test window. Worktrees live under
+    // the per-test XDG cache dir set in beforeEach.
+    const worktreesDir = resolveCacheRoot(vault);
     if (fs.existsSync(worktreesDir)) {
       for (const entry of fs.readdirSync(worktreesDir)) {
         const wt = path.join(worktreesDir, entry);
@@ -247,6 +252,9 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     }
     spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
     fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   /**
@@ -273,7 +281,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     await captured.handlers.session_start({ reason: "new" }, ctx);
     expect(capturedInterval).not.toBeNull();
 
-    const worktreesDir = path.join(vault, ".napkin", "distill-worktrees");
+    const worktreesDir = resolveCacheRoot(vault);
     expect(
       fs.existsSync(worktreesDir) ? fs.readdirSync(worktreesDir).length : 0,
     ).toBe(0);
@@ -283,8 +291,8 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     // creates a worktree synchronously (before detached spawn returns).
     capturedInterval?.();
 
-    // Worktree created under .napkin/distill-worktrees/. The directory name
-    // is the branch suffix (hex-epoch) from createDistillWorkspace.
+    // Worktree created under $XDG_CACHE_HOME/napkin-distill/<hash>/. The
+    // directory name is the branch suffix (hex-epoch) from createDistillWorkspace.
     expect(fs.existsSync(worktreesDir)).toBe(true);
     const entries = fs.readdirSync(worktreesDir);
     expect(entries.length).toBe(1);
@@ -305,7 +313,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     const ctx = makeCtx();
     await captured.commands.distill.handler("", ctx);
 
-    const worktreesDir = path.join(vault, ".napkin", "distill-worktrees");
+    const worktreesDir = resolveCacheRoot(vault);
     expect(fs.existsSync(worktreesDir)).toBe(true);
     const entries = fs.readdirSync(worktreesDir);
     expect(entries.length).toBe(1);
@@ -350,7 +358,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     expect(newTmpDirs.length).toBe(1);
 
     // No worktree under the non-git vault.
-    const worktreesDir = path.join(nonGitVault, ".napkin", "distill-worktrees");
+    const worktreesDir = resolveCacheRoot(nonGitVault);
     expect(fs.existsSync(worktreesDir)).toBe(false);
 
     // Cleanup
@@ -397,11 +405,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     expect(newTmpDirs.length).toBe(1);
 
     // No worktree under the disabled-auto-distill vault.
-    const worktreesDir = path.join(
-      disabledVault,
-      ".napkin",
-      "distill-worktrees",
-    );
+    const worktreesDir = resolveCacheRoot(disabledVault);
     expect(fs.existsSync(worktreesDir)).toBe(false);
 
     // No git side effects: .gitattributes unchanged (still null — the

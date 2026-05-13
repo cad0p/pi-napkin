@@ -33,7 +33,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-
+import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
 interface CapturedAPI {
@@ -123,13 +123,13 @@ function createVault(intervalMinutes: number): string {
 }
 
 function countWorktrees(vault: string): number {
-  const d = path.join(vault, ".napkin", "distill-worktrees");
+  const d = resolveCacheRoot(vault);
   if (!fs.existsSync(d)) return 0;
   return fs.readdirSync(d).length;
 }
 
 function cleanupWorktrees(vault: string): void {
-  const d = path.join(vault, ".napkin", "distill-worktrees");
+  const d = resolveCacheRoot(vault);
   if (!fs.existsSync(d)) return;
   for (const entry of fs.readdirSync(d)) {
     const wt = path.join(d, entry);
@@ -143,9 +143,11 @@ function cleanupWorktrees(vault: string): void {
 describe("runDistillWith pollHandle timeout (G8)", () => {
   let vault: string;
   let originalSetInterval: typeof setInterval;
+  let xdgCacheDir: string;
 
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
   const _savedOverride = process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE;
+  const _savedXdgCache = process.env.XDG_CACHE_HOME;
   const _savedGitEnv = {
     authorName: process.env.GIT_AUTHOR_NAME,
     authorEmail: process.env.GIT_AUTHOR_EMAIL,
@@ -165,6 +167,8 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
     // Shrink the production 10-minute cap to 100 ms so we can tick past
     // it in the test without real-time delay.
     process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE = "100";
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "poll-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     process.env.GIT_AUTHOR_NAME = "Napkin CI";
     process.env.GIT_AUTHOR_EMAIL = "ci@napkin.test";
     process.env.GIT_COMMITTER_NAME = "Napkin CI";
@@ -206,6 +210,9 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
       cleanupWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   test("timeout branch: removes worktree, resets isRunning, allows next distill", async () => {
@@ -254,7 +261,7 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
     // biome-ignore lint/style/noNonNullAssertion: verified above
     pollInterval!.cb();
 
-    // Cleanup ran → the distill-worktrees dir is empty (or gone). The
+    // Cleanup ran → the XDG cache worktree dir is empty (or gone). The
     // production path calls `cleanupDistillWorkspace` which removes the
     // worktree via `git worktree remove --force`.
     expect(countWorktrees(vault)).toBe(0);

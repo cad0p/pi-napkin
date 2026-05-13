@@ -12,7 +12,6 @@ import {
   createDistillWorkspace,
   createDistillWorktree,
   DISTILL_SUBDIR,
-  DISTILL_WORKTREES_SUBDIR,
   DistillError,
   type DistillMeta,
   diffWorktreeSinceStart,
@@ -23,6 +22,7 @@ import {
   parseWorktreeList,
   readDistillMeta,
   removeDistillWorktree,
+  resolveCacheRoot,
   STALE_META_AGE_MS,
   STALE_WORKTREE_MINUTES,
 } from "./distill-workspace";
@@ -98,6 +98,76 @@ describe("generateDistillBranchName", () => {
   });
 });
 
+describe("resolveCacheRoot (XDG cache placement)", () => {
+  // Guard the XDG_CACHE_HOME env var so tests don't leak mutations across
+  // the suite (other tests rely on the host's default cache behaviour).
+  let savedXdg: string | undefined;
+  beforeEach(() => {
+    savedXdg = process.env.XDG_CACHE_HOME;
+  });
+  afterEach(() => {
+    if (savedXdg === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = savedXdg;
+  });
+
+  test("respects $XDG_CACHE_HOME when set", () => {
+    const fakeCache = fs.mkdtempSync(path.join(os.tmpdir(), "xdg-cache-"));
+    try {
+      process.env.XDG_CACHE_HOME = fakeCache;
+      const root = resolveCacheRoot("/some/vault");
+      expect(
+        root.startsWith(`${fakeCache}${path.sep}napkin-distill${path.sep}`),
+      ).toBe(true);
+    } finally {
+      fs.rmSync(fakeCache, { recursive: true, force: true });
+    }
+  });
+
+  test("falls back to $HOME/.cache when XDG_CACHE_HOME is unset", () => {
+    delete process.env.XDG_CACHE_HOME;
+    const root = resolveCacheRoot("/some/vault");
+    const expectedPrefix = path.join(os.homedir(), ".cache", "napkin-distill");
+    expect(root.startsWith(`${expectedPrefix}${path.sep}`)).toBe(true);
+  });
+
+  test("empty XDG_CACHE_HOME is treated as unset (falsy) \u2014 falls back to ~/.cache", () => {
+    // `process.env.XDG_CACHE_HOME || path.join(...)` treats `""` as falsy.
+    // Pinned so a future refactor doesn't change the guard to `!==
+    // undefined` and silently plant worktrees in the current directory.
+    process.env.XDG_CACHE_HOME = "";
+    const root = resolveCacheRoot("/some/vault");
+    const expectedPrefix = path.join(os.homedir(), ".cache", "napkin-distill");
+    expect(root.startsWith(`${expectedPrefix}${path.sep}`)).toBe(true);
+  });
+
+  test("vault-hash is stable per contentPath (same input \u2192 same hash)", () => {
+    process.env.XDG_CACHE_HOME = "/tmp/xdg";
+    const a = resolveCacheRoot("/home/user/my-vault");
+    const b = resolveCacheRoot("/home/user/my-vault");
+    expect(a).toBe(b);
+  });
+
+  test("vault-hash differs across distinct contentPaths (collision-resistant)", () => {
+    process.env.XDG_CACHE_HOME = "/tmp/xdg";
+    const a = resolveCacheRoot("/home/user/vault-a");
+    const b = resolveCacheRoot("/home/user/vault-b");
+    expect(a).not.toBe(b);
+  });
+
+  test("vault-hash is 16 hex chars", () => {
+    process.env.XDG_CACHE_HOME = "/tmp/xdg";
+    const root = resolveCacheRoot("/home/user/my-vault");
+    const hash = path.basename(root);
+    expect(hash).toMatch(/^[0-9a-f]{16}$/);
+  });
+
+  test("layout is $cacheHome/napkin-distill/<hash>", () => {
+    process.env.XDG_CACHE_HOME = "/tmp/xdg";
+    const root = resolveCacheRoot("/home/user/vault");
+    expect(path.dirname(root)).toBe(path.join("/tmp/xdg", "napkin-distill"));
+  });
+});
+
 describe("createDistillWorktree", () => {
   let vault: string;
 
@@ -111,7 +181,7 @@ describe("createDistillWorktree", () => {
 
   test("creates a git worktree on a fresh branch rooted at HEAD", () => {
     const branch = generateDistillBranchName();
-    const wt = path.join(vault, DISTILL_WORKTREES_SUBDIR, "wt1");
+    const wt = path.join(vault, "test-worktrees", "wt1");
     createDistillWorktree(vault, branch, wt);
 
     // Seed file from parent commit is present in the worktree.
@@ -177,10 +247,10 @@ describe("createDistillWorktree", () => {
 
   test("throws DistillError if branch name already taken", () => {
     const branch = generateDistillBranchName();
-    const wt1 = path.join(vault, DISTILL_WORKTREES_SUBDIR, "wt1");
+    const wt1 = path.join(vault, "test-worktrees", "wt1");
     createDistillWorktree(vault, branch, wt1);
     try {
-      const wt2 = path.join(vault, DISTILL_WORKTREES_SUBDIR, "wt2");
+      const wt2 = path.join(vault, "test-worktrees", "wt2");
       expect(() => createDistillWorktree(vault, branch, wt2)).toThrow(
         DistillError,
       );
@@ -196,7 +266,7 @@ describe("createDistillWorktree", () => {
     // invocation fails. Also: an attacker-controlled path prefix could
     // inject arguments. Fix: wrap the path in single quotes.
     const branch = generateDistillBranchName();
-    const wt = path.join(vault, DISTILL_WORKTREES_SUBDIR, "wt-quoted");
+    const wt = path.join(vault, "test-worktrees", "wt-quoted");
     createDistillWorktree(vault, branch, wt);
     try {
       const cfg = spawnSync(
@@ -248,7 +318,7 @@ describe("createDistillWorktree", () => {
       run(["commit", "-q", "-m", "seed"]);
 
       const branch = generateDistillBranchName();
-      const wt = path.join(spacedVault, DISTILL_WORKTREES_SUBDIR, "wt-spaced");
+      const wt = path.join(spacedVault, "test-worktrees", "wt-spaced");
       // Should not throw even though the driver path on this box may
       // contain spaces further up the tree.
       createDistillWorktree(spacedVault, branch, wt);
@@ -273,7 +343,7 @@ describe("removeDistillWorktree", () => {
 
   test("removes worktree + branch", () => {
     const branch = generateDistillBranchName();
-    const wt = path.join(vault, DISTILL_WORKTREES_SUBDIR, "wt");
+    const wt = path.join(vault, "test-worktrees", "wt");
     createDistillWorktree(vault, branch, wt);
     expect(fs.existsSync(wt)).toBe(true);
 
@@ -346,10 +416,15 @@ describe("createDistillWorkspace", () => {
     expect(path.basename(w.metaPath)).toBe("meta.json");
   });
 
-  test("worktree lives under <vault>/.napkin/distill-worktrees/", () => {
+  test("worktree lives under XDG cache / napkin-distill / vault-hash, not inside vault", () => {
+    // Worktrees must be placed OUTSIDE the vault (see `resolveCacheRoot`
+    // docstring) to avoid cloud-sync pollution, plugin re-indexing, and
+    // autocommit-cron noise. We pin the expected layout here.
     const w = track(createDistillWorkspace(vault, sourceSession));
-    const expectedPrefix = path.join(vault, DISTILL_WORKTREES_SUBDIR);
-    expect(w.worktreePath.startsWith(expectedPrefix)).toBe(true);
+    const expectedPrefix = resolveCacheRoot(vault);
+    expect(w.worktreePath.startsWith(expectedPrefix + path.sep)).toBe(true);
+    // Belt-and-braces: confirm the worktree is NOT nested inside the vault.
+    expect(w.worktreePath.startsWith(vault + path.sep)).toBe(false);
   });
 
   test("meta.json has all DistillMeta fields", () => {

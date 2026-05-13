@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-
+import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
 /**
@@ -13,11 +13,12 @@ import distillExtension from "./index";
  * the handler spawns an auto-distill worktree iff `shouldDistillOnShutdown`
  * returns true, and never blocks shutdown regardless of inner failures.
  *
- * Approach: observe the filesystem for `.napkin/distill-worktrees/<suffix>/`
- * directories as a proxy for "spawnDistillInWorktree was invoked". The
- * workspace is created synchronously by `spawnDistillInWorktree` before the
- * detached process exec, so we can assert immediately after the handler
- * returns without racing the wrapper's cleanup trap.
+ * Approach: observe the filesystem for worktree directories under the vault's
+ * XDG cache (`$XDG_CACHE_HOME/napkin-distill/<vault-hash>/<suffix>/`) as a
+ * proxy for "spawnDistillInWorktree was invoked". The workspace is created
+ * synchronously by `spawnDistillInWorktree` before the detached process
+ * exec, so we can assert immediately after the handler returns without
+ * racing the wrapper's cleanup trap.
  *
  * `shouldDistillOnShutdown` itself has direct unit-test coverage in
  * should-distill-on-shutdown.test.ts \u2014 these tests cover the WIRING (the
@@ -154,16 +155,16 @@ function createSession(dir: string): SessionManager {
   return sm;
 }
 
-/** Count worktrees present under `<vault>/.napkin/distill-worktrees/`. */
+/** Count worktrees present under the vault's XDG distill cache dir. */
 function countWorktrees(vault: string): number {
-  const d = path.join(vault, ".napkin", "distill-worktrees");
+  const d = resolveCacheRoot(vault);
   if (!fs.existsSync(d)) return 0;
   return fs.readdirSync(d).length;
 }
 
 /** Best-effort cleanup of any dangling distill worktrees in `vault`. */
 function cleanupWorktrees(vault: string): void {
-  const d = path.join(vault, ".napkin", "distill-worktrees");
+  const d = resolveCacheRoot(vault);
   if (!fs.existsSync(d)) return;
   for (const entry of fs.readdirSync(d)) {
     const wt = path.join(d, entry);
@@ -178,9 +179,13 @@ describe("session_shutdown handler (Item 8)", () => {
   let vault: string;
   let sm: SessionManager;
   let originalSetInterval: typeof setInterval;
+  /** Per-test XDG_CACHE_HOME override so distill worktrees land in a test
+   * tmpdir instead of the user's real `~/.cache/napkin-distill/`. */
+  let xdgCacheDir: string;
 
   // Clear the recursion-guard env var — test runner may be inside a distill subprocess.
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+  const _savedXdgCache = process.env.XDG_CACHE_HOME;
   // Saved git identity env vars — set dummy values before each test so the
   // Phase C1 auto-init test (production does `git init` + `git commit` on a
   // fresh vault) succeeds on CI runners without a global ~/.gitconfig.
@@ -194,6 +199,8 @@ describe("session_shutdown handler (Item 8)", () => {
   };
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "shutdown-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     process.env.GIT_AUTHOR_NAME = "Napkin CI";
     process.env.GIT_AUTHOR_EMAIL = "ci@napkin.test";
     process.env.GIT_COMMITTER_NAME = "Napkin CI";
@@ -231,6 +238,10 @@ describe("session_shutdown handler (Item 8)", () => {
       cleanupWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
+    // Tear down the per-test XDG cache dir (where worktrees live now).
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   /**
@@ -443,8 +454,10 @@ describe("session_shutdown handler (Item 8)", () => {
 describe("session_shutdown handler — interval-fires-before-shutdown race (G5)", () => {
   let vault: string;
   let originalSetInterval: typeof setInterval;
+  let xdgCacheDir: string;
 
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+  const _savedXdgCache = process.env.XDG_CACHE_HOME;
   const _savedGitEnv = {
     authorName: process.env.GIT_AUTHOR_NAME,
     authorEmail: process.env.GIT_AUTHOR_EMAIL,
@@ -462,6 +475,8 @@ describe("session_shutdown handler — interval-fires-before-shutdown race (G5)"
 
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "g5-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     process.env.GIT_AUTHOR_NAME = "Napkin CI";
     process.env.GIT_AUTHOR_EMAIL = "ci@napkin.test";
     process.env.GIT_COMMITTER_NAME = "Napkin CI";
@@ -500,6 +515,9 @@ describe("session_shutdown handler — interval-fires-before-shutdown race (G5)"
       cleanupWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   test("interval fires at S1, content grows to S2>S1, shutdown spawns delta worktree", async () => {
@@ -596,8 +614,10 @@ describe("session_shutdown handler — conflicting .gitattributes blocks setup (
   let vault: string;
   let sm: SessionManager;
   let originalSetInterval: typeof setInterval;
+  let xdgCacheDir: string;
 
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+  const _savedXdgCache = process.env.XDG_CACHE_HOME;
   const _savedGitEnv = {
     authorName: process.env.GIT_AUTHOR_NAME,
     authorEmail: process.env.GIT_AUTHOR_EMAIL,
@@ -607,6 +627,8 @@ describe("session_shutdown handler — conflicting .gitattributes blocks setup (
 
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "g7-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     process.env.GIT_AUTHOR_NAME = "Napkin CI";
     process.env.GIT_AUTHOR_EMAIL = "ci@napkin.test";
     process.env.GIT_COMMITTER_NAME = "Napkin CI";
@@ -642,6 +664,9 @@ describe("session_shutdown handler — conflicting .gitattributes blocks setup (
       cleanupWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   test("vault with *.md merge=union: no scaffold rewrite, shutdown does NOT spawn", async () => {

@@ -25,8 +25,9 @@
  */
 
 import { spawn, spawnSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 import { Napkin } from "@cad0p/napkin";
@@ -124,14 +125,42 @@ export function generateDistillBranchName(
 export const DISTILL_SUBDIR = path.join(".napkin", "distill");
 
 /**
- * Root directory where all distill worktrees live, relative to the vault.
- * Gitignored by the Phase C auto-init scaffolding; worktrees should never be
- * committed back to the vault.
+ * Resolve the root directory where this vault's distill worktrees live.
+ * Follows XDG Base Directory Spec: `~/.cache/napkin-distill/<hash>/` by
+ * default, `$XDG_CACHE_HOME/napkin-distill/<hash>/` when set.
+ *
+ * `<hash>` is the first 16 hex chars of sha256(vaultContentPath) — stable
+ * per vault, unique across vaults. Prevents worktrees from two different
+ * vaults colliding under the same cache dir while keeping the path short
+ * and inspectable.
+ *
+ * Worktree placement outside the vault is deliberate:
+ *   - Cloud-sync pollution: OneDrive/Dropbox don't respect `.gitignore`;
+ *     in-vault worktrees would upload tens of MB per distill spawn.
+ *   - Filesystem-walker pollution: Obsidian plugins and `find` descend
+ *     into worktrees and would see N full vault copies for N concurrent
+ *     distills.
+ *   - Autocommit-cron noise: a vault's autocommit hook can surface
+ *     in-vault worktrees as gitlinks under some command sequences.
+ *   - Git convention: git-worktree docs show worktrees as siblings of
+ *     the main repo, never nested inside it.
+ *   - Safety escape hatch: `rm -rf ~/.cache/napkin-distill/<hash>/` is
+ *     always safe — anything valuable is already on main or was never
+ *     going to commit.
+ *
+ * @param vaultContentPath Absolute path to the vault's content root
+ *   (`napkin.vault.contentPath`, NOT configPath — they're distinct in
+ *   subdir layout and we want one hash per vault, not per config dir).
  */
-export const DISTILL_WORKTREES_SUBDIR = path.join(
-  ".napkin",
-  "distill-worktrees",
-);
+export function resolveCacheRoot(vaultContentPath: string): string {
+  const cacheHome =
+    process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
+  const vaultHash = createHash("sha256")
+    .update(vaultContentPath)
+    .digest("hex")
+    .slice(0, 16);
+  return path.join(cacheHome, "napkin-distill", vaultHash);
+}
 
 /**
  * Throws `DistillError` if `vaultPath` is not a git repository. Phase B
@@ -286,8 +315,8 @@ export function createDistillWorktree(
 
   // Ensure the parent of worktreePath exists; `git worktree add` requires a
   // non-existent target directory but will happily create intermediate dirs
-  // for us \u2014 except when we're writing into `.napkin/distill-worktrees/`
-  // which only exists after first use.
+  // for us \u2014 except when the parent (e.g. the vault's XDG cache root
+  // `~/.cache/napkin-distill/<hash>/`) only exists after first use.
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
 
   const res = runGit(vaultPath, [
@@ -362,7 +391,8 @@ export function removeDistillWorktree(
  *
  * Workflow:
  *   1. Pick a unique branch name (`distill/<hex>-<epoch>`).
- *   2. Compute worktree path: `<vault>/.napkin/distill-worktrees/<branch-suffix>/`.
+ *   2. Compute worktree path: `<cacheRoot>/<branch-suffix>/` where
+ *      `cacheRoot = resolveCacheRoot(vault)` (XDG cache; outside vault).
  *   3. `git worktree add -b <branch> <path> HEAD`.
  *   4. Make `<wt>/.napkin/distill/`, fork the source session into it, write
  *      meta.json.
@@ -371,7 +401,10 @@ export function removeDistillWorktree(
  * On failure at any step after the worktree exists, the worktree + branch are
  * torn down via `removeDistillWorktree` so we never leak on throw.
  *
- * @param vault              Absolute path to the main vault (NOT a worktree).
+ * @param vault              Absolute path to the vault's content root (NOT a
+ *                           worktree, NOT configPath). Used as the input to
+ *                           the vault-hash so multi-vault setups isolate
+ *                           cleanly.
  * @param sourceSessionFile  Absolute path to the parent session .jsonl.
  *
  * @throws DistillError if vault isn't a git repo, worktree creation fails,
@@ -385,7 +418,11 @@ export function createDistillWorkspace(
 
   const branchName = generateDistillBranchName();
   const branchSuffix = branchName.slice("distill/".length);
-  const worktreePath = path.join(vault, DISTILL_WORKTREES_SUBDIR, branchSuffix);
+  // Worktree lives OUTSIDE the vault, under the user's XDG cache dir. See
+  // `resolveCacheRoot` for the full rationale (cloud-sync pollution,
+  // autocommit-cron noise, plugin re-indexing). `git worktree list`
+  // still enumerates these correctly regardless of placement.
+  const worktreePath = path.join(resolveCacheRoot(vault), branchSuffix);
 
   // Capture HEAD SHA BEFORE the worktree is created so meta.json records
   // the exact commit the distill started from. Used by the overlap detector
@@ -652,8 +689,8 @@ export function readDistillMeta(worktreePath: string): DistillMeta | null {
 /**
  * Result of `spawnDistillInWorktree` — returned for bookkeeping and tests.
  * The caller typically stores nothing beyond `workspace.branchName` so
- * `/distill-status` can later discover active workspaces by scanning
- * `.napkin/distill-worktrees/` and reading their `meta.json`.
+ * `/distill-status` can later discover active workspaces by enumerating
+ * `git worktree list` and reading their `meta.json`.
  */
 export interface SpawnDistillResult {
   workspace: DistillWorkspace;
@@ -804,10 +841,11 @@ export function spawnDistillInWorktree(
 
 /**
  * Shape returned by `getActiveDistills`. Each entry represents a worktree
- * currently present under `<vault>/.napkin/distill-worktrees/` on a
- * `distill/*` branch. Liveness (`alive`) is decided at read time via
- * `process.kill(pid, 0)`, so a freshly crashed wrapper is reported with
- * `alive: false` (and `/distill-status` renders it as stale).
+ * currently linked to the vault's git repo on a `distill/*` branch
+ * (placement is under the XDG cache dir, not inside the vault).
+ * Liveness (`alive`) is decided at read time via `process.kill(pid, 0)`,
+ * so a freshly crashed wrapper is reported with `alive: false` (and
+ * `/distill-status` renders it as stale).
  *
  * Fields are kept flat + JSON-friendly so the pi tool can serialize the
  * array directly.
