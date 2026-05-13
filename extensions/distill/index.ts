@@ -704,6 +704,7 @@ export default function (pi: ExtensionAPI) {
     spawnFn: (args: {
       ctx: RunCtx;
       vaultContentPath: string;
+      vaultConfigPath: string;
       sessionFile: string;
       config: DistillConfig;
     }) => {
@@ -771,6 +772,7 @@ export default function (pi: ExtensionAPI) {
     const spawned = strategy.spawnFn({
       ctx,
       vaultContentPath,
+      vaultConfigPath: vaultInfo.configPath,
       sessionFile,
       config,
     });
@@ -858,8 +860,9 @@ export default function (pi: ExtensionAPI) {
   function runDistill(ctx: RunCtx) {
     // Manual `/distill`: use the worktree path only when the user has
     // opted into auto-distill (`distill.enabled=true` in vault config)
-    // AND git is available. Otherwise fall back to the legacy git-less
-    // tmpdir path, which never touches git config.
+    // AND git is available AND the vault uses the subdir layout.
+    // Otherwise fall back to the legacy git-less tmpdir path, which
+    // never touches git config.
     //
     // Why gate on `config.enabled`? The worktree path calls
     // `registerMergeDriver()` which writes to `.gitattributes` and may
@@ -869,6 +872,21 @@ export default function (pi: ExtensionAPI) {
     // still work (they invoked it explicitly) but must not silently
     // modify their git state. Legacy path has zero git side effects.
     //
+    // Why gate on subdir layout (SEC-R4-1)? On a legacy-embedded vault
+    // (`configPath === contentPath`, e.g. `~/.napkin/`), spawning into a
+    // worktree causes napkin's `findVault` (run from cwd=<worktree>) to
+    // walk up past the worktree and resolve to the user's real
+    // `~/.napkin/` via the global-config fallback. Distill writes then
+    // land on the real vault, the worktree stays empty, and `git add -A`
+    // / squash-merge become no-ops — the concurrency guarantee silently
+    // degrades to zero. Auto-distill is already refused on legacy layout
+    // in `ensureVaultReadyForAutoDistill` at session_start. Manual
+    // `/distill` is git-optional per spec, so on legacy layout we fall
+    // back to the legacy tmpdir path (which correctly resolves the vault
+    // via napkin before forking the session). Users who want worktree
+    // concurrency for manual `/distill` must migrate to subdir layout;
+    // the session_start notify walks them through the migration.
+    //
     // Why not always worktree? Some users keep their vault outside git
     // on purpose (mobile-only Obsidian, ephemeral scratch vaults, etc.)
     // and should still be able to run `/distill` manually without
@@ -877,17 +895,23 @@ export default function (pi: ExtensionAPI) {
     //
     // Cross-session concurrency caveat: this only applies to the legacy
     // fallback. Two concurrent manual /distills on a git-less vault (or
-    // on a vault where `distill.enabled=false`) race on napkin writes
-    // because the legacy path has no worktree isolation. `isRunning`
-    // blocks a second /distill in the same pi session, but not across
-    // sessions. With `distill.enabled=true` and git available, both
-    // manual and auto paths merge serially through the merge driver.
+    // on a vault where `distill.enabled=false`, or on a legacy-embedded
+    // vault) race on napkin writes because the legacy path has no
+    // worktree isolation. `isRunning` blocks a second /distill in the
+    // same pi session, but not across sessions. With `distill.enabled=true`,
+    // git available, AND subdir layout, both manual and auto paths merge
+    // serially through the merge driver.
     runDistillWith(ctx, {
       spawnFn: (args) => {
         const gitPresent = fs.existsSync(
           path.join(args.vaultContentPath, ".git"),
         );
-        if (gitPresent && args.config.enabled) {
+        // Legacy-embedded detection: napkin reports configPath ===
+        // contentPath when `config.json` lacks `vault.root`. Matches the
+        // predicate used in `ensureVaultReadyForAutoDistill` for
+        // auto-distill refusal (keep them in lockstep).
+        const isLegacyEmbedded = args.vaultConfigPath === args.vaultContentPath;
+        if (gitPresent && args.config.enabled && !isLegacyEmbedded) {
           return worktreeSpawnFn(args);
         }
         return legacySpawnFn(args);
@@ -927,6 +951,7 @@ export default function (pi: ExtensionAPI) {
   function legacySpawnFn(args: {
     ctx: RunCtx;
     vaultContentPath: string;
+    vaultConfigPath: string;
     sessionFile: string;
     config: DistillConfig;
   }): { target: string; cleanup: () => void } | null {
@@ -953,6 +978,7 @@ export default function (pi: ExtensionAPI) {
   function worktreeSpawnFn(args: {
     ctx: RunCtx;
     vaultContentPath: string;
+    vaultConfigPath: string;
     sessionFile: string;
     config: DistillConfig;
   }): { target: string; cleanup: () => void } | null {
