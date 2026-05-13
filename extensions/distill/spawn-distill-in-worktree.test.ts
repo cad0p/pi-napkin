@@ -78,15 +78,14 @@ function createGitVault(opts: { seedMd?: string } = {}): string {
     path.join(dir, ".gitattributes"),
     "*.md merge=napkin-distill-merge\n",
   );
-  // Pre-scaffold the `.gitignore` rules that Phase C auto-setup writes at
+  // Pre-scaffold the `.gitignore` rule that Phase C auto-setup writes at
   // session_start. Needed for the wrapper's `git add -A` step: without
-  // these excludes, the distill's session fork (`.napkin/distill/*`) and
-  // any sibling worktree scaffolding (`.napkin/distill-worktrees/*`) would
+  // this exclude, the distill's session fork (`.napkin/distill/*`) would
   // get staged into the distill commit.
-  fs.writeFileSync(
-    path.join(dir, ".gitignore"),
-    ".napkin/distill/\n.napkin/distill-worktrees/\n",
-  );
+  //
+  // Distill worktrees themselves live under \u007e/.cache/napkin-distill/,
+  // outside the vault, so `.gitignore` no longer needs to exclude them.
+  fs.writeFileSync(path.join(dir, ".gitignore"), ".napkin/distill/\n");
   // Napkin's configPath expects `.napkin/` to exist for the content vault
   // layout; create it upfront.
   fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
@@ -1120,10 +1119,7 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
       path.join(dir, ".gitattributes"),
       "*.md merge=napkin-distill-merge\n",
     );
-    fs.writeFileSync(
-      path.join(dir, ".gitignore"),
-      ".napkin/distill/\n.napkin/distill-worktrees/\n",
-    );
+    fs.writeFileSync(path.join(dir, ".gitignore"), ".napkin/distill/\n");
     fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
     fs.writeFileSync(path.join(dir, ".napkin", "config.json"), "{}");
     run(["add", "-A"]);

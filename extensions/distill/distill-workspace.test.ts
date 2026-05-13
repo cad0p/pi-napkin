@@ -627,7 +627,7 @@ describe("parseWorktreeList", () => {
       "HEAD abc123",
       "branch refs/heads/main",
       "",
-      "worktree /tmp/vault/.napkin/distill-worktrees/aa-1",
+      "worktree /home/user/.cache/napkin-distill/abc1234567890def/aa-1",
       "HEAD def456",
       "branch refs/heads/distill/aa-1",
       "",
@@ -636,7 +636,7 @@ describe("parseWorktreeList", () => {
     expect(parsed).toEqual([
       { path: "/tmp/vault", branch: "main" },
       {
-        path: "/tmp/vault/.napkin/distill-worktrees/aa-1",
+        path: "/home/user/.cache/napkin-distill/abc1234567890def/aa-1",
         branch: "distill/aa-1",
       },
     ]);

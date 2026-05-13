@@ -106,10 +106,7 @@ function createGitVault(): string {
     path.join(dir, ".gitattributes"),
     "*.md merge=napkin-distill-merge\n",
   );
-  fs.writeFileSync(
-    path.join(dir, ".gitignore"),
-    ".napkin/distill/\n.napkin/distill-worktrees/\n",
-  );
+  fs.writeFileSync(path.join(dir, ".gitignore"), ".napkin/distill/\n");
   fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
   fs.writeFileSync(
     path.join(dir, ".napkin", "config.json"),
@@ -141,12 +138,16 @@ function createLiveDistillWorkspace(
   const startSha = headRes.stdout.trim();
 
   const branchName = `distill/testfx-${Math.floor(Date.now() / 1000)}`;
-  const worktreePath = path.join(
-    vault,
-    ".napkin",
-    "distill-worktrees",
-    branchName.slice("distill/".length),
+  // Worktree lives OUTSIDE the vault now — match production behaviour so
+  // the test exercises the real code paths (findVault from cwd=worktree,
+  // git worktree list enumeration, etc.). Use a tmpdir sibling of the
+  // vault so cleanup via `rm -rf vault` doesn't also nuke the worktree.
+  const worktreePath = fs.mkdtempSync(
+    path.join(os.tmpdir(), "overlap-test-wt-"),
   );
+  // git worktree add requires a non-existent target; `mkdtempSync` creates
+  // the dir, so remove it and let git recreate it on `worktree add`.
+  fs.rmSync(worktreePath, { recursive: true, force: true });
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
 
   const env = {

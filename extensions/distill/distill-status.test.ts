@@ -25,7 +25,8 @@ function makeActive(overrides: Partial<ActiveDistill>): ActiveDistill {
   return {
     pid: 1234,
     branch: "distill/abc123-1715198400",
-    worktreePath: "/tmp/.napkin/distill-worktrees/abc123-1715198400",
+    worktreePath:
+      "/home/user/.cache/napkin-distill/abc1234567890def/abc123-1715198400",
     startedAt: new Date(1715198400 * 1000).toISOString(),
     elapsedMs: 84_000,
     sessionPath: "/tmp/sessions/parent-session.jsonl",

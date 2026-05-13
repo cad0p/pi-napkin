@@ -383,7 +383,10 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
   if (initialized) {
     // Fresh init: commit the entire vault so auto-distill has a HEAD to
     // branch from. `git add .` respects the just-written .gitignore so we
-    // don't accidentally stage distill-worktrees/ etc.
+    // don't accidentally stage `.napkin/distill/` (the per-worktree
+    // session fork) or common secret files (see GITIGNORE_LINES). Distill
+    // worktrees themselves live OUTSIDE the vault now (XDG cache), so
+    // there's no in-vault worktrees/ path to exclude.
     const add = runGit(vaultPath, ["add", "."]);
     if (add.status !== 0) {
       return {
