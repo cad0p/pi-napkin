@@ -36,6 +36,18 @@ export interface DistillConfig {
   enabled: boolean;
   intervalMinutes: number;
   /**
+   * Hard cap on how long to poll for a distill subprocess to complete
+   * before declaring it timed out and abandoning the worktree / tmp
+   * target. Defaults to 10 minutes.
+   *
+   * Primarily a testing knob (tests set this to a few ms to exercise the
+   * timeout branch without real-time delay), but also a legitimate vault
+   * config for users running distill against a slow provider. Values
+   * <= 0 or non-finite fall back to the 10-minute default so a bad
+   * config can't disable the timeout entirely.
+   */
+  maxDurationMinutes?: number;
+  /**
    * Whether to run a final distill at session shutdown. Defaults to `true`.
    *
    * The shutdown handler consults this via `shouldDistillOnShutdown` — if
@@ -55,19 +67,21 @@ export interface VaultConfig {
  * Hard cap on how long we'll poll for a distill subprocess to complete
  * before declaring it timed out and abandoning the worktree / tmp target.
  *
- * 10 minutes is the production default. Tests can override this via
- * `NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE` so the timeout branch is
- * exercisable without waiting 10 real minutes. The override is read each
- * time the value is needed, so a test can set it before registering the
- * extension and clear it in `afterEach`.
+ * 10 minutes is the production default. Configurable per-vault via
+ * `distill.maxDurationMinutes` in `.napkin/config.json` — tests set this
+ * to a few milliseconds so the timeout branch is exercisable without
+ * waiting 10 real minutes, and users running distill against a slow
+ * provider can legitimately raise it. Values <= 0, NaN, or unset fall
+ * back to the default.
  */
-export function getMaxDistillDurationMs(): number {
-  const override = process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE;
-  if (override) {
-    const n = Number.parseInt(override, 10);
-    if (Number.isFinite(n) && n > 0) return n;
+const DEFAULT_MAX_DISTILL_DURATION_MS = 10 * 60 * 1000;
+
+export function getMaxDistillDurationMs(config?: DistillConfig): number {
+  const minutes = config?.maxDurationMinutes;
+  if (typeof minutes === "number" && Number.isFinite(minutes) && minutes > 0) {
+    return minutes * 60 * 1000;
   }
-  return 10 * 60 * 1000; // 10 minutes
+  return DEFAULT_MAX_DISTILL_DURATION_MS;
 }
 
 /**
@@ -128,6 +142,7 @@ function persistSuppressed(sm: unknown, suppressed: boolean): void {
 export const DEFAULT_DISTILL: DistillConfig = {
   enabled: false,
   intervalMinutes: 60,
+  maxDurationMinutes: 10,
   onShutdown: true,
 };
 
@@ -803,7 +818,7 @@ export default function (pi: ExtensionAPI) {
 
     pollHandle = setInterval(() => {
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
-      const timedOut = Date.now() - startTime > getMaxDistillDurationMs();
+      const timedOut = Date.now() - startTime > getMaxDistillDurationMs(config);
 
       if (fs.existsSync(target) && !timedOut) {
         if (ctx.hasUI && theme && showStatus) {
@@ -835,7 +850,7 @@ export default function (pi: ExtensionAPI) {
             );
           }
           ctx.ui.notify(
-            `Distillation timed out (${Math.round(getMaxDistillDurationMs() / 60000)}m)`,
+            `Distillation timed out (${Math.round(getMaxDistillDurationMs(config) / 60000)}m)`,
             "error",
           );
         }

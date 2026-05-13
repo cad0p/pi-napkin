@@ -194,15 +194,10 @@ Or edit `<vault>/.napkin/config.json` directly:
 |---|---|---|
 | `distill.enabled` | `false` | Master switch. When false, nothing auto-distill related happens. |
 | `distill.intervalMinutes` | `60` | Timer interval. |
+| `distill.maxDurationMinutes` | `10` | Maximum wall-clock duration a detached distill subprocess is allowed before the parent's poll loop declares it stuck and force-cleans its worktree. Values `<= 0` or non-finite silently fall back to the 10-minute default so a bad config can't disable the timeout entirely. Lower this for short-session vaults where a 10-minute hang is unacceptable; raise it for vaults with large merge windows or slow providers. |
 | `distill.onShutdown` | `true` | Also run a final distill at pi shutdown, to capture anything the interval missed. |
 | `distill.model.provider` | `"anthropic"` | Model provider for the distill subprocess. |
 | `distill.model.id` | `"claude-sonnet-4-6"` | Model ID. Prefer a cheap, fast model — distill is automated, not interactive. |
-
-### Environment variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE` | `600000` (10 min) | Override the maximum wall-clock duration a detached distill subprocess is allowed before the parent's poll loop declares it stuck and force-cleans its worktree. Value is milliseconds as a positive integer; invalid values (`0`, negative, non-numeric, NaN) are silently ignored and the 10-minute default is used. Lower this for short-session vaults where a 10-minute hang is unacceptable; raise it for vaults with large merge windows. |
 
 ### How it works
 

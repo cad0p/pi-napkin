@@ -11,12 +11,13 @@
  * a real 10-minute hang, which is exactly the kind of tail event we care
  * about.
  *
- * Approach. We use the same `NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE`
- * env var that production reads (via `getMaxDistillDurationMs()`) to
- * shrink the timeout to ~100 ms, capture the pollHandle callback via
- * a `setInterval` stub, then fire it twice: once to observe a still-
- * in-flight state, then once past the shrunk timeout boundary to trip
- * the timeout branch.
+ * Approach. We wire `distill.maxDurationMinutes` in the vault's
+ * `.napkin/config.json` (production reads this via
+ * `getMaxDistillDurationMs(config)`) to shrink the timeout to a few
+ * milliseconds, capture the pollHandle callback via a `setInterval`
+ * stub, then fire it twice: once to observe a still-in-flight state,
+ * then once past the shrunk timeout boundary to trip the timeout
+ * branch.
  *
  * Because the detached wrapper is real, the worktree directory exists
  * on disk between spawn and wrapper-cleanup. We bypass that by letting
@@ -87,7 +88,10 @@ function makeMockAPI(): { api: unknown; captured: CapturedAPI } {
 }
 
 /** Mirror `createVault` from shutdown-handler.test.ts (distill config, git). */
-function createVault(intervalMinutes: number): string {
+function createVault(
+  intervalMinutes: number,
+  maxDurationMinutes?: number,
+): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "g8-vault-"));
   const env = {
     ...process.env,
@@ -108,13 +112,22 @@ function createVault(intervalMinutes: number): string {
     "*.md merge=napkin-distill-merge\n",
   );
   fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  // biome-ignore lint/suspicious/noExplicitAny: dynamic config
+  const distill: Record<string, any> = {
+    enabled: true,
+    onShutdown: true,
+    intervalMinutes,
+  };
+  if (maxDurationMinutes !== undefined) {
+    distill.maxDurationMinutes = maxDurationMinutes;
+  }
   fs.writeFileSync(
     path.join(dir, ".napkin", "config.json"),
     JSON.stringify({
       // Sibling-layout declaration so napkin resolves contentPath=<dir>
       // (where `.git` and notes live).
       vault: { root: ".." },
-      distill: { enabled: true, onShutdown: true, intervalMinutes },
+      distill,
     }),
   );
   git(["add", "-A"]);
@@ -146,7 +159,6 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
   let xdgCacheDir: string;
 
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
-  const _savedOverride = process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE;
   const _savedXdgCache = process.env.XDG_CACHE_HOME;
   const _savedGitEnv = {
     authorName: process.env.GIT_AUTHOR_NAME,
@@ -164,9 +176,6 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
 
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
-    // Shrink the production 10-minute cap to 100 ms so we can tick past
-    // it in the test without real-time delay.
-    process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE = "100";
     xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "poll-xdg-"));
     process.env.XDG_CACHE_HOME = xdgCacheDir;
     process.env.GIT_AUTHOR_NAME = "Napkin CI";
@@ -193,9 +202,6 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
     if (_savedRecurse !== undefined)
       process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
-    if (_savedOverride !== undefined)
-      process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE = _savedOverride;
-    else delete process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE;
     for (const [key, val] of [
       ["GIT_AUTHOR_NAME", _savedGitEnv.authorName],
       ["GIT_AUTHOR_EMAIL", _savedGitEnv.authorEmail],
@@ -216,7 +222,13 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
   });
 
   test("timeout branch: removes worktree, resets isRunning, allows next distill", async () => {
-    vault = createVault(/* intervalMinutes */ 1);
+    // Shrink the production 10-minute cap to ~100 ms (1/600 of a minute)
+    // via the vault config so we can tick past it without real-time
+    // delay. Production reads this via `getMaxDistillDurationMs(config)`.
+    vault = createVault(
+      /* intervalMinutes */ 1,
+      /* maxDurationMinutes */ 100 / 60_000,
+    );
     const sm = SessionManager.create(vault, vault);
     sm.appendMessage({ role: "user", content: "hello" });
     sm.appendMessage({ role: "assistant", content: "hi" });
@@ -274,26 +286,61 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
     expect(countWorktrees(vault)).toBe(1);
   });
 
-  test("no override set → production default is 10 minutes", async () => {
-    // Sanity check: the override env var is the ONLY way to shrink the
-    // cap. With it unset, getMaxDistillDurationMs returns the prod value.
-    delete process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE;
-    const { getMaxDistillDurationMs } = await import("./index");
+  test("no config → production default is 10 minutes", async () => {
+    // Sanity check: `config.maxDurationMinutes` is the only knob. With
+    // it unset (or absent from DistillConfig), the function returns the
+    // production value.
+    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import("./index");
     expect(getMaxDistillDurationMs()).toBe(10 * 60 * 1000);
+    expect(getMaxDistillDurationMs(DEFAULT_DISTILL)).toBe(10 * 60 * 1000);
   });
 
-  test("malformed override (non-numeric) → falls back to default", async () => {
-    process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE = "not-a-number";
-    const { getMaxDistillDurationMs } = await import("./index");
-    expect(getMaxDistillDurationMs()).toBe(10 * 60 * 1000);
+  test("non-numeric / undefined maxDurationMinutes → falls back to default", async () => {
+    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import("./index");
+    expect(
+      getMaxDistillDurationMs({
+        ...DEFAULT_DISTILL,
+        maxDurationMinutes: Number.NaN,
+      }),
+    ).toBe(10 * 60 * 1000);
+    expect(
+      getMaxDistillDurationMs({
+        ...DEFAULT_DISTILL,
+        maxDurationMinutes: Number.POSITIVE_INFINITY,
+      }),
+    ).toBe(10 * 60 * 1000);
+    expect(
+      getMaxDistillDurationMs({
+        ...DEFAULT_DISTILL,
+        maxDurationMinutes: undefined,
+      }),
+    ).toBe(10 * 60 * 1000);
   });
 
-  test("zero / negative override → falls back to default (prevents instant timeout)", async () => {
-    process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE = "0";
-    const { getMaxDistillDurationMs } = await import("./index");
-    expect(getMaxDistillDurationMs()).toBe(10 * 60 * 1000);
+  test("zero / negative maxDurationMinutes → falls back to default (prevents instant timeout)", async () => {
+    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import("./index");
+    expect(
+      getMaxDistillDurationMs({ ...DEFAULT_DISTILL, maxDurationMinutes: 0 }),
+    ).toBe(10 * 60 * 1000);
+    expect(
+      getMaxDistillDurationMs({
+        ...DEFAULT_DISTILL,
+        maxDurationMinutes: -100,
+      }),
+    ).toBe(10 * 60 * 1000);
+  });
 
-    process.env.NAPKIN_DISTILL_MAX_DURATION_MS_OVERRIDE = "-100";
-    expect(getMaxDistillDurationMs()).toBe(10 * 60 * 1000);
+  test("positive finite maxDurationMinutes → returns ms equivalent", async () => {
+    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import("./index");
+    expect(
+      getMaxDistillDurationMs({ ...DEFAULT_DISTILL, maxDurationMinutes: 5 }),
+    ).toBe(5 * 60 * 1000);
+    // Sub-minute value (tests use tiny fractions to exercise timeout).
+    expect(
+      getMaxDistillDurationMs({
+        ...DEFAULT_DISTILL,
+        maxDurationMinutes: 100 / 60_000,
+      }),
+    ).toBeCloseTo(100, 0);
   });
 });
