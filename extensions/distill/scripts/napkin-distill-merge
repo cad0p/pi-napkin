@@ -56,6 +56,19 @@
 
 set -uo pipefail
 
+# LLM output sanity bounds. An attempt is rejected when the resolved
+# output length falls outside
+#   [LLM_OUTPUT_MIN_RATIO, LLM_OUTPUT_MAX_RATIO] × max_input_len.
+# Picked empirically:
+#   - 0.30 lower bound catches truncation (pi hit a context window, got
+#     killed mid-stream, or silently dropped half the file).
+#   - 3.00 upper bound catches hallucination bloat (the LLM “resolved” the
+#     conflict by writing an essay, appending conflict markers as
+#     content, or pasting its own reasoning transcript).
+# Both bounds are skipped when max_input_len==0 (empty base/ours/theirs).
+LLM_OUTPUT_MIN_RATIO=0.3
+LLM_OUTPUT_MAX_RATIO=3.0
+
 BASE="${1:-}"
 OURS="${2:-}"
 THEIRS="${3:-}"
@@ -252,8 +265,8 @@ while [ "$attempt" -le "$max_attempts" ]; do
     # Sanity: length within [0.3, 3.0] * max_input_len. Empty base/ours/theirs
     # yields max_input_len=0; in that edge case any non-empty output passes.
     if [ "$max_input_len" -gt 0 ]; then
-      lower=$(awk -v m="$max_input_len" 'BEGIN{printf "%d", m*0.3}')
-      upper=$(awk -v m="$max_input_len" 'BEGIN{printf "%d", m*3.0}')
+      lower=$(awk -v m="$max_input_len" -v r="$LLM_OUTPUT_MIN_RATIO" 'BEGIN{printf "%d", m*r}')
+      upper=$(awk -v m="$max_input_len" -v r="$LLM_OUTPUT_MAX_RATIO" 'BEGIN{printf "%d", m*r}')
       if [ "$out_len" -lt "$lower" ] || [ "$out_len" -gt "$upper" ]; then
         attempt=$((attempt + 1))
         continue
