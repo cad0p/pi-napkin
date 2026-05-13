@@ -583,8 +583,9 @@ function isPidAlive(pid: number): boolean {
  * Number of minutes past which a worktree with a stale mtime on its
  * meta.json is considered abandoned — even if its pid is still alive.
  *
- * Covers `MAX_DISTILL_DURATION_MS` (10 minutes, defined in the extension
- * factory) with a 6× margin, so a worktree older than this either crashed
+ * Covers the `distill.maxDurationMinutes` config (10 minutes by
+ * default; read in the extension factory via `getMaxDistillDurationMs`)
+ * with a 6× margin, so a worktree older than this either crashed
  * silently, lost its pid (e.g. kernel reboot), or somehow outlived its
  * shutdown timeout. The window is deliberately generous: a false-positive
  * here would clobber a slow-but-live distill, whereas waiting an extra

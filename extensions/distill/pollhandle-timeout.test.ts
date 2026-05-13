@@ -290,13 +290,17 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
     // Sanity check: `config.maxDurationMinutes` is the only knob. With
     // it unset (or absent from DistillConfig), the function returns the
     // production value.
-    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import("./index");
+    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import(
+      "./index"
+    );
     expect(getMaxDistillDurationMs()).toBe(10 * 60 * 1000);
     expect(getMaxDistillDurationMs(DEFAULT_DISTILL)).toBe(10 * 60 * 1000);
   });
 
   test("non-numeric / undefined maxDurationMinutes → falls back to default", async () => {
-    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import("./index");
+    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import(
+      "./index"
+    );
     expect(
       getMaxDistillDurationMs({
         ...DEFAULT_DISTILL,
@@ -318,7 +322,9 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
   });
 
   test("zero / negative maxDurationMinutes → falls back to default (prevents instant timeout)", async () => {
-    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import("./index");
+    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import(
+      "./index"
+    );
     expect(
       getMaxDistillDurationMs({ ...DEFAULT_DISTILL, maxDurationMinutes: 0 }),
     ).toBe(10 * 60 * 1000);
@@ -331,7 +337,9 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
   });
 
   test("positive finite maxDurationMinutes → returns ms equivalent", async () => {
-    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import("./index");
+    const { getMaxDistillDurationMs, DEFAULT_DISTILL } = await import(
+      "./index"
+    );
     expect(
       getMaxDistillDurationMs({ ...DEFAULT_DISTILL, maxDurationMinutes: 5 }),
     ).toBe(5 * 60 * 1000);
