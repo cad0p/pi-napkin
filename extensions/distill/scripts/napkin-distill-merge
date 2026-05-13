@@ -28,9 +28,10 @@
 #     - output length is outside [0.3, 3.0] times the largest input file
 #       length (sanity check \u2014 the LLM threw away half the content or
 #       hallucinated an essay)
-#     - if ALL three inputs start with YAML frontmatter (^---\n) but the
-#       output does not, that's a frontmatter corruption and counts as a
-#       failure (purely syntactic check; we don't parse the YAML)
+#     - if ALL three inputs start with YAML frontmatter (`---\n` or
+#       `---\r\n`, CRLF-tolerant) but the output does not, that's a
+#       frontmatter corruption and counts as a failure (purely syntactic
+#       check; we don't parse the YAML)
 #
 # Testing hook:
 #   NAPKIN_DISTILL_MERGE_MOCK \u2014 when set, use this instead of invoking pi.
@@ -158,12 +159,15 @@ Produce the resolved merged content. Preserve information from both sides; dedup
 EOF
 )
 
-# All three inputs start with a YAML frontmatter block ("---\n..."). The
-# output must also start with one, otherwise treat the merge as corrupted.
+# All three inputs start with a YAML frontmatter block (`---\n...` or
+# `---\r\n...`, tolerating CRLF line endings that Obsidian on Windows
+# sometimes writes). The output must also start with one, otherwise treat
+# the merge as corrupted.
 all_inputs_have_fm=1
 for content in "$base_content" "$ours_content" "$theirs_content"; do
   case "$content" in
     "---"$'\n'*) ;;
+    "---"$'\r\n'*) ;;
     *) all_inputs_have_fm=0 ;;
   esac
 done
@@ -276,6 +280,7 @@ while [ "$attempt" -le "$max_attempts" ]; do
     if [ "$all_inputs_have_fm" -eq 1 ]; then
       case "$output" in
         "---"$'\n'*) ;;
+        "---"$'\r\n'*) ;;
         *)
           attempt=$((attempt + 1))
           continue

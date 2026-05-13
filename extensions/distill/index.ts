@@ -947,6 +947,15 @@ export default function (pi: ExtensionAPI) {
    * runs `pi -p` detached; cleanup is a plain `rmSync`. No git, no
    * concurrency coordination. Only used by manual `/distill` as a
    * fallback for vaults without `.git/`.
+   *
+   * Vault resolution note: the spawned `pi -p` instance runs with
+   * `cwd = vaultContentPath`, which is already resolved by napkin
+   * (cwd-independent via `new Napkin(ctx.cwd).vault`). The distill
+   * subprocess itself calls `napkin` commands that walk up from their
+   * cwd, so targeting `vaultContentPath` ensures they hit the user's
+   * real vault regardless of where pi was originally launched. This
+   * matches the pre-worktree behavior where the session operated
+   * directly on the vault root — no isolation, napkin-from-cwd only.
    */
   function legacySpawnFn(args: {
     ctx: RunCtx;

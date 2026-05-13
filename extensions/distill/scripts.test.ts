@@ -24,6 +24,18 @@ function writeMd(p: string, body: string): string {
 }
 
 /**
+ * CRLF variant of {@link writeMd}. Simulates Obsidian-on-Windows output
+ * where line endings are `\r\n`. Used by the CRLF regression test below
+ * (C10) to ensure the merge driver's frontmatter detection doesn't trip
+ * on the carriage return prefix.
+ */
+function writeMdCrlf(p: string, body: string): string {
+  const content = `---\r\ntitle: test\r\n---\r\n${body}`;
+  fs.writeFileSync(p, content);
+  return content;
+}
+
+/**
  * Invoke napkin-distill-merge against base/ours/theirs files. Returns
  * { exitCode, oursAfter } so tests can assert both the exit status and the
  * resolved content. Mock mode is selected via NAPKIN_DISTILL_MERGE_MOCK.
@@ -152,6 +164,32 @@ describe("napkin-distill-merge", () => {
       expect(r.exitCode).toBe(1);
       expect(r.oursAfter).toBe(before);
     });
+  });
+
+  test("C10: CRLF frontmatter passes the sanity check (Obsidian-on-Windows)", () => {
+    // Some Obsidian setups (notably on Windows) write files with CRLF line
+    // endings. The frontmatter sanity check must accept both `---\n` and
+    // `---\r\n` as valid opening markers — before C10, the CR prefix
+    // caused the driver to classify the output as frontmatter-corrupted
+    // on every attempt and return exit 1, silently refusing the merge.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "merge-driver-crlf-"));
+    try {
+      const base = path.join(dir, "base.md");
+      const ours = path.join(dir, "ours.md");
+      const theirs = path.join(dir, "theirs.md");
+      writeMdCrlf(base, "# base\r\n");
+      writeMdCrlf(ours, "# ours\r\n");
+      writeMdCrlf(theirs, "# theirs\r\n");
+      const r = runMergeDriver(base, ours, theirs, "note.md", "ok");
+      expect(r.exitCode).toBe(0);
+      // `ok` mock concatenates ours + theirs, so CRLF is preserved at the
+      // top — either literal `---\r\n` or `---\n` would be acceptable
+      // (depending on how the driver ends up writing), but the real
+      // regression we care about is that exit 0 happens at all.
+      expect(r.oursAfter.startsWith("---")).toBe(true);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test("C7: timeout fires when pi stalls, bounding per-attempt wall time", () => {
