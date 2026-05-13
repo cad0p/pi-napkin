@@ -166,6 +166,51 @@ describe("resolveCacheRoot (XDG cache placement)", () => {
     const root = resolveCacheRoot("/home/user/vault");
     expect(path.dirname(root)).toBe(path.join("/tmp/xdg", "napkin-distill"));
   });
+
+  test("symlinked vault path hashes the same as its realpath (R4-L-1)", () => {
+    // Symlinked content paths (e.g. `~/workplace` → `/workplace/pcad` on
+    // Amazon cloud desktops) must resolve to the same cache dir as the
+    // underlying realpath so a single vault doesn't end up with two
+    // parallel worktree trees depending on which path the caller happened
+    // to pass.
+    process.env.XDG_CACHE_HOME = "/tmp/xdg";
+    const realDir = fs.mkdtempSync(path.join(os.tmpdir(), "realpath-target-"));
+    const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), "realpath-link-"));
+    try {
+      const target = path.join(realDir, "vault");
+      fs.mkdirSync(target);
+      const symlink = path.join(linkDir, "vault-link");
+      fs.symlinkSync(target, symlink);
+
+      const viaReal = resolveCacheRoot(target);
+      const viaLink = resolveCacheRoot(symlink);
+      expect(viaLink).toBe(viaReal);
+    } finally {
+      fs.rmSync(realDir, { recursive: true, force: true });
+      fs.rmSync(linkDir, { recursive: true, force: true });
+    }
+  });
+
+  test("broken symlink falls back to the raw path (R4-L-1)", () => {
+    // Readable guarantee: realpath failure must NOT throw out of
+    // `resolveCacheRoot` — it's called from status / spawn paths that
+    // have to stay reliable even on weird filesystems.
+    process.env.XDG_CACHE_HOME = "/tmp/xdg";
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "broken-link-"));
+    try {
+      const symlink = path.join(dir, "dangling");
+      fs.symlinkSync(path.join(dir, "does-not-exist"), symlink);
+
+      // Should not throw; should produce the same hash as passing the raw
+      // symlink path (fallback branch).
+      const root = resolveCacheRoot(symlink);
+      expect(root.startsWith(path.join("/tmp/xdg", "napkin-distill"))).toBe(
+        true,
+      );
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe("createDistillWorktree", () => {

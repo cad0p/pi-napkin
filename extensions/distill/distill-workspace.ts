@@ -151,12 +151,29 @@ export const DISTILL_SUBDIR = path.join(".napkin", "distill");
  * @param vaultContentPath Absolute path to the vault's content root
  *   (`napkin.vault.contentPath`, NOT configPath — they're distinct in
  *   subdir layout and we want one hash per vault, not per config dir).
+ *
+ * The path is canonicalised through `fs.realpathSync` before hashing so
+ * equivalent paths that differ only in symlink presence (e.g.
+ * `~/workplace` → `/workplace/pcad`) resolve to the same cache dir. A
+ * stale symlink (ENOENT) falls back to the raw path so the caller sees
+ * a deterministic hash rather than an unrelated throw.
  */
 export function resolveCacheRoot(vaultContentPath: string): string {
   const cacheHome =
     process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
+  let canonical: string;
+  try {
+    canonical = fs.realpathSync(vaultContentPath);
+  } catch {
+    // Broken symlink, missing dir, or permission error — fall back to the
+    // raw path. Produces a stable hash for the same input even if the
+    // realpath machinery is unavailable; worst case is that two different
+    // views of the same vault hash to different cache dirs, which is the
+    // pre-R4-L-1 behaviour.
+    canonical = vaultContentPath;
+  }
   const vaultHash = createHash("sha256")
-    .update(vaultContentPath)
+    .update(canonical)
     .digest("hex")
     .slice(0, 16);
   return path.join(cacheHome, "napkin-distill", vaultHash);
