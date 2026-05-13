@@ -7,7 +7,9 @@
 #
 # Arguments:
 #   <vault>         absolute path to the main vault (NOT the worktree)
-#   <worktree>      absolute path to the distill worktree (`.napkin/distill-worktrees/<suffix>`)
+#   <worktree>      absolute path to the distill worktree (lives under
+#                   `$XDG_CACHE_HOME/napkin-distill/<vault-hash>/<suffix>/`;
+#                   see `resolveCacheRoot` in extensions/distill/distill-workspace.ts)
 #   <branch>        distill branch name (`distill/<hex>-<epoch>`)
 #   <sessionFork>   absolute path to the forked session .jsonl inside the worktree
 #   <prompt>        prompt passed to `pi -p`
@@ -207,9 +209,10 @@ fi
 # --- Step 2: commit distill's changes on the distill branch. ---------------
 #
 # The vault's `.gitignore` (installed by extensions/distill/auto-setup.ts)
-# already excludes `.napkin/distill/` and `.napkin/distill-worktrees/`, so
-# a plain `git add -A` will not sweep in our session fork, meta.json, or
-# sibling worktrees. No pathspec excludes needed.
+# already excludes `.napkin/distill/`, so a plain `git add -A` will not
+# sweep in our per-worktree session fork or meta.json. Worktrees
+# themselves live OUTSIDE the vault (under `$XDG_CACHE_HOME/napkin-distill/`),
+# so there are no sibling worktree paths to exclude.
 
 git -C "$WORKTREE" add -A
 # `git commit` exits non-zero if nothing is staged, which is legitimate: pi
