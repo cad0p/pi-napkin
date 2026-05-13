@@ -63,6 +63,82 @@ The [`napkin` skill](skills/napkin/SKILL.md) gives the agent a full CLI referenc
 
 - `napkin_distill_status` — JSON version of `/distill-status`, for the agent to query programmatically before making concurrent vault edits.
 
+## Auto-distill requires subdir vault layout
+
+Auto-distill (interval + shutdown) uses git worktrees for concurrency safety.
+That requires the vault to use napkin's **subdir layout** — the config in a
+`.napkin/` subdir distinct from the content root:
+
+```
+my-vault/
+  .napkin/
+    config.json    ← napkin config here, with `"vault": { "root": ".." }`
+  NAPKIN.md
+  changelog/
+  daily/
+  …
+```
+
+`napkin init` creates this layout by default, so freshly created vaults work out
+of the box. If your vault uses the **legacy embedded layout** (config at
+`<vault>/config.json` with no `.napkin/` subdir, where `configPath ===
+contentPath`), you'll see a migration notification at session start and
+auto-distill will be disabled for the session. Legacy layout continues to
+work for manual `/distill` (which doesn't need concurrency safety) and for
+napkin CLI commands generally — only auto-distill requires the subdir
+layout.
+
+### Why
+
+Worktree-based concurrency relies on napkin's `findVault(cwd)` resolving
+`cwd=worktree` back to the worktree itself. On a subdir-layout vault, the
+branch tracks `.napkin/config.json`, so the worktree has a `.napkin/`
+subdir that findVault picks up. On a legacy-embedded vault, the branch
+has no `.napkin/` subdir, findVault walks past the worktree, and
+resolves to the user's REAL vault via the global-config fallback —
+distill writes bypass the worktree entirely and the concurrency
+guarantee silently degrades to nothing.
+
+### Where worktrees live
+
+Active distill worktrees are placed under
+`$XDG_CACHE_HOME/napkin-distill/<vault-hash>/<id>/` (typically
+`~/.cache/napkin-distill/…`), outside your vault. `<vault-hash>` is
+`sha256(contentPath).slice(0, 16)` so worktrees from multiple vaults never
+collide. External placement avoids:
+
+- **Cloud-sync pollution** — OneDrive/Dropbox don't respect `.gitignore`;
+  in-vault worktrees would upload tens of MB per distill spawn.
+- **Filesystem-walker pollution** — Obsidian plugins and `find` descend
+  into worktrees and see N full vault copies for N concurrent distills.
+- **Autocommit-cron noise** — gitlinks can surface in `git status` under
+  some command sequences; external placement eliminates the surface.
+
+Inspect active distills with `/distill-status`. If you ever need to nuke
+all distill state for a vault (stuck lock, etc.):
+
+```bash
+rm -rf ~/.cache/napkin-distill/<hash>/
+```
+
+Safe — anything valuable is either already committed to main or was
+never going to commit.
+
+### Migration from legacy layout
+
+```bash
+# From your vault directory (e.g. ~/.napkin or wherever configPath == contentPath)
+mkdir .napkin
+mv config.json .napkin/config.json
+# Edit .napkin/config.json and add at the top level:
+#   "vault": { "root": ".." }
+# After editing, reload pi (or /quit and restart).
+```
+
+Verify with `napkin vault --json` — the `path` field should point at
+`<vault>/.napkin/` (that's the new configPath) and napkin should still
+find all your notes.
+
 ## Vault resolution
 
 Both extensions use napkin's built-in vault resolution. The resolution order is:
@@ -152,11 +228,11 @@ The distill subprocess runs a prompt that asks the model to:
 When you enable `distill.enabled: true` on a vault that isn't a git repo, pi-napkin auto-initializes it on the next session start:
 
 1. Runs `git init`.
-2. Scaffolds `.gitignore` (excludes `.napkin/distill/`, `.napkin/distill-worktrees/`) and `.gitattributes` (routes `*.md` through the LLM merge driver).
+2. Scaffolds `.gitignore` (excludes `.napkin/distill/` — the per-worktree session fork) and `.gitattributes` (routes `*.md` through the LLM merge driver). Distill worktrees themselves live outside the vault (see [Where worktrees live](#where-worktrees-live)), so `.gitignore` doesn't need to exclude them.
 3. Commits everything as `napkin: initial vault commit (auto-distill setup)`.
 4. Notifies you once, with instructions to undo (`rm -rf <vault>/.git`) or opt out (`distill.enabled: false`).
 
-Auto-distill requires git. Manual `/distill` does not — it just spawns a detached `pi -p` with the session forked to a temp dir, no worktree.
+Auto-distill requires git **and** the subdir vault layout (see [Auto-distill requires subdir vault layout](#auto-distill-requires-subdir-vault-layout)). Manual `/distill` requires neither — it just spawns a detached `pi -p` with the session forked to a temp dir, no worktree.
 
 ### Running an auto-distill loop
 
@@ -176,7 +252,7 @@ Running multiple pi sessions against the same vault (for example, autonomous age
 
 ### Worktree per distill
 
-Each auto-distill invocation (interval fire or shutdown) creates its own temporary branch and worktree under `<vault>/.napkin/distill-worktrees/<branch-suffix>/`. The distill subprocess runs with `cwd` pointing at the worktree, so napkin's vault resolution picks up the isolated copy.
+Each auto-distill invocation (interval fire or shutdown) creates its own temporary branch and worktree under `$XDG_CACHE_HOME/napkin-distill/<vault-hash>/<branch-suffix>/` (typically `~/.cache/napkin-distill/…`). The distill subprocess runs with `cwd` pointing at the worktree, so napkin's vault resolution picks up the isolated copy. See [Where worktrees live](#where-worktrees-live) for why placement is external.
 
 ### LLM merge driver
 
@@ -245,7 +321,15 @@ Some command or tool couldn't resolve a vault from the current directory. Either
 
 ### Auto-distill stopped working
 
-Check `/distill-status` to see if there are stale / dead worktrees. The next session start will sweep them automatically (`cleanupStaleWorktrees`), but you can also manually delete `<vault>/.napkin/distill-worktrees/*` if needed.
+Check `/distill-status` to see if there are stale / dead worktrees. The next session start will sweep them automatically (`cleanupStaleWorktrees`). If that doesn't help, nuke the per-vault cache dir:
+
+```bash
+rm -rf ~/.cache/napkin-distill/<vault-hash>/
+# Or, if you're not sure which hash matches your vault, the nuclear option:
+rm -rf ~/.cache/napkin-distill/
+```
+
+Safe — anything valuable is either already committed to main or was never going to commit.
 
 ### Merge driver fails repeatedly
 
@@ -257,14 +341,14 @@ Each log has the conflicted files, the last LLM response, and an optional one-li
 - LLM returned empty / tiny / huge output → driver sanity-check rejects it. Usually a transient provider issue.
 - Conflicted content is genuinely unmergeable (same line added with different content) → the partial-merge salvage falls back to main's version; the distill commit SHA is kept in reflog for ~2 weeks if you want to recover it.
 
-### "vault not a git repo"
+### "vault not a git repo" / "legacy embedded layout"
 
-Auto-distill requires git. Either:
-- Set `distill.enabled: true` and let pi-napkin auto-init git for you on next session
-- Run `git init` in the vault root manually
-- Or disable auto-distill: `distill.enabled: false`
+Auto-distill requires **git** and the **subdir vault layout**. If you see:
 
-Manual `/distill` works without git.
+- `vault not a git repo` — either set `distill.enabled: true` and let pi-napkin auto-init git for you on next session, run `git init` in the vault root manually, or disable auto-distill with `distill.enabled: false`.
+- `legacy embedded layout` — follow the [migration steps](#migration-from-legacy-layout). Auto-distill stays off for this session; manual `/distill` works regardless.
+
+Manual `/distill` works without git and works on any vault layout.
 
 ## Future: builder-deleter
 
