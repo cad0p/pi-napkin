@@ -72,13 +72,20 @@ export const GITATTRIBUTES_LINES: readonly string[] = [
  * - `scaffolded`: files whose contents were created or modified. Callers use
  *   this to decide whether to surface a first-run notify to the user.
  * - `error`: populated on fail-soft paths (git init failed, filesystem
- *   errors writing the scaffolding). If set, other fields reflect partial
- *   progress.
+ *   errors writing the scaffolding, legacy-layout refusal). If set, other
+ *   fields reflect partial progress.
  * - `conflict`: populated when auto-setup refused to scaffold because the
  *   existing `.gitattributes` already claims `*.md merge=<something-else>`.
  *   `error` is also set with a short `"conflicting merge rule…"` message so
  *   existing fail-soft callers keep working; `conflict` carries the
  *   diagnostic details (rule text, file path) for a precise notify.
+ * - `legacyLayout`: populated when auto-setup refused to scaffold because
+ *   the vault is using napkin's legacy embedded layout (`configPath ===
+ *   contentPath`). The worktree-based concurrency architecture relies on
+ *   napkin's findVault resolving cwd=worktree to the worktree itself —
+ *   which only works for subdir-layout vaults (those that track a
+ *   `.napkin/config.json`). `error` is set to `"legacy-embedded-layout"`
+ *   so callers can branch on it.
  */
 export interface SetupResult {
   initialized: boolean;
@@ -91,6 +98,10 @@ export interface SetupResult {
     file: string;
     /** Just the `<driver>` captured from `*.md merge=<driver>`. */
     driver: string;
+  };
+  legacyLayout?: {
+    /** Absolute path to the vault's `.napkin/` (= contentPath for legacy). */
+    configPath: string;
   };
   /**
    * Set to `true` when the vault had a `.git/` but no commits (HEAD
@@ -106,13 +117,26 @@ export interface SetupResult {
 }
 
 /**
+ * Sentinel value set in `SetupResult.error` when auto-setup refuses to
+ * scaffold because the vault is using napkin's legacy embedded layout.
+ * Exported so callers (session_start handler, tests) can branch on the
+ * exact sentinel instead of pattern-matching on the free-form message.
+ */
+export const LEGACY_EMBEDDED_LAYOUT_ERROR = "legacy-embedded-layout";
+
+/**
  * Minimal vault handle this module accepts. Mirrors
  * `StaleCleanupVault` in `distill-workspace.ts` — keeps the callsite
- * symmetric: both setup and cleanup take `{ contentPath }` and neither
- * forces the caller to construct a full Napkin instance.
+ * symmetric: both setup and cleanup take the same vault shape and
+ * neither forces the caller to construct a full Napkin instance.
+ *
+ * Both paths are required: legacy-embedded-layout detection needs to
+ * compare `configPath` and `contentPath` directly (legacy vaults have
+ * them equal; subdir vaults have them distinct).
  */
 export interface SetupVault {
   contentPath: string;
+  configPath: string;
 }
 
 /**
@@ -255,6 +279,11 @@ export function detectConflictingMdMergeRule(
  * `distill.enabled` is true.
  *
  * Lifecycle:
+ *   0. Refuse if the vault uses napkin's legacy embedded layout
+ *      (`configPath === contentPath`). Worktree-based concurrency doesn't
+ *      work on legacy layouts because the branch can't track a `.napkin/`
+ *      subdir that findVault could resolve to. Returns `{ error:
+ *      "legacy-embedded-layout", legacyLayout }` without touching git.
  *   1. If `.git/` is missing → `git init`. Failure here aborts with `error`.
  *   2. Detect a conflicting `*.md merge=<other>` in an existing
  *      `.gitattributes`. If present, return `{ error, conflict }` WITHOUT
@@ -273,6 +302,33 @@ export function detectConflictingMdMergeRule(
  */
 export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
   const vaultPath = vault.contentPath;
+
+  // Legacy-embedded layout is incompatible with the worktree-based
+  // concurrency architecture. In a legacy vault (`~/.napkin/`), the
+  // vault IS the `.napkin/` directory — `configPath === contentPath`.
+  // When a distill subprocess runs with `cwd = worktree` (a checkout of
+  // a `distill/*` branch that does NOT track a `.napkin/` subdir),
+  // napkin's `findVault` walks past the worktree and resolves to the
+  // user's REAL vault via the global config fallback. Writes bypass the
+  // worktree entirely, making the concurrency guarantee a no-op.
+  //
+  // Refuse to scaffold here so session_start can surface a migration
+  // notify. Manual `/distill` still works on any layout (it doesn't go
+  // through this path).
+  //
+  // Detection mirrors napkin's own `resolveVaultLayout` semantics: subdir
+  // layout sets `contentPath` via `vault.root` (distinct from `configPath`),
+  // while legacy embedded layout has no `vault.root` and defaults both to
+  // the `.napkin/` dir. See `@cad0p/napkin` `dist/utils/vault.js`.
+  if (vault.configPath === vault.contentPath) {
+    return {
+      initialized: false,
+      scaffolded: [],
+      error: LEGACY_EMBEDDED_LAYOUT_ERROR,
+      legacyLayout: { configPath: vault.configPath },
+    };
+  }
+
   const gitDir = path.join(vaultPath, ".git");
   let initialized = false;
 

@@ -10,6 +10,7 @@ import {
   ensureVaultReadyForAutoDistill,
   GITATTRIBUTES_LINES,
   GITIGNORE_LINES,
+  LEGACY_EMBEDDED_LAYOUT_ERROR,
   NAPKIN_MERGE_DRIVER,
 } from "./auto-setup";
 
@@ -63,7 +64,13 @@ describe("ensureVaultReadyForAutoDistill", () => {
     process.env.GIT_CONFIG_KEY_0 = "commit.gpgsign";
     process.env.GIT_CONFIG_VALUE_0 = "false";
     try {
-      return ensureVaultReadyForAutoDistill({ contentPath: vault });
+      // Subdir layout: configPath is a distinct path from contentPath.
+      // The legacy-embedded-layout check compares string equality only;
+      // the path doesn't need to exist on disk for the happy-path tests.
+      return ensureVaultReadyForAutoDistill({
+        contentPath: vault,
+        configPath: path.join(vault, ".napkin"),
+      });
     } finally {
       if (saved.name === undefined) delete process.env.GIT_AUTHOR_NAME;
       else process.env.GIT_AUTHOR_NAME = saved.name;
@@ -251,7 +258,10 @@ describe("ensureVaultReadyForAutoDistill", () => {
       const savedName = process.env.GIT_AUTHOR_NAME;
       process.env.GIT_AUTHOR_NAME = "test";
       try {
-        const r = ensureVaultReadyForAutoDistill({ contentPath: ro });
+        const r = ensureVaultReadyForAutoDistill({
+          contentPath: ro,
+          configPath: path.join(ro, ".napkin"),
+        });
         // If the kernel didn't enforce the read-only (common under root /
         // bind mounts), the setup may actually succeed. Either way, the
         // contract is: no throw.
@@ -409,6 +419,54 @@ describe("ensureVaultReadyForAutoDistill", () => {
     // top of it.
     expect(log.length).toBe(1);
     expect(log[0]).toContain("napkin: scaffold auto-distill git config");
+  });
+
+  // --- legacy-embedded-layout refusal --------------------------------------
+  //
+  // Worktree-based concurrency relies on napkin's `findVault` resolving
+  // cwd=worktree to the worktree itself. That only works for subdir-
+  // layout vaults (where `configPath !== contentPath` because the branch
+  // tracks a `.napkin/config.json`). Legacy embedded vaults have
+  // `configPath === contentPath` and no `.napkin/` subdir in the branch;
+  // distill writes would bypass the worktree silently. Auto-setup refuses
+  // here so the session_start handler can surface a migration notify.
+
+  test("legacy-embedded layout (configPath === contentPath) \u2192 refuses, returns legacyLayout", () => {
+    // Legacy vault: config.json lives alongside notes at the vault root,
+    // no `.napkin/` subdir. napkin resolves contentPath = configPath.
+    const r = ensureVaultReadyForAutoDistill({
+      contentPath: vault,
+      configPath: vault,
+    });
+    expect(r.error).toBe(LEGACY_EMBEDDED_LAYOUT_ERROR);
+    expect(r.legacyLayout).toEqual({ configPath: vault });
+    expect(r.initialized).toBe(false);
+    expect(r.scaffolded).toEqual([]);
+    // Must not have attempted git init — no `.git` dir in the vault.
+    expect(fs.existsSync(path.join(vault, ".git"))).toBe(false);
+  });
+
+  test("legacy-embedded layout refusal is atomic (does NOT write scaffolding files)", () => {
+    // Belt-and-braces: we must not write .gitignore or .gitattributes
+    // on a legacy vault even if the caller later ignores the error.
+    // Otherwise a stale `.gitignore` would be the only artifact the
+    // user sees after a failed migration attempt.
+    const r = ensureVaultReadyForAutoDistill({
+      contentPath: vault,
+      configPath: vault,
+    });
+    expect(r.error).toBe(LEGACY_EMBEDDED_LAYOUT_ERROR);
+    expect(fs.existsSync(path.join(vault, ".gitignore"))).toBe(false);
+    expect(fs.existsSync(path.join(vault, ".gitattributes"))).toBe(false);
+  });
+
+  test("subdir layout (configPath distinct) bypasses the legacy check", () => {
+    // Sanity contrast: when configPath is distinct from contentPath,
+    // auto-setup proceeds normally (this is the normal happy path, pinned
+    // so a refactor of the detection can't flip the polarity).
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.legacyLayout).toBeUndefined();
   });
 });
 

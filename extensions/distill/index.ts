@@ -16,6 +16,7 @@ import { Type } from "@sinclair/typebox";
 import {
   countTrackedFiles,
   ensureVaultReadyForAutoDistill,
+  LEGACY_EMBEDDED_LAYOUT_ERROR,
 } from "./auto-setup";
 import {
   type ActiveDistill,
@@ -341,11 +342,36 @@ export default function (pi: ExtensionAPI) {
     try {
       const setup = ensureVaultReadyForAutoDistill({
         contentPath: vaultContentPath,
+        configPath: napkinVault.configPath,
       });
       if (setup.error) {
         setupFailed = true;
         if (ctx.hasUI) {
-          if (setup.conflict) {
+          if (setup.error === LEGACY_EMBEDDED_LAYOUT_ERROR) {
+            // Legacy embedded layout (`~/.napkin/` with `config.json`
+            // alongside notes, no `.napkin/` subdir). Worktree-based
+            // concurrency depends on findVault resolving cwd=worktree
+            // to the worktree itself, which only works when the branch
+            // tracks a `.napkin/` subdir. Walk the user through the
+            // migration; manual /distill still works on any layout.
+            const cfg = setup.legacyLayout?.configPath ?? vaultContentPath;
+            ctx.ui.notify(
+              [
+                `Auto-distill needs the subdir vault layout (config at \`${vaultContentPath}/.napkin/config.json\`),`,
+                `but your vault is using the legacy embedded layout (config at \`${cfg}/config.json\`).`,
+                "",
+                "To enable auto-distill, migrate the vault:",
+                `  1. mkdir ${cfg}/.napkin`,
+                `  2. mv ${cfg}/config.json ${cfg}/.napkin/config.json`,
+                `  3. Edit ${cfg}/.napkin/config.json \u2014 add "vault": { "root": ".." }`,
+                "  4. Reload pi (or /quit and restart)",
+                "",
+                "Manual /distill still works on any layout. To silence this, set",
+                "distill.enabled: false in vault config.json.",
+              ].join("\n"),
+              "error",
+            );
+          } else if (setup.conflict) {
             // G7: existing `.gitattributes` already claims `*.md merge=<X>`.
             // We refuse to scaffold so we don't silently override the
             // user's chosen driver via last-match-wins. Explain the

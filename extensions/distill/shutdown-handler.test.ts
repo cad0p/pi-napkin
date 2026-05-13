@@ -155,6 +155,63 @@ function createSession(dir: string): SessionManager {
   return sm;
 }
 
+/**
+ * Create a legacy-embedded-layout vault. napkin's `resolveVaultLayout`
+ * returns `{ contentPath = configPath = .napkin/dir }` when the config has
+ * no `vault.root`, simulating vaults from pre-subdir-layout napkin
+ * versions. Auto-distill's setup refuses to scaffold these, so session
+ * shutdown must not spawn a worktree.
+ *
+ * Layout:
+ *   <dir>/.napkin/                  <- napkin's configPath == contentPath
+ *   <dir>/.napkin/config.json       <- distill config, NO vault.root
+ *
+ * We don't git-init here because legacy-layout refusal fires BEFORE any
+ * git interaction in auto-setup. If the refusal ever regresses, the test
+ * would surface it by spawning a worktree on a vault with no commits
+ * (which would throw from createDistillWorktree, leaving a visible error).
+ */
+function createLegacyVault(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-vault-"));
+  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, ".napkin", "config.json"),
+    JSON.stringify({
+      // NO `vault.root` key \u2014 napkin treats this as legacy embedded.
+      distill: { enabled: true, onShutdown: true, intervalMinutes: 60 },
+    }),
+  );
+  return dir;
+}
+
+/**
+ * Build a mock `ExtensionUIContext` that captures `notify` calls into an
+ * array so tests can assert on migration messages without mounting the
+ * real UI. `setStatus` is a no-op to satisfy the type shape.
+ */
+function makeCaptureUI(): {
+  ui: {
+    notify: (msg: string, level: string) => void;
+    setStatus: (_id: string, _content: unknown) => void;
+    theme: {
+      fg: (_role: string, s: string) => string;
+    };
+  };
+  notifies: Array<{ message: string; level: string }>;
+} {
+  const notifies: Array<{ message: string; level: string }> = [];
+  const ui = {
+    notify: (message: string, level: string) => {
+      notifies.push({ message, level });
+    },
+    setStatus: (_id: string, _content: unknown) => {},
+    theme: {
+      fg: (_role: string, s: string) => s,
+    },
+  };
+  return { ui, notifies };
+}
+
 /** Count worktrees present under the vault's XDG distill cache dir. */
 function countWorktrees(vault: string): number {
   const d = resolveCacheRoot(vault);
@@ -722,5 +779,127 @@ describe("session_shutdown handler — conflicting .gitattributes blocks setup (
     // NOT spawn a worktree.
     await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
     expect(countWorktrees(vault)).toBe(0);
+  });
+});
+
+/**
+ * Legacy-embedded-layout refusal at session_start. Mirrors the
+ * conflicting-.gitattributes suite: a vault-level reason to refuse
+ * auto-distill must suppress the shutdown spawn, emit a migration
+ * notify, and leave the user's files untouched.
+ *
+ * Legacy embedded = napkin resolves `contentPath === configPath ===
+ * <vault>/.napkin/`. The branch for a distill worktree can't track a
+ * `.napkin/config.json` the way it does for subdir-layout vaults, so
+ * distill writes would bypass the worktree entirely.
+ */
+describe("session_start handler \u2014 legacy-embedded layout blocks setup", () => {
+  let vault: string;
+  let xdgCacheDir: string;
+  let originalSetInterval: typeof setInterval;
+
+  const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+  const _savedXdgCache = process.env.XDG_CACHE_HOME;
+
+  beforeEach(() => {
+    delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
+    originalSetInterval = globalThis.setInterval;
+    globalThis.setInterval = ((
+      _cb: () => void,
+      _ms: number,
+      ..._rest: unknown[]
+    ) =>
+      ({
+        unref: () => {},
+        ref: () => {},
+      }) as unknown as NodeJS.Timeout) as typeof setInterval;
+  });
+
+  afterEach(() => {
+    if (_savedRecurse !== undefined)
+      process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
+    else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    globalThis.setInterval = originalSetInterval;
+    if (vault) {
+      cleanupWorktrees(vault);
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
+  });
+
+  test("legacy vault: session_start fires migration notify, no worktree on shutdown", async () => {
+    vault = createLegacyVault();
+    // napkin resolves cwd=<vault>/.napkin because that's where .napkin is.
+    // For legacy, contentPath === configPath === <vault>/.napkin.
+    // We launch pi from <vault>/.napkin so findVault lands on it directly.
+    const cwd = path.join(vault, ".napkin");
+    const sm = SessionManager.create(cwd, cwd);
+    sm.appendMessage({ role: "user", content: "hello" });
+    sm.appendMessage({ role: "assistant", content: "hi" });
+
+    const { ui, notifies } = makeCaptureUI();
+    const { api, captured } = makeMockAPI();
+    distillExtension(api as never);
+    // biome-ignore lint/suspicious/noExplicitAny: partial ctx
+    const ctx: any = {
+      cwd,
+      sessionManager: sm,
+      hasUI: true,
+      ui,
+    };
+    await captured.handlers.session_start({ reason: "new" }, ctx);
+    await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
+
+    // Migration notify should have fired with the exact guidance from
+    // the spec: mkdir .napkin, mv config.json, edit root.
+    const migrationNotify = notifies.find((n) =>
+      n.message.includes("legacy embedded layout"),
+    );
+    expect(migrationNotify).toBeDefined();
+    expect(migrationNotify?.level).toBe("error");
+    expect(migrationNotify?.message).toMatch(/mkdir .*\.napkin/);
+    expect(migrationNotify?.message).toMatch(/mv .*config\.json/);
+    expect(migrationNotify?.message).toMatch(
+      /"vault":\s*\{\s*"root":\s*"\.\."/,
+    );
+    expect(migrationNotify?.message).toMatch(/distill\.enabled: false/);
+
+    // And no worktree spawned on shutdown. setupFailed must override the
+    // persisted (false) suppression state.
+    expect(countWorktrees(vault)).toBe(0);
+  });
+
+  test("subdir-layout vault: normal path still works (regression check)", async () => {
+    // Sanity contrast: a subdir-layout vault with distill.enabled=true must
+    // still complete auto-setup and spawn on shutdown. If the legacy check
+    // ever fires on subdir layouts it would silently kill auto-distill.
+    vault = createVault({ enabled: true });
+    const sm = createSession(vault);
+
+    const { ui, notifies } = makeCaptureUI();
+    const { api, captured } = makeMockAPI();
+    distillExtension(api as never);
+    // biome-ignore lint/suspicious/noExplicitAny: partial ctx
+    const ctx: any = {
+      cwd: vault,
+      sessionManager: sm,
+      hasUI: true,
+      ui,
+    };
+    await captured.handlers.session_start({ reason: "new" }, ctx);
+    await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
+
+    // No legacy-layout notify on a subdir vault.
+    const migrationNotify = notifies.find((n) =>
+      n.message.includes("legacy embedded layout"),
+    );
+    expect(migrationNotify).toBeUndefined();
+
+    // Shutdown spawned a worktree normally.
+    expect(countWorktrees(vault)).toBe(1);
   });
 });
