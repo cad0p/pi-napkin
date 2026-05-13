@@ -854,18 +854,15 @@ describe("session_start handler \u2014 legacy-embedded layout blocks setup", () 
     await captured.handlers.session_start({ reason: "new" }, ctx);
     await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
 
-    // Migration notify should have fired with the exact guidance from
-    // the spec: mkdir .napkin, mv config.json, edit root.
+    // Migration notify should have fired with the one-line README pointer
+    // (Option C trim: we no longer reproduce mkdir/mv/edit steps in the
+    // notify itself — those live in README).
     const migrationNotify = notifies.find((n) =>
-      n.message.includes("legacy embedded layout"),
+      n.message.includes("subdir vault layout"),
     );
     expect(migrationNotify).toBeDefined();
     expect(migrationNotify?.level).toBe("error");
-    expect(migrationNotify?.message).toMatch(/mkdir .*\.napkin/);
-    expect(migrationNotify?.message).toMatch(/mv .*config\.json/);
-    expect(migrationNotify?.message).toMatch(
-      /"vault":\s*\{\s*"root":\s*"\.\."/,
-    );
+    expect(migrationNotify?.message).toMatch(/See README/i);
     expect(migrationNotify?.message).toMatch(/distill\.enabled: false/);
 
     // And no worktree spawned on shutdown. setupFailed must override the

@@ -28,7 +28,6 @@ import {
   getDistillState,
   spawnDistillInWorktree,
 } from "./distill-workspace";
-import { DISTILL_WRAPPER_LEGACY_SCRIPT } from "./scripts-paths";
 import { getSessionTouchedFiles } from "./session-touched-files";
 import { shouldDistillOnShutdown } from "./should-distill-on-shutdown";
 
@@ -180,15 +179,34 @@ stand alone.
 
 Be selective. Only capture knowledge useful to someone working on this project later. Skip meta-discussion, tool output, and chatter.`;
 
+// Inline bash script template for the legacy (git-optional) manual
+// /distill path. Tainted values flow through positional `$1..$5` argv;
+// the template itself is a fixed literal, never interpolated from user
+// input. Same trust boundary as the worktree wrapper, without a
+// separate file.
+//
+// Bash (not sh) because we use arrays for optional --model splicing;
+// Ubuntu's /bin/sh is dash which parse-errors on `pi_args=(...)`.
+const LEGACY_SPAWN_SCRIPT = `set -u
+PI_BIN="$1"; SESSION="$2"; TMPDIR_ARG="$3"; PROMPT="$4"; MODEL="$5"
+pi_args=(--session "$SESSION" -p "$PROMPT")
+if [ -n "$MODEL" ]; then
+  pi_args=(--session "$SESSION" --model "$MODEL" -p "$PROMPT")
+fi
+"$PI_BIN" "\${pi_args[@]}" > /dev/null 2>&1 || true
+rm -rf -- "$TMPDIR_ARG"
+`;
+
 /**
  * Spawn a detached pi distill process that survives parent exit.
- * The shell wrapper cleans up the temp dir when pi finishes.
- * Returns the temp dir path (used as a completion marker — when it disappears, distill is done).
+ * Runs `pi -p <prompt>` against a forked session, then removes the temp
+ * dir. Returns the temp dir path (used as a completion marker — when it
+ * disappears, distill is done).
  *
- * All arguments flow through argv (not `sh -c`) so there's zero shell-string
- * interpolation in the spawn pipeline. The wrapper script
- * (`distill-wrapper-legacy.sh`) runs pi and removes the temp dir, matching
- * the worktree spawn path style.
+ * Used only by manual `/distill` on git-less, disabled, or legacy-embedded
+ * vaults. Manual `/distill` with git + subdir layout + enabled takes the
+ * worktree path. Auto-distill requires git + subdir layout unconditionally
+ * (Phase C1).
  */
 export function spawnDistill(
   sessionFile: string,
@@ -206,29 +224,30 @@ export function spawnDistill(
       return null;
     }
 
-    // Positional args for the wrapper: [sessionFile, tmpDir, prompt, model?].
-    // Empty model string tells the wrapper to skip the --model flag.
     const modelStr = config.model
       ? `${config.model.provider}/${config.model.id}`
       : "";
-    const wrapperArgs = [
-      DISTILL_WRAPPER_LEGACY_SCRIPT,
-      forkedFile,
-      tmpDir,
-      DISTILL_PROMPT,
-      modelStr,
-    ];
+    const piBin = process.env.NAPKIN_DISTILL_PI_BIN ?? "pi";
 
-    // Invoke via `bash` (not `sh`): the legacy wrapper's shebang is
-    // `#!/usr/bin/env bash` and it uses bash-specific syntax (arrays
-    // `pi_args=(...)`). On Ubuntu, `/bin/sh` is `dash` which parse-errors
-    // on bash syntax.
-    const proc = spawnFn("bash", wrapperArgs, {
-      cwd,
-      detached: true,
-      stdio: "ignore",
-      env: { ...process.env, NAPKIN_DISTILL_NO_RECURSE: "1" },
-    });
+    const proc = spawnFn(
+      "bash",
+      [
+        "-c",
+        LEGACY_SPAWN_SCRIPT,
+        "_",
+        piBin,
+        forkedFile,
+        tmpDir,
+        DISTILL_PROMPT,
+        modelStr,
+      ],
+      {
+        cwd,
+        detached: true,
+        stdio: "ignore",
+        env: { ...process.env, NAPKIN_DISTILL_NO_RECURSE: "1" },
+      },
+    );
     proc.unref();
 
     return tmpDir;
@@ -365,25 +384,13 @@ export default function (pi: ExtensionAPI) {
           if (setup.error === LEGACY_EMBEDDED_LAYOUT_ERROR) {
             // Legacy embedded layout (`~/.napkin/` with `config.json`
             // alongside notes, no `.napkin/` subdir). Worktree-based
-            // concurrency depends on findVault resolving cwd=worktree
-            // to the worktree itself, which only works when the branch
-            // tracks a `.napkin/` subdir. Walk the user through the
-            // migration; manual /distill still works on any layout.
-            const cfg = setup.legacyLayout?.configPath ?? vaultContentPath;
+            // concurrency requires the subdir layout so napkin's
+            // `findVault` resolves cwd=worktree to the worktree itself.
+            // README has the migration steps; point there instead of
+            // duplicating them in the notify (keeps the notification
+            // short enough to render cleanly in every UI surface).
             ctx.ui.notify(
-              [
-                `Auto-distill needs the subdir vault layout (config at \`${vaultContentPath}/.napkin/config.json\`),`,
-                `but your vault is using the legacy embedded layout (config at \`${cfg}/config.json\`).`,
-                "",
-                "To enable auto-distill, migrate the vault:",
-                `  1. mkdir ${cfg}/.napkin`,
-                `  2. mv ${cfg}/config.json ${cfg}/.napkin/config.json`,
-                `  3. Edit ${cfg}/.napkin/config.json \u2014 add "vault": { "root": ".." }`,
-                "  4. Reload pi (or /quit and restart)",
-                "",
-                "Manual /distill still works on any layout. To silence this, set",
-                "distill.enabled: false in vault config.json.",
-              ].join("\n"),
+              "Auto-distill requires the subdir vault layout. See README for migration, or set distill.enabled: false in vault config.json.",
               "error",
             );
           } else if (setup.conflict) {
@@ -873,58 +880,36 @@ export default function (pi: ExtensionAPI) {
   }
 
   function runDistill(ctx: RunCtx) {
-    // Manual `/distill`: use the worktree path only when the user has
-    // opted into auto-distill (`distill.enabled=true` in vault config)
-    // AND git is available AND the vault uses the subdir layout.
-    // Otherwise fall back to the legacy git-less tmpdir path, which
-    // never touches git config.
+    // Manual `/distill` routing: use the worktree path only when the user
+    // has opted into auto-distill (`distill.enabled=true`), git is
+    // available, AND the vault uses the subdir layout. Otherwise fall
+    // back to the legacy tmpdir spawn, which has zero git side effects.
     //
-    // Why gate on `config.enabled`? The worktree path calls
-    // `registerMergeDriver()` which writes to `.gitattributes` and may
-    // produce a commit to scaffold the driver rule. A user who has
-    // explicitly set `distill.enabled: false` has opted OUT of
-    // auto-distill's infrastructure — running `/distill` manually should
-    // still work (they invoked it explicitly) but must not silently
-    // modify their git state. Legacy path has zero git side effects.
+    // `distill.enabled=false` means the user opted out of auto-distill's
+    // infrastructure (including `.gitattributes` rewrites). Worktree
+    // spawn calls `registerMergeDriver()` which writes git config; legacy
+    // path doesn't.
     //
-    // Why gate on subdir layout (SEC-R4-1)? On a legacy-embedded vault
-    // (`configPath === contentPath`, e.g. `~/.napkin/`), spawning into a
-    // worktree causes napkin's `findVault` (run from cwd=<worktree>) to
-    // walk up past the worktree and resolve to the user's real
-    // `~/.napkin/` via the global-config fallback. Distill writes then
-    // land on the real vault, the worktree stays empty, and `git add -A`
-    // / squash-merge become no-ops — the concurrency guarantee silently
-    // degrades to zero. Auto-distill is already refused on legacy layout
-    // in `ensureVaultReadyForAutoDistill` at session_start. Manual
-    // `/distill` is git-optional per spec, so on legacy layout we fall
-    // back to the legacy tmpdir path (which correctly resolves the vault
-    // via napkin before forking the session). Users who want worktree
-    // concurrency for manual `/distill` must migrate to subdir layout;
-    // the session_start notify walks them through the migration.
+    // Legacy-embedded layout (`configPath === contentPath`) forces the
+    // same fallback: the worktree path silently corrupts on that layout
+    // because napkin's `findVault` from cwd=<worktree> walks past the
+    // worktree and resolves to the real `~/.napkin/` via global config
+    // fallback. Distill writes land on the real vault, worktree stays
+    // empty, concurrency guarantee degrades to zero. README covers the
+    // subdir migration; auto-distill refuses this layout at session_start.
     //
-    // Why not always worktree? Some users keep their vault outside git
-    // on purpose (mobile-only Obsidian, ephemeral scratch vaults, etc.)
-    // and should still be able to run `/distill` manually without
-    // pi-napkin refusing. The detection is cheap and the fallback is
-    // the original git-less path, preserved unchanged.
-    //
-    // Cross-session concurrency caveat: this only applies to the legacy
-    // fallback. Two concurrent manual /distills on a git-less vault (or
-    // on a vault where `distill.enabled=false`, or on a legacy-embedded
-    // vault) race on napkin writes because the legacy path has no
-    // worktree isolation. `isRunning` blocks a second /distill in the
-    // same pi session, but not across sessions. With `distill.enabled=true`,
-    // git available, AND subdir layout, both manual and auto paths merge
-    // serially through the merge driver.
+    // Cross-session concurrency caveat: the legacy fallback has no
+    // worktree isolation — two concurrent `/distill` calls on a git-less,
+    // disabled, or legacy-embedded vault race on napkin writes. With
+    // git + enabled + subdir layout, both manual and auto paths serialize
+    // through the merge driver.
     runDistillWith(ctx, {
       spawnFn: (args) => {
         const gitPresent = fs.existsSync(
           path.join(args.vaultContentPath, ".git"),
         );
-        // Legacy-embedded detection: napkin reports configPath ===
-        // contentPath when `config.json` lacks `vault.root`. Matches the
-        // predicate used in `ensureVaultReadyForAutoDistill` for
-        // auto-distill refusal (keep them in lockstep).
+        // Legacy-embedded detection matches the predicate in
+        // `ensureVaultReadyForAutoDistill` (keep the two gates in lockstep).
         const isLegacyEmbedded = args.vaultConfigPath === args.vaultContentPath;
         if (gitPresent && args.config.enabled && !isLegacyEmbedded) {
           return worktreeSpawnFn(args);

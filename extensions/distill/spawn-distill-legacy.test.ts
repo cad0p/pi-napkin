@@ -8,15 +8,17 @@ import * as path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import { spawnDistill } from "./index";
-import { DISTILL_WRAPPER_LEGACY_SCRIPT } from "./scripts-paths";
 
 /**
  * Regression tests for the legacy `spawnDistill` code path (manual
- * `/distill`, git-optional). The previous implementation built a shell
- * command string and `spawn("sh", ["-c", cmd])` — every variable
- * interpolated into that string was a single shell-escape mishap away from
- * an injection. These tests pin the new argv-based contract so regressions
- * are caught.
+ * `/distill` on git-less vaults, or as fallback when git-backed paths
+ * decline). The older implementation built a shell command string and
+ * `spawn("sh", ["-c", cmd])` — every interpolated variable was one
+ * shell-escape mishap away from an injection. The current implementation
+ * uses `bash -c <fixed template> _ <arg1> <arg2> ...` which keeps the
+ * template literal and flows every tainted value through positional
+ * argv ($1..$N). These tests pin the argv contract so regressions are
+ * caught.
  */
 
 function createSeededSessionFile(cwd: string, dir: string): string {
@@ -83,7 +85,7 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
     fs.rmSync(sessionDir, { recursive: true, force: true });
   });
 
-  test("spawns `bash` with the legacy wrapper path and positional argv (no sh -c)", () => {
+  test("spawns `bash -c <template> _ <positional args>` (no interpolated command string)", () => {
     const { spawnFn, calls } = makeMockSpawn();
     const tmpDir = spawnDistill(
       sessionFile,
@@ -102,22 +104,33 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
     const call = calls[0];
     expect(call.command).toBe("bash");
 
-    // The first arg is the wrapper script path — NOT "-c". This is the key
-    // regression assertion: the old path passed "-c" + command string.
-    expect(call.args[0]).toBe(DISTILL_WRAPPER_LEGACY_SCRIPT);
-    expect(call.args[0]).not.toBe("-c");
+    // args[0] must be literally "-c" — bash's standard invocation for an
+    // inline script template.
+    expect(call.args[0]).toBe("-c");
 
-    // Positional args: [script, sessionFile, tmpDir, prompt, model]
-    // (the forked session path lives inside tmpDir).
-    expect(call.args[1].startsWith(tmpDir as string)).toBe(true);
-    expect(call.args[2]).toBe(tmpDir as string);
-    expect(typeof call.args[3]).toBe("string");
-    expect(call.args[3].length).toBeGreaterThan(0);
+    // args[1] is the FIXED script template — never interpolated from
+    // tainted input. Sanity-pin a few stable markers so template drift
+    // is caught.
+    expect(typeof call.args[1]).toBe("string");
+    expect(call.args[1]).toContain("set -u");
+    expect(call.args[1]).toContain('pi_args=(--session "$SESSION"');
+    expect(call.args[1]).toContain('rm -rf -- "$TMPDIR_ARG"');
+
+    // args[2] is the `$0` placeholder convention for `bash -c`.
+    expect(call.args[2]).toBe("_");
+
+    // args[3..7] carry the positional payload: piBin, session, tmpDir,
+    // prompt, model.
+    expect(call.args[3]).toBe("pi"); // default when NAPKIN_DISTILL_PI_BIN is unset
+    expect(call.args[4].startsWith(tmpDir as string)).toBe(true);
+    expect(call.args[5]).toBe(tmpDir as string);
+    expect(typeof call.args[6]).toBe("string");
+    expect(call.args[6].length).toBeGreaterThan(0);
     // Empty model string when model is omitted.
-    expect(call.args[4]).toBe("");
+    expect(call.args[7]).toBe("");
   });
 
-  test("forwards model as argv[4] without embedding in a shell string", () => {
+  test("forwards model as argv[7] without embedding in the template", () => {
     const { spawnFn, calls } = makeMockSpawn();
     const tmpDir = spawnDistill(
       sessionFile,
@@ -132,7 +145,10 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
     );
     if (tmpDir) tmpDirs.push(tmpDir);
 
-    expect(calls[0].args[4]).toBe("anthropic/claude-sonnet-4-5");
+    expect(calls[0].args[7]).toBe("anthropic/claude-sonnet-4-5");
+    // The template stays stable — model flows through $5, not the literal.
+    expect(calls[0].args[1]).not.toContain("anthropic");
+    expect(calls[0].args[1]).not.toContain("claude-sonnet-4-5");
   });
 
   test("passes detached + stdio:ignore + NAPKIN_DISTILL_NO_RECURSE", () => {
@@ -156,11 +172,11 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
     expect(opts.env.NAPKIN_DISTILL_NO_RECURSE).toBe("1");
   });
 
-  test("shell-metacharacter values stay isolated as argv — never concatenated", () => {
-    // If model.id contained a shell metacharacter, the old sh -c path would
-    // need correct shell-escaping to remain safe. The new argv path treats
-    // every value as a raw string — no escaping needed, no injection
-    // surface. Pin the contract.
+  test("shell-metacharacter values stay isolated as argv — never concatenated into template", () => {
+    // If model.id contained a shell metacharacter, the old sh -c path
+    // would need correct shell-escaping to remain safe. The argv contract
+    // treats every value as a raw string — no escaping needed, no
+    // injection surface. Pin the contract.
     const { spawnFn, calls } = makeMockSpawn();
     const malicious = "claude'; rm -rf /";
     const tmpDir = spawnDistill(
@@ -177,11 +193,36 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
     if (tmpDir) tmpDirs.push(tmpDir);
 
     // The raw metacharacter-laden value is ONE argv entry, isolated from
-    // the others. Not substring-concatenated into a command string.
-    expect(calls[0].args[4]).toBe(`anthropic/${malicious}`);
+    // the others. Not substring-concatenated into the template.
+    expect(calls[0].args[7]).toBe(`anthropic/${malicious}`);
+    expect(calls[0].args[1]).not.toContain("rm -rf /");
     // No arg is a composite shell command string.
     for (const arg of calls[0].args) {
       expect(arg).not.toContain("sh -c");
+    }
+  });
+
+  test("respects NAPKIN_DISTILL_PI_BIN override (test hook)", () => {
+    const prev = process.env.NAPKIN_DISTILL_PI_BIN;
+    process.env.NAPKIN_DISTILL_PI_BIN = "/fake/pi-bin";
+    try {
+      const { spawnFn, calls } = makeMockSpawn();
+      const tmpDir = spawnDistill(
+        sessionFile,
+        cwd,
+        {
+          enabled: true,
+          intervalMinutes: 60,
+          onShutdown: true,
+        },
+        spawnFn,
+      );
+      if (tmpDir) tmpDirs.push(tmpDir);
+
+      expect(calls[0].args[3]).toBe("/fake/pi-bin");
+    } finally {
+      if (prev === undefined) delete process.env.NAPKIN_DISTILL_PI_BIN;
+      else process.env.NAPKIN_DISTILL_PI_BIN = prev;
     }
   });
 });
