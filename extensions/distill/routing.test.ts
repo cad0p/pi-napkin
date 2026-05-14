@@ -634,3 +634,172 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     fs.rmSync(legacyVault, { recursive: true, force: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// R8-SC-7: failure-surfacing integration test for runDistillWith.
+//
+// Pins the wiring between the wrapper-side error log and the JS-side UI
+// notify: when the wrapper writes a fatal-error log and exits, the
+// poller's `checkFailure` probe finds it, the runner paints a failure
+// status, calls `ui.notify("Distillation failed: see <path>", "error")`,
+// and short-circuits BEFORE `onComplete` (so the per-completion overlap
+// notice doesn't fire on a failed run).
+//
+// Trigger the wrapper failure naturally: don't augment PATH (no napkin),
+// don't stub pi. The wrapper hits the missing-napkin guard, writes a
+// `*.log`, exits 1, cleanup trap removes the worktree.
+// ---------------------------------------------------------------------------
+
+describe("runDistillWith failure surfacing (R8-SC-7)", () => {
+  let vault: string;
+  let sm: SessionManager;
+  let capturedInterval: (() => void) | null = null;
+  let originalSetInterval: typeof setInterval;
+  let xdgCacheDir: string;
+  let savedRecurse: string | undefined;
+  let savedXdgCache: string | undefined;
+  let savedPath: string | undefined;
+
+  beforeEach(() => {
+    savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+    savedXdgCache = process.env.XDG_CACHE_HOME;
+    savedPath = process.env.PATH;
+    delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "failsurface-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
+    // Strip PATH to a system minimum so the wrapper's `command -v napkin`
+    // returns empty and the missing-napkin guard fires — producing a
+    // real fatal-error log we can verify the JS-side surfacing on.
+    // /usr/bin:/bin doesn't contain napkin (verified during test setup).
+    process.env.PATH = "/usr/bin:/bin";
+    vault = createEnabledGitVault(60);
+    sm = createSeededSession(vault);
+
+    originalSetInterval = globalThis.setInterval;
+    capturedInterval = null;
+    globalThis.setInterval = ((
+      cb: () => void,
+      ms: number,
+      ...rest: unknown[]
+    ) => {
+      if (ms > 10_000 && capturedInterval === null) {
+        capturedInterval = cb;
+        return { unref: () => {}, ref: () => {} } as unknown as NodeJS.Timeout;
+      }
+      return originalSetInterval(cb, ms, ...rest);
+    }) as typeof setInterval;
+  });
+
+  afterEach(() => {
+    if (savedRecurse !== undefined)
+      process.env.NAPKIN_DISTILL_NO_RECURSE = savedRecurse;
+    else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    if (savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = savedPath;
+    globalThis.setInterval = originalSetInterval;
+    const worktreesDir = resolveCacheRoot(vault);
+    if (fs.existsSync(worktreesDir)) {
+      for (const entry of fs.readdirSync(worktreesDir)) {
+        spawnSync(
+          "git",
+          [
+            "-C",
+            vault,
+            "worktree",
+            "remove",
+            "--force",
+            path.join(worktreesDir, entry),
+          ],
+          { encoding: "utf-8" },
+        );
+      }
+    }
+    spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
+    fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = savedXdgCache;
+  });
+
+  test("wrapper writes error log → ui.notify('Distillation failed: see <path>', 'error') fires; onComplete does NOT", async () => {
+    // Mock UI that captures notify calls. "theme" is a stub object with
+    // the same shape the runner uses (`fg(severity, str)` returns the
+    // string verbatim for assertion ease).
+    const notifyCalls: { msg: string; severity: string }[] = [];
+    const setStatusCalls: { id: string; content: string }[] = [];
+    // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
+    const ui: any = {
+      theme: {
+        fg: (_severity: string, str: string) => str,
+      },
+      notify: (msg: string, severity: string) => {
+        notifyCalls.push({ msg, severity });
+      },
+      setStatus: (id: string, content: string) => {
+        setStatusCalls.push({ id, content });
+      },
+    };
+
+    const { api, captured } = makeMockExtensionAPI();
+    distillExtension(api as never);
+    expect(captured.handlers.session_start).toBeDefined();
+
+    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
+    const ctx: any = {
+      cwd: vault,
+      sessionManager: sm,
+      hasUI: true,
+      ui,
+    };
+    await captured.handlers.session_start({ reason: "new" }, ctx);
+    expect(capturedInterval).not.toBeNull();
+
+    // Fire interval → spawn detached wrapper. With napkin NOT on PATH
+    // (we deliberately skipped withNapkinOnPath), the wrapper hits the
+    // missing-napkin guard, writes its `*.log`, exits 1, cleanup trap
+    // removes the worktree.
+    capturedInterval?.();
+
+    // Wait for the worktree directory to disappear AND for the JS-side
+    // poller to have run at least once (poll interval is 2000ms in
+    // production; in this test we'd have to advance fake timers, but
+    // here we let real time elapse since the wrapper completes
+    // quickly with the missing-napkin guard).
+    const worktreesDir = resolveCacheRoot(vault);
+    const start = Date.now();
+    const timeoutMs = 30_000;
+    while (Date.now() - start < timeoutMs) {
+      if (
+        notifyCalls.some((c) => c.msg.startsWith("Distillation failed: see"))
+      ) {
+        break;
+      }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+
+    // The failure notify should have fired with the log path.
+    const failureNotifies = notifyCalls.filter((c) =>
+      c.msg.startsWith("Distillation failed: see"),
+    );
+    expect(failureNotifies.length).toBe(1);
+    expect(failureNotifies[0].severity).toBe("error");
+    expect(failureNotifies[0].msg).toMatch(/\.log$/);
+
+    // No success notify ('Distillation complete') should have fired.
+    const successNotifies = notifyCalls.filter((c) =>
+      c.msg.startsWith("Distillation complete"),
+    );
+    expect(successNotifies.length).toBe(0);
+
+    // Failure status painted.
+    const failureStatuses = setStatusCalls.filter((c) =>
+      c.content.includes("distill: failed"),
+    );
+    expect(failureStatuses.length).toBe(1);
+
+    // Worktree directory cleaned up by the wrapper's trap.
+    expect(
+      fs.existsSync(worktreesDir) ? fs.readdirSync(worktreesDir).length : 0,
+    ).toBe(0);
+  }, 10_000); // bun:test per-test timeout (default 5000ms is too tight given the 2s poll interval)
+});
