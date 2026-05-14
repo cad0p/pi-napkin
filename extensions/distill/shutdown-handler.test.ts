@@ -254,6 +254,12 @@ describe("session_shutdown handler (Item 8)", () => {
     committerName: process.env.GIT_COMMITTER_NAME,
     committerEmail: process.env.GIT_COMMITTER_EMAIL,
   };
+  // POST-R6-CACHE: the wrapper now requires `napkin` on PATH for the
+  // per-distill shim install. CI runners don't have a global napkin
+  // install — napkin lives in `node_modules/.bin/` after `bun install`.
+  // Augment PATH so the wrapper's `command -v napkin` finds it.
+  const _savedPath = process.env.PATH;
+  const _localBin = path.resolve(__dirname, "..", "..", "node_modules", ".bin");
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "shutdown-xdg-"));
@@ -262,6 +268,7 @@ describe("session_shutdown handler (Item 8)", () => {
     process.env.GIT_AUTHOR_EMAIL = "ci@napkin.test";
     process.env.GIT_COMMITTER_NAME = "Napkin CI";
     process.env.GIT_COMMITTER_EMAIL = "ci@napkin.test";
+    process.env.PATH = `${_localBin}${path.delimiter}${process.env.PATH ?? ""}`;
     // Stub setInterval so session_start doesn't leak a real timer; shutdown
     // tests don't need the interval to fire.
     originalSetInterval = globalThis.setInterval;
@@ -280,6 +287,9 @@ describe("session_shutdown handler (Item 8)", () => {
     if (_savedRecurse !== undefined)
       process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    // Restore PATH (POST-R6-CACHE augmentation cleanup).
+    if (_savedPath === undefined) delete process.env.PATH;
+    else process.env.PATH = _savedPath;
     // Restore git identity env
     for (const [key, val] of [
       ["GIT_AUTHOR_NAME", _savedGitEnv.authorName],
@@ -530,6 +540,10 @@ describe("session_shutdown handler — interval-fires-before-shutdown race (G5)"
    */
   let capturedIntervals: Array<{ cb: () => void; ms: number }> = [];
 
+  // POST-R6-CACHE: PATH save slot for the G5 describe — distinct name from
+  // the top-level describe's _savedPath to avoid TDZ / shadowing pitfalls.
+  let _savedPathG5: string | undefined;
+
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "g5-xdg-"));
@@ -538,6 +552,9 @@ describe("session_shutdown handler — interval-fires-before-shutdown race (G5)"
     process.env.GIT_AUTHOR_EMAIL = "ci@napkin.test";
     process.env.GIT_COMMITTER_NAME = "Napkin CI";
     process.env.GIT_COMMITTER_EMAIL = "ci@napkin.test";
+    // POST-R6-CACHE: shim install needs napkin on PATH (see top describe).
+    _savedPathG5 = process.env.PATH;
+    process.env.PATH = `${path.resolve(__dirname, "..", "..", "node_modules", ".bin")}${path.delimiter}${process.env.PATH ?? ""}`;
 
     capturedIntervals = [];
     originalSetInterval = globalThis.setInterval;
@@ -558,6 +575,9 @@ describe("session_shutdown handler — interval-fires-before-shutdown race (G5)"
     if (_savedRecurse !== undefined)
       process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    // Restore PATH (POST-R6-CACHE).
+    if (_savedPathG5 === undefined) delete process.env.PATH;
+    else process.env.PATH = _savedPathG5;
     for (const [key, val] of [
       ["GIT_AUTHOR_NAME", _savedGitEnv.authorName],
       ["GIT_AUTHOR_EMAIL", _savedGitEnv.authorEmail],

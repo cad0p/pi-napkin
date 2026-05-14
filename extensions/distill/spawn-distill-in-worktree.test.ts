@@ -533,6 +533,13 @@ describe("distill-wrapper.sh (integration)", () => {
     // bash tool land in the worktree even though pi runs at the parent's
     // cwd (parent cwd preserves prompt-cache hits). Verify the shim is
     // installed at the expected path with the right content.
+    //
+    // CI portability: napkin lives in `node_modules/.bin/` after `bun
+    // install`. Add that to PATH so the wrapper's `command -v napkin`
+    // finds it on fresh runners that don't have a global napkin install.
+    const repoRoot = path.resolve(__dirname, "..", "..");
+    const localBin = path.join(repoRoot, "node_modules", ".bin");
+    const augmentedPath = `${localBin}${path.delimiter}${process.env.PATH ?? ""}`;
     const { createDistillWorkspace } = require("./distill-workspace");
     const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
@@ -557,6 +564,7 @@ describe("distill-wrapper.sh (integration)", () => {
         encoding: "utf-8",
         env: {
           ...process.env,
+          PATH: augmentedPath,
           NAPKIN_DISTILL_NO_RECURSE: "1",
           NAPKIN_DISTILL_HALT_AFTER_SHIM: "1",
         },

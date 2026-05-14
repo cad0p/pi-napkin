@@ -229,20 +229,26 @@ fi
 # shim itself is a 3-line bash script; works wherever the wrapper does
 # (Linux, macOS, WSL, Git Bash). Doesn't add a new platform constraint.
 #
+# CI / test note: when NAPKIN_DISTILL_SKIP_PI=1 the shim is skipped
+# (no pi run → no napkin invocations to route). Lets the integration
+# tests run in environments where napkin isn't installed (e.g. fresh
+# CI runners). Production never sets SKIP_PI.
+#
 # See POST-R6-CACHE in features/pi-napkin-distill/deferred.md for the
 # full design rationale.
-SHIM_DIR="$WORKTREE/.napkin/distill/bin"
-REAL_NAPKIN="$(command -v napkin || true)"
-if [ -z "$REAL_NAPKIN" ]; then
-  log_error "napkin binary not found on wrapper PATH; cache-preserving shim cannot be installed"
-  exit 1
-fi
-mkdir -p "$SHIM_DIR"
-# Generate the shim with the resolved napkin path baked in. Heredoc
-# delimiter is unquoted so $REAL_NAPKIN and $WORKTREE expand at install
-# time; literal `\$@` is escaped so it expands inside the shim at
-# invocation time.
-cat > "$SHIM_DIR/napkin" <<EOF
+if [ "${NAPKIN_DISTILL_SKIP_PI:-}" != "1" ]; then
+  SHIM_DIR="$WORKTREE/.napkin/distill/bin"
+  REAL_NAPKIN="$(command -v napkin || true)"
+  if [ -z "$REAL_NAPKIN" ]; then
+    log_error "napkin binary not found on wrapper PATH; cache-preserving shim cannot be installed"
+    exit 1
+  fi
+  mkdir -p "$SHIM_DIR"
+  # Generate the shim with the resolved napkin path baked in. Heredoc
+  # delimiter is unquoted so $REAL_NAPKIN and $WORKTREE expand at install
+  # time; literal `\$@` is escaped so it expands inside the shim at
+  # invocation time.
+  cat > "$SHIM_DIR/napkin" <<EOF
 #!/usr/bin/env bash
 # Auto-generated distill napkin shim. Routes every napkin command to
 # the distill worktree at $WORKTREE so vault writes from the agent's
@@ -251,8 +257,9 @@ cat > "$SHIM_DIR/napkin" <<EOF
 # Removed when the worktree is removed.
 exec "$REAL_NAPKIN" --vault "$WORKTREE" "\$@"
 EOF
-chmod +x "$SHIM_DIR/napkin"
-export PATH="$SHIM_DIR:$PATH"
+  chmod +x "$SHIM_DIR/napkin"
+  export PATH="$SHIM_DIR:$PATH"
+fi
 
 # Testing hook: halt right after the shim install so tests can inspect the
 # shim file without the cleanup trap wiping the worktree. Clears the EXIT
