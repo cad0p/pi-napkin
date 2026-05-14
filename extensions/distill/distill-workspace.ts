@@ -506,12 +506,8 @@ export function createDistillWorkspace(
     // deterministic name (`session.jsonl`) so the wrapper script can reference
     // it without globbing.
     //
-    // Target cwd is the PARENT's cwd, not the worktree path. This keeps the
-    // distill subprocess's system prompt `Current working directory:` line
-    // byte-identical to the parent's, which preserves Anthropic-style
-    // prompt-cache hits across the parent→distill boundary. The worktree
-    // is still where vault writes land — routing happens via the napkin
-    // shim installed by the wrapper, not via cwd-based resolution.
+    // Target cwd is the PARENT's cwd, not the worktree path — see the
+    // `parentCwd` parameter docstring above for the full rationale.
     const forkedSm = SessionManager.forkFrom(
       sourceSessionFile,
       parentCwd,

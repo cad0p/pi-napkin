@@ -225,8 +225,11 @@ fi
 #
 # The shim transparently injects `--vault $WORKTREE` into every napkin
 # invocation from the agent's bash tool. The real napkin path is
-# resolved here (via `command -v`) and baked in, so the shim doesn't
-# depend on PATH lookup ordering inside the agent's shell.
+# resolved here (via `command -v`) and baked in as an absolute path —
+# so the shim, once invoked, doesn't depend on PATH lookup. PATH
+# ordering is still required to ensure the agent's shell resolves
+# `napkin` to THIS shim and not the global one: that's what the
+# `export PATH="$SHIM_DIR:$PATH"` further down handles.
 #
 # Lives at `<worktree>/.napkin/distill/bin/napkin` so it's removed when
 # the worktree is removed (no extra cleanup needed). The directory is

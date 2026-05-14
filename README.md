@@ -345,6 +345,22 @@ Auto-distill requires **git** and the **subdir vault layout**. If you see:
 
 Manual `/distill` works without git and works on any vault layout.
 
+### Testing hooks
+
+The distill wrapper (`extensions/distill/scripts/distill-wrapper.sh`) reads several environment variables that exist solely to make integration tests deterministic. Production code never sets them; documenting here so future maintainers know they exist and what they do, and so a future-you grepping for one of these names can land on this section.
+
+| Variable | Purpose |
+|---|---|
+| `NAPKIN_DISTILL_PI_BIN` | Override the `pi` binary path. Tests point this at `/usr/bin/true` (exits 0 quickly) or a stub script so the wrapper completes its lifecycle without contacting a real LLM. |
+| `NAPKIN_DISTILL_MERGE_MOCK` | Forwarded to `napkin-distill-merge` (the LLM driver). Set to `fail` to force every conflict to 3-strike, or `ok-after-N` to succeed after N attempts. Used to exercise the partial-merge salvage path. |
+| `NAPKIN_DISTILL_SKIP_PI=1` | Skip BOTH the napkin shim install AND the `pi` invocation. Used by tests that pre-stage file changes manually and only want to exercise the wrapper's git lifecycle (commit/merge/squash). |
+| `NAPKIN_DISTILL_HALT_AFTER_META=1` | Halt right after rewriting `meta.json`'s pid to the wrapper's pid. Lets tests inspect the updated meta without the cleanup trap wiping the worktree. Clears the `EXIT` trap so cleanup is skipped — caller is responsible for tearing down the worktree afterwards. |
+| `NAPKIN_DISTILL_HALT_AFTER_SHIM=1` | Halt right after the per-distill napkin shim is installed at `<worktree>/.napkin/distill/bin/napkin`. Lets tests inspect the shim contents and PATH injection without the cleanup trap firing. |
+| `NAPKIN_DISTILL_FORCE_MERGE_HEAD=1` | Force `MERGE_HEAD` to exist right before the escape-hatch check. Lets tests cover the belt-and-braces "merge did not complete" bail-out path, which isn't reliably triggerable via real driver output (git clears `MERGE_HEAD` on driver exit 0). |
+| `NAPKIN_DISTILL_FORCE_MERGE_RC=<n>` | Override the captured merge exit code. Lets tests cover the unexpected-exit-code branch (128 etc.) without contriving a real git failure of that shape. |
+
+Production never sets any of these. If you find one in your environment by accident, `unset` it and re-run — the wrapper falls back to its normal behaviour automatically.
+
 ## Future: builder-deleter
 
 Next major feature: a "builder-deleter" janitor that acts on the `supersedes:` frontmatter convention that auto-distill already writes. When a note lists `supersedes: ["old/note.md"]`, the janitor archives the superseded file. Threshold-triggered to avoid running on every distill, git gc as the safety net.

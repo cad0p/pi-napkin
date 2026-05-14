@@ -619,9 +619,12 @@ describe("distill-wrapper.sh (integration)", () => {
     expect(shimStat.mode & 0o111).not.toBe(0);
 
     // Shim must inject `--vault <worktree>` into every napkin call. The
-    // real napkin path is baked in at install-time (resolved via
-    // `command -v napkin` in the wrapper), so the agent's PATH order
-    // doesn't matter — the shim execs the absolute napkin binary.
+    // real napkin path is baked in at install-time as an absolute path
+    // (resolved via `command -v napkin` in the wrapper) — so the shim,
+    // once invoked, execs that absolute napkin binary directly, no
+    // further PATH resolution. The agent's shell still uses PATH
+    // ordering to find THIS shim (the wrapper prepends $SHIM_DIR);
+    // that's what makes the indirection work end-to-end.
     //
     // Note: the shim is generated with `printf %q` so paths are shell-
     // escaped. For clean paths (no spaces / quotes / backticks), %q
