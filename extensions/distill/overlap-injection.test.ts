@@ -1,17 +1,16 @@
 /**
- * Unit tests for the `before_agent_start` overlap-injection helpers.
+ * Unit tests for the overlap-notice pure helpers.
  *
- * The handler itself runs async inside pi's event loop; these tests focus
- * on the pure formatters/computations that drive it so we can verify the
- * output shape without mocking the full `ExtensionAPI`.
+ * Both the per-distill-completion `appendCustomMessageEntry` path
+ * (R7-PERF-2 redesign, current) and the previous per-turn
+ * `before_agent_start` mechanism (R7-PERF-2 — retired) drove these
+ * helpers; they're trigger-agnostic. The session-side file extraction
+ * is covered separately in `session-touched-files.test.ts`. Here we
+ * test the intersection + message formatting.
  *
- * The session-side file extraction is covered separately in
- * `session-touched-files.test.ts`; the distill-side `diffWorktreeSinceStart`
- * is covered in `distill-workspace.test.ts`. Here we test the intersection
- * + message formatting.
- *
- * Handler wiring (env-guarded, vault-resolve, early-returns) is covered
- * indirectly \u2014 it's a thin adapter over these pure helpers.
+ * The new per-completion handler wiring (vault-resolve, git-log
+ * post-squash, session-walk-since-cursor, custom-message append) is
+ * covered in `overlap-completion.integration.test.ts`.
  */
 
 import { describe, expect, test } from "bun:test";
@@ -53,7 +52,7 @@ describe("intersectFiles", () => {
   });
 
   test("basename collision across unrelated dirs: still reported (best-effort)", () => {
-    // Known false-positive shape \u2014 two `README.md`s in different dirs.
+    // Known false-positive shape — two `README.md`s in different dirs.
     // We accept this trade-off; overlap notice is heuristic by design.
     expect(
       intersectFiles(
@@ -85,7 +84,7 @@ describe("intersectFiles", () => {
 });
 
 describe("formatOverlapNotice", () => {
-  test("empty overlap: empty string (0-token \u2018quiet\u2019 case)", () => {
+  test("empty overlap: empty string (0-token 'quiet' case)", () => {
     expect(formatOverlapNotice([])).toBe("");
   });
 
@@ -110,7 +109,7 @@ describe("formatOverlapNotice", () => {
 
   test("notice is compact (single paragraph, ~1 sentence)", () => {
     const notice = formatOverlapNotice(["x.md"]);
-    // Excluding the leading separator, notice should be < 400 chars \u2014
+    // Excluding the leading separator, notice should be < 400 chars —
     // the whole point of systemPrompt injection is to keep the token
     // footprint low on quiet turns.
     expect(notice.trim().length).toBeLessThan(400);

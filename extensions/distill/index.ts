@@ -23,9 +23,8 @@ import {
   cleanupDistillWorkspace,
   cleanupStaleWorktrees,
   DistillError,
-  diffWorktreeSinceStart,
-  getActiveDistills,
   getDistillState,
+  getDistillTouchedFilesPostSquash,
   spawnDistillInWorktree,
 } from "./distill-workspace";
 import { getSessionTouchedFiles } from "./session-touched-files";
@@ -279,6 +278,25 @@ export default function (pi: ExtensionAPI) {
   // Session-scoped suppression of the automatic distill timer.
   // Toggled via `/distill-auto-this-session` — does NOT affect manual `/distill`.
   let autoDistillSuppressed = false;
+  /**
+   * Cursor into the parent session's `getEntries()` array marking the
+   * point of the previous distill's completion. The next per-completion
+   * overlap check (R7-PERF-2) walks entries from this cursor to the
+   * current end and computes which files the parent has touched in that
+   * interval; intersection with the just-completed distill's touched
+   * files (`git log --name-only <startSha>..HEAD` from the main vault)
+   * yields the overlap set.
+   *
+   * Initial value 0 means "start of the session" — the first distill's
+   * completion compares against everything the parent has done so far.
+   * Updated on every successful distill completion (also when overlap is
+   * empty) so subsequent completions only see the new slice.
+   *
+   * Closure-scoped (sync, no race): the per-completion path runs inside
+   * the JS-side poll callback, single-threaded with everything else in
+   * this extension factory.
+   */
+  let lastDistillCompletionMessageCursor = 0;
 
   // Refs captured from session_start so `/distill-auto-this-session` can refresh
   // the status bar immediately without waiting for the next countdown tick.
@@ -599,88 +617,35 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ---------------------------------------------------------------------------
-  // before_agent_start: overlap injection
+  // Overlap notice (R7-PERF-2 redesign): per-distill-completion via
+  // `appendCustomMessageEntry`.
   //
-  // Fires once per user prompt, before the agent loop starts. When the
-  // current session has written to vault files that a live background
-  // distill is also editing, we append a short notice to `systemPrompt`
-  // so the agent knows its recent writes may be clobbered / merged when
-  // the distill completes.
+  // Previous design (per-turn `before_agent_start` hook returning
+  // `{ systemPrompt: event.systemPrompt + notice }`) silently broke
+  // Anthropic-style prompt caching whenever the notice fired: any byte
+  // change in the system block invalidates the entire cached prefix, so
+  // every parent turn during overlap re-encoded the full conversation
+  // history (~$0.50–$1/turn on long sessions). The original commit's
+  // "cache-friendly: notice lives at the END of the system prompt"
+  // rationale was based on an incorrect assumption about the cache
+  // boundary.
   //
-  // Using `systemPrompt` (not `message`) is deliberate:
-  //   - Not persisted — 0 tokens when the next turn has no overlap.
-  //   - Doesn't grow the session file.
-  //   - Cache-friendly: the notice lives at the END of the system prompt,
-  //     so the stable prefix still hits provider caches.
+  // The redesign moves the trigger from per-turn to per-distill-
+  // completion (when files actually change in the parent's view) and
+  // moves the channel from system-prompt mutation to a custom session
+  // message via `appendCustomMessageEntry`. Custom messages persist in
+  // session history and the cache prefix stays byte-identical between
+  // parent and distill subprocess turns.
   //
-  // Session-touched files are extracted by `getSessionTouchedFiles`, a
-  // reimplementation of pi's internal `extractFileOpsFromMessage`
-  //   // Reimplemented from pi's internal extractFileOpsFromMessage
-  //   // Original: @earendil-works/pi-coding-agent ^0.74.0
-  //   // dist/core/compaction/utils.js — extractFileOpsFromMessage / computeFileLists
-  //   // Not exported; sync with pi upstream when tool catalog changes.
-  // Distill-touched files come from `git diff --name-only <startSha>..HEAD`
-  // inside each live distill worktree (falls back to `git status --porcelain`
-  // when startSha is missing from legacy meta.json).
+  // The actual completion check lives in `runDistillWith`'s success
+  // path — see `postOverlapNoticeOnCompletion` below. We track
+  // `lastDistillCompletionMessageCursor` in the closure to bound the
+  // session-touched-files walk to messages added since the last
+  // completion.
   //
-  // All failures collapse to "no overlap detected" — this hook must never
-  // block the agent turn.
-  pi.on("before_agent_start", async (event, ctx) => {
-    // Skip injection inside the distill subprocess itself — it's the one
-    // writing the files, talking to itself about overlaps would be noise.
-    if (process.env.NAPKIN_DISTILL_NO_RECURSE) return;
-
-    let vaultPath: string;
-    try {
-      // Resolve the vault's content root — auto-setup placed `.git` and
-      // worktrees there. `contentPath` is cwd-independent: it points at
-      // the user's actual vault even when pi is launched elsewhere.
-      vaultPath = new Napkin(ctx.cwd).vault.contentPath;
-    } catch {
-      return;
-    }
-
-    let sessionTouched: Set<string>;
-    try {
-      sessionTouched = getSessionTouchedFiles(ctx.sessionManager);
-    } catch {
-      return;
-    }
-    if (sessionTouched.size === 0) return;
-
-    let actives: ActiveDistill[];
-    try {
-      actives = getActiveDistills({ contentPath: vaultPath }).filter(
-        (a) => a.alive,
-      );
-    } catch {
-      return;
-    }
-    if (actives.length === 0) return;
-
-    // Union of all paths the live distills have changed since their
-    // startSha. Each entry is a path relative to the worktree root
-    // (== vault root), e.g. `notes/foo.md`.
-    const distillTouched = new Set<string>();
-    for (const a of actives) {
-      try {
-        for (const f of diffWorktreeSinceStart({
-          worktreePath: a.worktreePath,
-          startSha: a.startSha,
-        })) {
-          distillTouched.add(f);
-        }
-      } catch {
-        // swallow — one worktree failing doesn't stop the others
-      }
-    }
-    if (distillTouched.size === 0) return;
-
-    const overlap = intersectFiles(sessionTouched, distillTouched);
-    if (overlap.length === 0) return;
-
-    return { systemPrompt: event.systemPrompt + formatOverlapNotice(overlap) };
-  });
+  // Pure helpers (`intersectFiles`, `formatOverlapNotice`) and the
+  // session-side file extraction (`getSessionTouchedFiles`) are still
+  // load-bearing and unchanged — the new trigger reuses them.
 
   /**
    * Ctx shape shared by the two run-distill paths. Kept as a `Pick` of
@@ -723,6 +688,14 @@ export default function (pi: ExtensionAPI) {
      * filesystem path whose disappearance marks completion. Returns null
      * to signal a spawn failure (caller paints an error in the status
      * bar).
+     *
+     * `onComplete` is invoked exactly once when the poller detects clean
+     * completion (target gone, no timeout). The strategy uses it to do
+     * post-completion bookkeeping that needs both the strategy-specific
+     * spawn state (e.g. workspace handle) and the run-time `ctx`. It
+     * MUST NOT throw — the caller wraps it in try/catch and swallows
+     * errors so completion bookkeeping never blocks the next distill.
+     * Not invoked on timeout (that uses `cleanup` instead).
      */
     spawnFn: (args: {
       ctx: RunCtx;
@@ -733,8 +706,98 @@ export default function (pi: ExtensionAPI) {
     }) => {
       target: string;
       cleanup: () => void;
+      onComplete?: (ctx: RunCtx) => void;
       spawnErrorMsg?: string;
     } | null;
+  }
+
+  /**
+   * Per-completion overlap-notice helper (R7-PERF-2). Invoked by
+   * `worktreeSpawnFn`'s `onComplete` after the wrapper's squash-merge has
+   * landed and the worktree has been removed.
+   *
+   * Algorithm:
+   *   1. Compute the just-completed distill's touched files via
+   *      `git log --name-only <startSha>..HEAD` from the main vault.
+   *      The squash commit brings every file the distill affected into
+   *      this range. Returns [] if startSha is missing (legacy meta) or
+   *      git fails — silent no-op.
+   *   2. Compute the parent session's touched files since the previous
+   *      distill's completion. Walk `getEntries()` from
+   *      `lastDistillCompletionMessageCursor` to current end and extract
+   *      write-class file ops (reuses `extractFileOpsFromMessage` via a
+   *      slice-bounded `SessionEntriesSource` adapter).
+   *   3. Intersect. If non-empty, post an `appendCustomMessageEntry`
+   *      with `customType: "napkin-distill-overlap"`.
+   *   4. Update `lastDistillCompletionMessageCursor` to the current end
+   *      of the entries array — even when overlap is empty — so the
+   *      next completion only walks new entries.
+   *
+   * Cache parity (R7-PERF-2): the notice lands as a custom session
+   * message in conversation history. Both the parent's next turn and
+   * any future distill subprocess (which forks the parent's session)
+   * see it in identical positions in the messages array — the cached
+   * prefix is preserved unconditionally, unlike the previous per-turn
+   * `appendSystemPrompt` mechanism.
+   *
+   * Failure modes are all silent (best-effort): vault resolution fail,
+   * git fail, missing startSha, missing SessionManager mutation method.
+   * Completion bookkeeping must never block the next distill.
+   */
+  function postOverlapNoticeOnCompletion(
+    ctx: RunCtx,
+    vaultContentPath: string,
+    startSha: string | undefined,
+  ): void {
+    let distillTouched: string[];
+    try {
+      distillTouched = getDistillTouchedFilesPostSquash(
+        vaultContentPath,
+        startSha,
+      );
+    } catch {
+      // Even on error, advance the cursor below so we don't double-count
+      // on the next completion.
+      distillTouched = [];
+    }
+
+    let entries: readonly SessionEntry[];
+    try {
+      entries = ctx.sessionManager.getEntries();
+    } catch {
+      // Couldn't read entries — leave cursor where it is so next
+      // completion retries the same window.
+      return;
+    }
+
+    const { overlap, newCursor } = computeOverlapForCompletion({
+      distillTouchedFiles: distillTouched,
+      sessionEntries: entries,
+      cursor: lastDistillCompletionMessageCursor,
+    });
+    // Always advance the cursor (even on empty overlap) so the next
+    // completion only sees new entries.
+    lastDistillCompletionMessageCursor = newCursor;
+
+    if (overlap.length === 0) return;
+
+    // Post the notice. SessionManager's mutation methods are not on the
+    // public ReadonlySessionManager type that pi exposes via
+    // ExtensionContext, so we cast through Partial<SessionManager> the
+    // same way `napkin-context` does — graceful degradation if pi ever
+    // tightens the readonly contract at runtime.
+    const sm = ctx.sessionManager as Partial<SessionManager>;
+    if (typeof sm.appendCustomMessageEntry === "function") {
+      try {
+        sm.appendCustomMessageEntry(
+          "napkin-distill-overlap",
+          formatOverlapNotice(overlap),
+          true, // display: surface in TUI so the user sees what happened
+        );
+      } catch {
+        // best-effort; cursor was already advanced above
+      }
+    }
   }
 
   /**
@@ -808,7 +871,7 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
-    const { target, cleanup: spawnCleanup } = spawned;
+    const { target, cleanup: spawnCleanup, onComplete } = spawned;
 
     // Record the size we spawned on so a shutdown firing between here and
     // completion dedupes against the in-flight distill.
@@ -867,6 +930,20 @@ export default function (pi: ExtensionAPI) {
 
       lastDistillTimestamp = Date.now();
       lastSessionSize = currentSize;
+
+      // Per-completion overlap notice (R7-PERF-2). Strategy-specific
+      // hook fires after target disappearance + before UI notify so any
+      // session-mutation it does (e.g. appendCustomMessageEntry) lands
+      // before the user-visible "distill complete" message. Wrapped to
+      // never throw — completion bookkeeping must not block subsequent
+      // distills.
+      if (onComplete) {
+        try {
+          onComplete(ctx);
+        } catch {
+          // best-effort — swallow per the strategy contract
+        }
+      }
 
       if (ctx.hasUI && theme) {
         if (showStatus) {
@@ -991,7 +1068,11 @@ export default function (pi: ExtensionAPI) {
     vaultConfigPath: string;
     sessionFile: string;
     config: DistillConfig;
-  }): { target: string; cleanup: () => void } | null {
+  }): {
+    target: string;
+    cleanup: () => void;
+    onComplete?: (ctx: RunCtx) => void;
+  } | null {
     const { ctx: c, vaultContentPath, sessionFile, config } = args;
     try {
       const modelStr = config.model
@@ -1004,6 +1085,11 @@ export default function (pi: ExtensionAPI) {
         prompt: DISTILL_PROMPT,
         model: modelStr,
       });
+      // Capture startSha so the completion handler can diff post-squash
+      // against the main vault's HEAD. The wrapper removes the worktree
+      // (including meta.json) before completion fires, so we have to
+      // capture it here on the JS side.
+      const startSha = result.workspace.startSha;
       return {
         target: result.workspace.worktreePath,
         cleanup: () => {
@@ -1012,6 +1098,9 @@ export default function (pi: ExtensionAPI) {
           } catch {
             // ignore
           }
+        },
+        onComplete: (rctx) => {
+          postOverlapNoticeOnCompletion(rctx, vaultContentPath, startSha);
         },
       };
     } catch (err) {
@@ -1200,7 +1289,8 @@ export default function (pi: ExtensionAPI) {
   // Parallel pi tool: the LLM can query the same state the human gets from
   // /distill-status. Used by agents to decide whether to back off from
   // vault edits while a background distill is in flight (see also the
-  // before_agent_start overlap injection next commit).
+  // per-distill-completion overlap notice posted via
+  // `appendCustomMessageEntry` once the distill finishes).
   pi.registerTool({
     name: "napkin_distill_status",
     label: "Napkin distill status",
@@ -1380,18 +1470,20 @@ export function intersectFiles(
 }
 
 /**
- * Format the one-line notice appended to `systemPrompt` when overlap
- * between session-touched and distill-touched files is non-empty.
+ * Format the overlap notice posted as a custom session message when
+ * the parent session and a just-completed distill have written to the
+ * same file(s).
  *
- * Leading `\n\n` separates it from the preceding system-prompt content
- * so it can't accidentally run into the last word of whatever the tail
- * looks like. The warning glyph (⚠️) is there to catch the agent's
- * attention if it happens to narrate the prompt; agents trained on
- * markdown treat it as a signal.
+ * Leading `\n\n` separates it from any surrounding content so it can't
+ * accidentally run into the last word of whatever the tail looks like.
+ * The warning glyph (⚠️) catches the agent's attention; agents trained
+ * on markdown treat it as a signal.
  *
- * Text is deliberately short (~45 tokens): the point of using
- * `systemPrompt` instead of `message` is to avoid context bloat on
- * repeat turns. A single line naming the overlap is enough.
+ * Text is deliberately short (~45 tokens): the notice is posted via
+ * `appendCustomMessageEntry` (R7-PERF-2 redesign) so it persists in
+ * session history and forks cleanly into distill subprocess sessions.
+ * Cache parity is preserved unconditionally vs the previous per-turn
+ * `appendSystemPrompt` mechanism.
  */
 export function formatOverlapNotice(overlapFiles: string[]): string {
   if (overlapFiles.length === 0) return "";
@@ -1402,4 +1494,54 @@ export function formatOverlapNotice(overlapFiles: string[]): string {
     "merged automatically at distill completion; consider re-reading before " +
     "further edits."
   );
+}
+
+/**
+ * Pure helper for the per-distill-completion overlap-notice mechanism
+ * (R7-PERF-2). Stateless: given the just-completed distill's touched
+ * files, the parent session's entries, and the cursor of the previous
+ * completion, returns the overlap and the new cursor value to advance
+ * to.
+ *
+ * Caller is expected to:
+ *   1. Persist the new cursor (`newCursor`) into closure state, even
+ *      when overlap is empty — otherwise the next completion re-walks
+ *      the same window.
+ *   2. If overlap is non-empty, post it via `appendCustomMessageEntry`
+ *      (or otherwise notify the agent).
+ *
+ * The session walk is bounded to `entries.slice(cursor)` so each
+ * completion only considers messages added since the previous
+ * completion. Cursor 0 means "start of session" — the first completion
+ * compares against everything the parent has done so far.
+ *
+ * Exported for unit tests; production wiring lives in
+ * `postOverlapNoticeOnCompletion` inside the extension factory.
+ */
+export function computeOverlapForCompletion(args: {
+  distillTouchedFiles: readonly string[];
+  sessionEntries: readonly SessionEntry[];
+  cursor: number;
+}): { overlap: string[]; newCursor: number } {
+  const { distillTouchedFiles, sessionEntries, cursor } = args;
+  const newCursor = sessionEntries.length;
+
+  if (distillTouchedFiles.length === 0) {
+    return { overlap: [], newCursor };
+  }
+
+  // Slice-bounded walk: only consider entries added since the previous
+  // completion's cursor. `getSessionTouchedFiles` accepts any
+  // `SessionEntriesSource` (`{ getEntries(): SessionEntry[] }`) so we
+  // adapt the slice on the fly.
+  const slice = sessionEntries.slice(cursor);
+  const sessionTouched = getSessionTouchedFiles({
+    getEntries: () => slice as SessionEntry[],
+  });
+  if (sessionTouched.size === 0) {
+    return { overlap: [], newCursor };
+  }
+
+  const overlap = intersectFiles(sessionTouched, new Set(distillTouchedFiles));
+  return { overlap, newCursor };
 }

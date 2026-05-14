@@ -77,10 +77,14 @@ export interface DistillMeta {
   parentSession: string;
   /**
    * HEAD commit SHA (in the main repo) at the moment the worktree was
-   * created. Used by the `before_agent_start` overlap detector to scope
-   * `git diff` to just the files this distill has written so far:
+   * created. Used by per-distill-completion overlap detection to enumerate
+   * exactly the files the distill affected (post-squash, from the main
+   * vault):
    *
-   *   git -C <worktreePath> diff --name-only <startSha>..HEAD
+   *   git -C <vaultPath> log --name-only <startSha>..HEAD
+   *
+   * Also useful for the live `diffWorktreeSinceStart` helper while the
+   * worktree is still alive (status displays, debugging).
    *
    * Absent on meta.json files written by pre-Phase-C2 code paths — readers
    * MUST tolerate undefined and fall back to scanning the whole worktree.
@@ -101,6 +105,15 @@ export interface DistillWorkspace {
   sessionForkPath: string;
   /** Path to meta.json inside the worktree. */
   metaPath: string;
+  /**
+   * Vault HEAD SHA at workspace-creation time — the distill's fork point.
+   * Used by per-completion overlap detection (R7-PERF-2): once the distill
+   * has squash-merged onto main, `git log --name-only <startSha>..HEAD`
+   * from the main vault enumerates exactly the files the distill
+   * affected. Undefined if HEAD couldn't be resolved at creation time
+   * (e.g. fresh repo with no commits) — callers must tolerate that.
+   */
+  startSha?: string;
 }
 
 /**
@@ -452,10 +465,11 @@ export function createDistillWorkspace(
   const worktreePath = path.join(resolveCacheRoot(vault), branchSuffix);
 
   // Capture HEAD SHA BEFORE the worktree is created so meta.json records
-  // the exact commit the distill started from. Used by the overlap detector
-  // (before_agent_start hook) to diff only files this distill has written.
-  // Failure to resolve HEAD is not fatal — leave `startSha` undefined and
-  // let the overlap detector fall back to scanning the whole worktree.
+  // the exact commit the distill started from. Used by per-completion
+  // overlap detection (R7-PERF-2): after the wrapper squash-merges onto
+  // main, `git log --name-only <startSha>..HEAD` from the main vault
+  // enumerates exactly the files the distill affected.
+  // Failure to resolve HEAD is not fatal — leave `startSha` undefined.
   let startSha: string | undefined;
   {
     const headRes = runGit(vault, ["rev-parse", "HEAD"]);
@@ -512,7 +526,7 @@ export function createDistillWorkspace(
     };
     fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
 
-    return { worktreePath, branchName, sessionForkPath, metaPath };
+    return { worktreePath, branchName, sessionForkPath, metaPath, startSha };
   } catch (err) {
     // Roll back worktree + branch so we never leak on failure. The cleanup is
     // itself best-effort; if it fails, the original error is what the caller
@@ -966,8 +980,9 @@ export interface ActiveDistill {
  *
  * Invokes `git worktree list --porcelain` exactly once and does NOT touch
  * the branch list — so callers that only need the active set (e.g. the
- * `before_agent_start` overlap injector) don't pay for a `git branch`
- * invocation they don't need. (R2-4: restored a pre-CLN-3 fast path.)
+ * `/distill-status` slash command and `napkin_distill_status` agent tool)
+ * don't pay for a `git branch` invocation they don't need.
+ * (R2-4: restored a pre-CLN-3 fast path.)
  */
 export function getActiveDistills(vault: StaleCleanupVault): ActiveDistill[] {
   return toActiveDistills(listDistillWorktrees(vault.contentPath));
@@ -1101,8 +1116,13 @@ function toActiveDistills(
 
 /**
  * Return the list of files an active distill worktree has changed since
- * it forked from the vault's HEAD. Used by the `before_agent_start`
- * overlap detector.
+ * it forked from the vault's HEAD. Used by live diagnostic surfaces
+ * (status, debugging) while the worktree exists.
+ *
+ * For the per-distill-completion overlap notice (R7-PERF-2) the worktree
+ * is already gone by the time we look — use
+ * `getDistillTouchedFilesPostSquash(vault, startSha)` instead, which
+ * runs against the main vault's commit log.
  *
  * Strategy:
  *   - When `startSha` is recorded in meta.json (Phase C2+), diff
@@ -1141,4 +1161,42 @@ export function diffWorktreeSinceStart(
     .split("\n")
     .map((l) => l.slice(3).trim())
     .filter((l) => l.length > 0);
+}
+
+/**
+ * Return the list of files affected by commits in the main vault between
+ * `startSha` (the distill's fork point) and HEAD (post-squash, after the
+ * wrapper's squash-merge has landed). Used by per-completion overlap
+ * detection (R7-PERF-2) to compare against the parent session's writes.
+ *
+ * Unlike `diffWorktreeSinceStart`, this runs against the MAIN vault —
+ * the distill worktree has been removed by the time we're called. The
+ * squash commit on main brings every file the distill affected into
+ * `<startSha>..HEAD`'s name range.
+ *
+ * If `startSha` is missing (legacy distill meta) we cannot reliably
+ * compute the post-squash file set without scanning the now-removed
+ * worktree, so we return `[]`. Overlap detection is best-effort.
+ *
+ * Paths are returned relative to the vault root (matching
+ * `getSessionTouchedFiles` output for the intersection step).
+ */
+export function getDistillTouchedFilesPostSquash(
+  vaultPath: string,
+  startSha: string | undefined,
+): string[] {
+  if (!startSha) return [];
+  const r = runGit(vaultPath, [
+    "log",
+    `${startSha}..HEAD`,
+    "--name-only",
+    "--format=",
+  ]);
+  if (r.status !== 0) return [];
+  const files = new Set<string>();
+  for (const line of r.stdout.split("\n")) {
+    const f = line.trim();
+    if (f.length > 0) files.add(f);
+  }
+  return Array.from(files);
 }

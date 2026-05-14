@@ -1,5 +1,5 @@
 /**
- * File-write detection for the `before_agent_start` overlap injector.
+ * File-write detection for the distill overlap-notice mechanism.
  *
  * Adapted from pi's internal `extractFileOpsFromMessage`:
  *   @earendil-works/pi-coding-agent@0.74.0
@@ -19,11 +19,20 @@
  * // dist/core/compaction/utils.js — extractFileOpsFromMessage / computeFileLists
  * // Not exported; sync with pi upstream when tool catalog changes.
  *
+ * Used by `postOverlapNoticeOnCompletion` in extensions/distill/index.ts
+ * (per-distill-completion trigger, R7-PERF-2 redesign): walks the
+ * parent session's entries since the previous distill's completion to
+ * compute which files the parent has written, then intersects with the
+ * just-completed distill's touched files (`git log --name-only
+ * <startSha>..HEAD` from the main vault).
+ *
  * Responsibility split:
  *   - `extractFileOpsFromMessage`: pure, per-message, returns paths. No
  *     I/O, no state — friendly for unit tests.
- *   - `getSessionTouchedFiles`: walks a SessionManager's entries, unions
- *     the per-message paths, returns a deduped `Set<string>`.
+ *   - `getSessionTouchedFiles`: walks a SessionEntriesSource's entries,
+ *     unions the per-message paths, returns a deduped `Set<string>`.
+ *     Callers can pass a slice-bounded source to scope the walk to a
+ *     subrange of entries.
  */
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
@@ -183,15 +192,15 @@ export interface SessionEntriesSource {
 }
 
 /**
- * Union all file paths touched by assistant messages in the session.
- * Deduped via Set. Returns an empty Set for a session that hasn't mutated
- * any files (including fresh sessions).
+ * Union all file paths touched by assistant messages in the source.
+ * Deduped via Set. Returns an empty Set for a source that hasn't
+ * mutated any files (including fresh sessions / empty slices).
  *
- * We walk `getEntries()` rather than `getBranch()` here because the
- * overlap injector is fired per-turn and only cares about "has this
- * session ever written X?" — abandoned branches still count (a human
- * might resume a fork and the agent should still know about overlap).
- * Change to `getBranch()` if this assumption stops holding.
+ * Walks `getEntries()` rather than `getBranch()`: the per-completion
+ * overlap mechanism (R7-PERF-2) cares about "has the parent written
+ * X since the previous distill completion?" Caller bounds the walk by
+ * passing a slice-of-entries source (e.g.
+ * `{ getEntries: () => allEntries.slice(cursor) }`).
  */
 export function getSessionTouchedFiles(sm: SessionEntriesSource): Set<string> {
   const out = new Set<string>();
