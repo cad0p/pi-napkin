@@ -540,6 +540,29 @@ describe("createDistillWorkspace", () => {
     }
   });
 
+  test("throws DistillError if parentCwd is relative (R7-SC-12)", () => {
+    // POST-R6-CACHE: parentCwd is load-bearing for prompt-cache
+    // parity. A relative path would silently fail at the wrapper's
+    // `cd $PARENT_CWD || exit 1` step (UI-silent, error log only).
+    // Validate up-front so the caller gets a clear DistillError.
+    expect(() =>
+      createDistillWorkspace(vault, sourceSession, "some/relative/path"),
+    ).toThrow(DistillError);
+    expect(() => createDistillWorkspace(vault, sourceSession, "")).toThrow(
+      DistillError,
+    );
+  });
+
+  test("throws DistillError if parentCwd does not exist (R7-SC-12)", () => {
+    expect(() =>
+      createDistillWorkspace(
+        vault,
+        sourceSession,
+        "/tmp/does-not-exist-parent-cwd-test-12345",
+      ),
+    ).toThrow(DistillError);
+  });
+
   test("throws if sourceSessionFile does not exist, cleaning up worktree", () => {
     const before = spawnSync("git", ["-C", vault, "branch"], {
       encoding: "utf-8",

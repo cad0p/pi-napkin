@@ -19,14 +19,16 @@
 #                   `master`). When empty/absent, defaults to `main`. The JS
 #                   side resolves this via `git symbolic-ref refs/remotes/origin/HEAD`
 #                   or a HEAD-ref lookup so the wrapper doesn't hardcode `main`.
-#   <parentCwd>     optional absolute path of the parent pi session's cwd.
-#                   When provided, pi is spawned at this cwd so the system
-#                   prompt's `Current working directory:` line matches the
-#                   parent's, preserving prompt-cache hits. Vault writes are
-#                   still routed to the worktree via the napkin shim
-#                   installed at `<worktree>/.napkin/distill/bin/napkin`.
-#                   When empty/absent, falls back to <worktree> for backward
-#                   compatibility (older callers that haven't been updated).
+#   <parentCwd>     REQUIRED. Absolute path of the parent pi session's cwd.
+#                   Pi is spawned at this cwd so the system prompt's
+#                   `Current working directory:` line is byte-identical
+#                   to the parent's, preserving prompt-cache hits. Vault
+#                   writes are still routed to the worktree via the
+#                   napkin shim installed at
+#                   `<worktree>/.napkin/distill/bin/napkin`. The wrapper
+#                   hard-fails if this is empty (R7-PERF-7, R7-CI-6) —
+#                   silently falling back to <worktree> would re-
+#                   introduce the cache regression POST-R6-CACHE fixed.
 #
 # Lifecycle (happy path):
 #   1. install napkin shim at <worktree>/.napkin/distill/bin/napkin and
@@ -106,11 +108,16 @@ PARENT_CWD="${9:-}"
 if [ -z "$DEFAULT_BRANCH" ]; then
   DEFAULT_BRANCH="main"
 fi
-# Backward-compat: callers predating POST-R6-CACHE don't pass parentCwd.
-# Falling back to WORKTREE preserves the pre-fix behaviour (cache miss but
-# no functional break) for any out-of-tree integrations.
+# parentCwd (arg 9) is required since POST-R6-CACHE: pi spawns at
+# parentCwd to keep the system prompt's `Current working directory:`
+# line byte-identical to the parent's, preserving prompt-cache hits.
+# Falling back silently to $WORKTREE (pre-R7) re-introduces the cache
+# regression with no observable signal — hard-fail instead so any
+# out-of-tree caller surfaces the contract violation immediately.
+# (R7-PERF-7, R7-CI-6.)
 if [ -z "$PARENT_CWD" ]; then
-  PARENT_CWD="$WORKTREE"
+  echo "distill-wrapper: missing required argument 9 (parentCwd) — cache-preserving spawn requires the parent pi session's cwd" >&2
+  exit 2
 fi
 
 if [ -z "$VAULT" ] || [ -z "$WORKTREE" ] || [ -z "$BRANCH" ] || \

@@ -339,6 +339,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "test prompt",
         errorDir,
         "",
+        "main",
+        vault,
       ],
       {
         cwd: workspace.worktreePath,
@@ -449,6 +451,34 @@ describe("distill-wrapper.sh (integration)", () => {
     expect(r.status).toBe(2);
   });
 
+  test("missing parentCwd (arg 9) hard-fails with exit 2 (R7-PERF-7, R7-CI-6)", () => {
+    // R7-PERF-7 / R7-CI-6: previously the wrapper fell back silently to
+    // $WORKTREE if parentCwd was empty, re-introducing the cache
+    // regression POST-R6-CACHE fixed (no observable signal). Now the
+    // wrapper hard-fails so any out-of-tree caller surfaces the
+    // contract violation immediately.
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "bash",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        "/tmp/wt",
+        "distill/abc-1",
+        "/tmp/session.jsonl",
+        "prompt",
+        errorDir,
+        "",
+        "main",
+        // 9th arg deliberately omitted — expect exit 2.
+      ],
+      { encoding: "utf-8" },
+    );
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("missing required argument 9 (parentCwd)");
+  });
+
   test("wrapper rewrites meta.json pid to its own pid (C2)", () => {
     // The parent JS side writes meta.json with `pid: process.pid` (the
     // parent pi session). The wrapper MUST overwrite that with its own
@@ -487,6 +517,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "test prompt",
         errorDir,
         "",
+        "main",
+        vault,
       ],
       {
         cwd: workspace.worktreePath,
@@ -757,6 +789,8 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
         "test prompt",
         errorDir,
         "",
+        "main",
+        vault,
       ],
       {
         cwd: workspace.worktreePath,
@@ -972,6 +1006,8 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
         "test prompt",
         errorDir,
         "",
+        "main",
+        vault,
       ],
       {
         cwd: workspace.worktreePath,
@@ -1042,6 +1078,8 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
         "test prompt",
         errorDir,
         "",
+        "main",
+        vault,
       ],
       {
         cwd: workspace.worktreePath,
@@ -1157,6 +1195,8 @@ describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
         "test prompt",
         errorDir,
         "",
+        "main",
+        vault,
       ],
       {
         cwd: workspace.worktreePath,
@@ -1366,6 +1406,7 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
         errorDir,
         "",
         "master", // 8th arg: default branch
+        vault,
       ],
       {
         cwd: workspace.worktreePath,

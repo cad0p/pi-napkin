@@ -456,6 +456,23 @@ export function createDistillWorkspace(
 ): DistillWorkspace {
   assertVaultIsGitRepo(vault);
 
+  // parentCwd is load-bearing for prompt-cache parity (POST-R6-CACHE):
+  // pi is spawned at parentCwd so the session-fork header and the
+  // resulting system prompt's `Current working directory:` line stay
+  // byte-identical to the parent's. A relative path or a stale path
+  // that doesn't exist would silently degrade to the wrapper's
+  // `cd $PARENT_CWD || exit 1` graceful failure (UI-silent, error log
+  // only). Validate up-front so the caller gets a clear DistillError
+  // instead. (R7-SC-12, R7-CC-7.)
+  if (!path.isAbsolute(parentCwd)) {
+    throw new DistillError(
+      `parentCwd must be an absolute path, got: ${parentCwd}`,
+    );
+  }
+  if (!fs.existsSync(parentCwd)) {
+    throw new DistillError(`parentCwd does not exist: ${parentCwd}`);
+  }
+
   const branchName = generateDistillBranchName();
   const branchSuffix = branchName.slice("distill/".length);
   // Worktree lives OUTSIDE the vault, under the user's XDG cache dir. See
