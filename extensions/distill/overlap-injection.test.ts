@@ -10,7 +10,7 @@
  *
  * The new per-completion handler wiring (vault-resolve, git-log
  * post-squash, session-walk-since-cursor, custom-message append) is
- * covered in `overlap-completion.integration.test.ts`.
+ * covered in `overlap-completion.test.ts`.
  */
 
 import { describe, expect, test } from "bun:test";

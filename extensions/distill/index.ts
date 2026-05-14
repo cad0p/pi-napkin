@@ -99,9 +99,12 @@ interface SessionPauseState {
 }
 
 /**
- * Extension handlers receive a `ReadonlySessionManager`, but the runtime object
- * is a full `SessionManager` with write methods. Napkin-context already relies
- * on this (calls `appendCustomMessageEntry` directly); we do the same.
+ * Extension handlers receive a `ReadonlySessionManager`, but the runtime
+ * object is a full `SessionManager` with write methods. We use the cast
+ * to call `appendCustomEntry` for the `/distill-auto-this-session` pause
+ * state below — napkin-context applies the same pattern for
+ * `appendCustomMessageEntry` (a different SessionManager method, used
+ * for messages that DO participate in LLM context).
  */
 interface WritableSessionShape {
   appendCustomEntry(customType: string, data?: unknown): string;
@@ -1505,11 +1508,21 @@ export function distillStatusToJson(
 
 /**
  * Compute the intersection of session-touched paths and distill-touched
- * paths. Matching is symmetric-suffix: we tolerate both absolute session
- * paths (`/home/user/.napkin/notes/foo.md`) and worktree-relative distill
- * paths (`notes/foo.md`). Basename-only matching would be too permissive
- * (two `README.md`s aren't the same file); suffix matching on either
- * direction handles the common layouts without false positives.
+ * paths. Matching is layered:
+ *   1. Exact equality (the canonical case).
+ *   2. Symmetric suffix — tolerates absolute session paths
+ *      (`/home/user/.napkin/notes/foo.md`) against worktree-relative
+ *      distill paths (`notes/foo.md`) without depending on which side
+ *      is which.
+ *   3. Basename equality — last-resort heuristic for the rare case
+ *      where neither path is a suffix of the other (e.g. an absolute
+ *      session path against a worktree-relative distill path that
+ *      lives under a different subtree). This produces a known
+ *      false-positive shape: two unrelated `README.md`s in different
+ *      subtrees match. Accepted because the overlap notice is
+ *      non-destructive (it surfaces a warning to the agent, doesn't
+ *      modify files); the basename-collision test in
+ *      `overlap-injection.test.ts` documents the trade-off.
  *
  * Exported for unit tests. Output is sorted so the overlap notice is
  * deterministic across runs.
