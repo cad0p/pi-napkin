@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import {
+  buildWorktreeDistillPrompt,
   cleanupDistillWorkspace,
   type DistillWorkspace,
   spawnDistillInWorktree,
@@ -160,9 +161,11 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
 
   test("spawns `bash` with the wrapper script path and expected positional args", () => {
     const { spawnFn, calls } = makeMockSpawn();
+    const parentCwd = sessionDir;
     const result = spawnDistillInWorktree({
       vault,
       sessionFile,
+      parentCwd,
       prompt: "test prompt",
       spawnFn,
     });
@@ -172,13 +175,18 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     const call = calls[0];
     expect(call.command).toBe("bash");
 
-    // Args: [wrapper, vault, worktree, branch, sessionFork, prompt, errorDir, model, defaultBranch]
+    // Args: [wrapper, vault, worktree, branch, sessionFork, prompt, errorDir, model, defaultBranch, parentCwd]
     expect(call.args[0]).toBe(DISTILL_WRAPPER_SCRIPT);
     expect(call.args[1]).toBe(vault);
     expect(call.args[2]).toBe(result.workspace.worktreePath);
     expect(call.args[3]).toBe(result.workspace.branchName);
     expect(call.args[4]).toBe(result.workspace.sessionForkPath);
-    expect(call.args[5]).toBe("test prompt");
+    // Prompt is wrapped with the worktree-isolation prefix; assert the
+    // prefix is present and the base prompt follows. POST-R6-CACHE.
+    expect(call.args[5]).toContain(
+      `isolated git worktree at ${result.workspace.worktreePath}`,
+    );
+    expect(call.args[5].endsWith("test prompt")).toBe(true);
     // errorDir lives under Napkin's configPath — may be either `<vault>/.napkin`
     // (content layout) or `~/.napkin` (legacy). Just assert it ends with
     // `distill/errors`.
@@ -188,13 +196,18 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     // Default branch resolved from the vault — createGitVault() uses
     // `git init -b main` so this should be `main`.
     expect(call.args[8]).toBe("main");
+    // POST-R6-CACHE: parentCwd flows through as positional arg [9] so the
+    // wrapper can `cd` there before running pi (preserves prompt-cache hits).
+    expect(call.args[9]).toBe(parentCwd);
   });
 
   test("sets detached, stdio:ignore, and NAPKIN_DISTILL_NO_RECURSE", () => {
     const { spawnFn, calls } = makeMockSpawn();
+    const parentCwd = sessionDir;
     const result = spawnDistillInWorktree({
       vault,
       sessionFile,
+      parentCwd,
       prompt: "p",
       spawnFn,
     });
@@ -203,7 +216,10 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     const opts = calls[0].options;
     expect(opts.detached).toBe(true);
     expect(opts.stdio).toBe("ignore");
-    expect(opts.cwd).toBe(result.workspace.worktreePath);
+    // POST-R6-CACHE: spawn cwd is parentCwd (NOT the worktree) so pi's
+    // process.cwd() matches the session-fork header's cwd, keeping the
+    // system prompt cwd line byte-identical to the parent's.
+    expect(opts.cwd).toBe(parentCwd);
     expect(opts.env.NAPKIN_DISTILL_NO_RECURSE).toBe("1");
   });
 
@@ -212,6 +228,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     const result = spawnDistillInWorktree({
       vault,
       sessionFile,
+      parentCwd: sessionDir,
       prompt: "p",
       model: "anthropic/claude-sonnet-4-5",
       spawnFn,
@@ -226,6 +243,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     const result = spawnDistillInWorktree({
       vault,
       sessionFile,
+      parentCwd: sessionDir,
       prompt: "p",
       spawnFn,
     });
@@ -241,6 +259,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     const result = spawnDistillInWorktree({
       vault,
       sessionFile,
+      parentCwd: sessionDir,
       prompt: "p",
       spawnFn,
     });
@@ -249,6 +268,30 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     expect(result.workspace.branchName).toMatch(/^distill\/[0-9a-f]{6}-\d+$/);
     expect(result.pid).toBe(12345);
     expect(fs.existsSync(result.workspace.worktreePath)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildWorktreeDistillPrompt — POST-R6-CACHE worktree-isolation prefix.
+// ---------------------------------------------------------------------------
+
+describe("buildWorktreeDistillPrompt (POST-R6-CACHE)", () => {
+  test("prepends a worktree-isolation prefix that names the worktree path", () => {
+    const wt = "/tmp/example-worktree-abc/123";
+    const out = buildWorktreeDistillPrompt(wt, "BASE PROMPT");
+    expect(out).toContain(`isolated git worktree at ${wt}`);
+    expect(out).toContain(
+      "Do NOT use absolute paths from the conversation history",
+    );
+    // Base prompt is preserved verbatim at the end.
+    expect(out.endsWith("BASE PROMPT")).toBe(true);
+  });
+
+  test("prefix is non-trivial in length so the agent can't miss it", () => {
+    const out = buildWorktreeDistillPrompt("/tmp/wt", "x");
+    // Base prompt is 1 char; everything else is the prefix. Length floor
+    // catches accidental degeneration of the prefix to a one-liner.
+    expect(out.length).toBeGreaterThan(200);
   });
 });
 
@@ -325,7 +368,7 @@ describe("distill-wrapper.sh (integration)", () => {
     content: string,
   ): { workspace: DistillWorkspace; stagedFile: string } {
     const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace = createDistillWorkspace(vault, sessionFile);
+    const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
     const stagedFile = path.join(workspace.worktreePath, filename);
     fs.writeFileSync(stagedFile, content);
     return { workspace, stagedFile };
@@ -362,7 +405,7 @@ describe("distill-wrapper.sh (integration)", () => {
 
   test("empty distill (no changes): exits 0 and cleans up without creating a commit", () => {
     const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace = createDistillWorkspace(vault, sessionFile);
+    const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
     const branch = workspace.branchName;
     const logBefore = spawnSync("git", ["-C", vault, "log", "--oneline"], {
       encoding: "utf-8",
@@ -415,6 +458,7 @@ describe("distill-wrapper.sh (integration)", () => {
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
+      sessionDir,
     );
     const metaPath = path.join(
       workspace.worktreePath,
@@ -473,6 +517,80 @@ describe("distill-wrapper.sh (integration)", () => {
 
     // Clean up — HALT_AFTER_META skipped the trap so we must manually
     // tear down the worktree and branch.
+    spawnSync(
+      "git",
+      ["-C", vault, "worktree", "remove", "--force", workspace.worktreePath],
+      { encoding: "utf-8" },
+    );
+    spawnSync("git", ["-C", vault, "branch", "-D", workspace.branchName], {
+      encoding: "utf-8",
+    });
+  });
+
+  test("POST-R6-CACHE: wrapper installs napkin shim and exports it on PATH", () => {
+    // The shim auto-routes the agent's `napkin` calls to the distill
+    // worktree (`napkin --vault <worktree>`) so vault writes from the
+    // bash tool land in the worktree even though pi runs at the parent's
+    // cwd (parent cwd preserves prompt-cache hits). Verify the shim is
+    // installed at the expected path with the right content.
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+
+    const r = spawnSync(
+      "bash",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+        "main",
+        sessionDir, // parentCwd
+      ],
+      {
+        cwd: sessionDir,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_HALT_AFTER_SHIM: "1",
+        },
+      },
+    );
+    expect(r.status).toBe(0);
+
+    const shimPath = path.join(
+      workspace.worktreePath,
+      ".napkin",
+      "distill",
+      "bin",
+      "napkin",
+    );
+    expect(fs.existsSync(shimPath)).toBe(true);
+
+    // Shim must be executable.
+    const shimStat = fs.statSync(shimPath);
+    // 0o111 = any-execute bits.
+    expect(shimStat.mode & 0o111).not.toBe(0);
+
+    // Shim must inject `--vault <worktree>` into every napkin call. The
+    // real napkin path is baked in at install-time (resolved via
+    // `command -v napkin` in the wrapper), so the agent's PATH order
+    // doesn't matter — the shim execs the absolute napkin binary.
+    const shimContent = fs.readFileSync(shimPath, "utf-8");
+    expect(shimContent).toMatch(/^#!\/usr\/bin\/env bash/);
+    expect(shimContent).toContain(`--vault "${workspace.worktreePath}"`);
+    // Real napkin path baked in (we test that it's an absolute path —
+    // could be /usr/local/bin/napkin or pnpm bin shim, but never just
+    // "napkin" which would recurse).
+    expect(shimContent).toMatch(/exec "\/[^"]+" --vault/);
+
+    // Manual teardown: HALT_AFTER_SHIM cleared the trap.
     spawnSync(
       "git",
       ["-C", vault, "worktree", "remove", "--force", workspace.worktreePath],
@@ -615,6 +733,7 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
+      sessionDir,
     );
 
     fs.writeFileSync(
@@ -674,6 +793,7 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
+      sessionDir,
     );
 
     fs.writeFileSync(a, "---\ntitle: a\n---\n# MAIN's later version\n");
@@ -757,6 +877,7 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
+      sessionDir,
     );
     fs.writeFileSync(
       path.join(workspace.worktreePath, "new.md"),
@@ -826,6 +947,7 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
+      sessionDir,
     );
     fs.writeFileSync(
       path.join(workspace.worktreePath, "new.md"),
@@ -1003,6 +1125,7 @@ describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
+      sessionDir,
     );
 
     fs.writeFileSync(
@@ -1052,6 +1175,7 @@ describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
+      sessionDir,
     );
 
     fs.writeFileSync(
@@ -1148,6 +1272,7 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
+      sessionDir,
     );
     const stagedFile = path.join(workspace.worktreePath, "new-note.md");
     fs.writeFileSync(stagedFile, "---\ntitle: new\n---\n# new note\n");

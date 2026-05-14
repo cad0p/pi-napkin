@@ -3,7 +3,7 @@
 # per-distill git worktree.
 #
 # Usage:
-#   distill-wrapper.sh <vault> <worktree> <branch> <sessionFork> <prompt> <errorDir> [<model>] [<defaultBranch>]
+#   distill-wrapper.sh <vault> <worktree> <branch> <sessionFork> <prompt> <errorDir> [<model>] [<defaultBranch>] [<parentCwd>]
 #
 # Arguments:
 #   <vault>         absolute path to the main vault (NOT the worktree)
@@ -19,20 +19,33 @@
 #                   `master`). When empty/absent, defaults to `main`. The JS
 #                   side resolves this via `git symbolic-ref refs/remotes/origin/HEAD`
 #                   or a HEAD-ref lookup so the wrapper doesn't hardcode `main`.
+#   <parentCwd>     optional absolute path of the parent pi session's cwd.
+#                   When provided, pi is spawned at this cwd so the system
+#                   prompt's `Current working directory:` line matches the
+#                   parent's, preserving prompt-cache hits. Vault writes are
+#                   still routed to the worktree via the napkin shim
+#                   installed at `<worktree>/.napkin/distill/bin/napkin`.
+#                   When empty/absent, falls back to <worktree> for backward
+#                   compatibility (older callers that haven't been updated).
 #
 # Lifecycle (happy path):
-#   1. cd <worktree>
-#   2. pi --session <sessionFork> -p <prompt>    (with NAPKIN_DISTILL_NO_RECURSE=1)
-#   3. git add -A
-#   4. git commit -m "distill: …"                (skipped if nothing changed)
-#   5. git_retry git merge main                  (LLM merge driver handles *.md
+#   1. install napkin shim at <worktree>/.napkin/distill/bin/napkin and
+#      prepend it to PATH (auto-routes agent napkin calls to the worktree)
+#   2. cd <parentCwd>                            (cache parity — keeps pi's
+#                                                 system prompt cwd line
+#                                                 byte-identical to parent's)
+#   3. pi --session <sessionFork> -p <prompt>    (with NAPKIN_DISTILL_NO_RECURSE=1)
+#   4. git -C <worktree> add -A
+#   5. git -C <worktree> commit -m "distill: …"  (skipped if nothing changed)
+#   6. git_retry git -C <worktree> merge main    (LLM merge driver handles *.md
 #                                                 conflicts; 3-strike salvage
 #                                                 reverts unresolvable files to
 #                                                 main's version)
-#   6. cd <vault>
-#   7. git_retry git merge --squash <branch>
-#   8. git_retry git commit -m "<msg>"           (skipped if squash produced no change)
-#   9. cleanup (trap): git worktree remove --force, git branch -D
+#   7. cd <vault>
+#   8. git_retry git merge --squash <branch>
+#   9. git_retry git commit -m "<msg>"           (skipped if squash produced no change)
+#  10. cleanup (trap): git worktree remove --force, git branch -D
+#      (also removes the shim, which lives inside the worktree)
 #
 # Error handling:
 #   Any fatal failure writes a log entry to:
@@ -56,6 +69,11 @@
 #                                the wrapper's pid — lets tests inspect the
 #                                updated meta without the cleanup trap
 #                                wiping the worktree.
+#   NAPKIN_DISTILL_HALT_AFTER_SHIM=1
+#                                halt right after the per-distill napkin shim
+#                                is installed at <worktree>/.napkin/distill/bin/napkin
+#                                — lets tests inspect the shim contents and PATH
+#                                injection without the cleanup trap wiping it.
 #   NAPKIN_DISTILL_FORCE_MERGE_HEAD=1
 #                                force MERGE_HEAD to exist right before the
 #                                escape-hatch check — lets tests cover the
@@ -83,9 +101,16 @@ PROMPT="${5:-}"
 ERROR_DIR="${6:-}"
 MODEL="${7:-}"
 DEFAULT_BRANCH="${8:-main}"
+PARENT_CWD="${9:-}"
 # Treat empty string as "use fallback", not "literal empty branch name".
 if [ -z "$DEFAULT_BRANCH" ]; then
   DEFAULT_BRANCH="main"
+fi
+# Backward-compat: callers predating POST-R6-CACHE don't pass parentCwd.
+# Falling back to WORKTREE preserves the pre-fix behaviour (cache miss but
+# no functional break) for any out-of-tree integrations.
+if [ -z "$PARENT_CWD" ]; then
+  PARENT_CWD="$WORKTREE"
 fi
 
 if [ -z "$VAULT" ] || [ -z "$WORKTREE" ] || [ -z "$BRANCH" ] || \
@@ -182,9 +207,71 @@ if [ "${NAPKIN_DISTILL_HALT_AFTER_META:-}" = "1" ]; then
   exit 0
 fi
 
-# --- Step 1: run pi in the worktree to perform the distill. -----------------
+# --- Install per-distill napkin shim that auto-routes to the worktree -------
+#
+# Pi runs at PARENT_CWD (not the worktree) to keep the system prompt's
+# `Current working directory:` line byte-identical to the parent's,
+# preserving prompt-cache hits across the spawn boundary. That means
+# napkin's cwd-based vault walk-up resolves to the *parent's* vault
+# (typically the same one we want, but the writes need to land in the
+# worktree's checkout for the squash-merge step to see them).
+#
+# The shim transparently injects `--vault $WORKTREE` into every napkin
+# invocation from the agent's bash tool. The real napkin path is
+# resolved here (via `command -v`) and baked in, so the shim doesn't
+# depend on PATH lookup ordering inside the agent's shell.
+#
+# Lives at `<worktree>/.napkin/distill/bin/napkin` so it's removed when
+# the worktree is removed (no extra cleanup needed). The directory is
+# already `.gitignore`d via the `.napkin/distill/` exclusion.
+#
+# Platform note: same bash dependency as the rest of this wrapper. The
+# shim itself is a 3-line bash script; works wherever the wrapper does
+# (Linux, macOS, WSL, Git Bash). Doesn't add a new platform constraint.
+#
+# See POST-R6-CACHE in features/pi-napkin-distill/deferred.md for the
+# full design rationale.
+SHIM_DIR="$WORKTREE/.napkin/distill/bin"
+REAL_NAPKIN="$(command -v napkin || true)"
+if [ -z "$REAL_NAPKIN" ]; then
+  log_error "napkin binary not found on wrapper PATH; cache-preserving shim cannot be installed"
+  exit 1
+fi
+mkdir -p "$SHIM_DIR"
+# Generate the shim with the resolved napkin path baked in. Heredoc
+# delimiter is unquoted so $REAL_NAPKIN and $WORKTREE expand at install
+# time; literal `\$@` is escaped so it expands inside the shim at
+# invocation time.
+cat > "$SHIM_DIR/napkin" <<EOF
+#!/usr/bin/env bash
+# Auto-generated distill napkin shim. Routes every napkin command to
+# the distill worktree at $WORKTREE so vault writes from the agent's
+# bash tool land inside the worktree even though pi's cwd is the
+# parent session's cwd (set that way to preserve prompt-cache hits).
+# Removed when the worktree is removed.
+exec "$REAL_NAPKIN" --vault "$WORKTREE" "\$@"
+EOF
+chmod +x "$SHIM_DIR/napkin"
+export PATH="$SHIM_DIR:$PATH"
 
-cd "$WORKTREE" || { log_error "cd worktree failed"; exit 1; }
+# Testing hook: halt right after the shim install so tests can inspect the
+# shim file without the cleanup trap wiping the worktree. Clears the EXIT
+# trap so cleanup is skipped — caller is responsible for tearing down the
+# worktree afterward.
+if [ "${NAPKIN_DISTILL_HALT_AFTER_SHIM:-}" = "1" ]; then
+  trap - EXIT
+  exit 0
+fi
+
+# --- Step 1: run pi at PARENT_CWD (cache parity) -----------------------------
+#
+# pi reads its session-fork header to determine cwd for the system
+# prompt and tools. createDistillWorkspace forked the session with
+# `targetCwd = PARENT_CWD` precisely so this matches. Spawning pi here
+# at PARENT_CWD also makes process.cwd() consistent with the header,
+# which avoids `MissingSessionCwdError` if pi ever validates that.
+
+cd "$PARENT_CWD" || { log_error "cd parent cwd failed: $PARENT_CWD"; exit 1; }
 
 if [ "${NAPKIN_DISTILL_SKIP_PI:-}" != "1" ]; then
   PI_BIN="${NAPKIN_DISTILL_PI_BIN:-pi}"

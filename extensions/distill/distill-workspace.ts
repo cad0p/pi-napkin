@@ -423,6 +423,15 @@ export function removeDistillWorktree(
  *                           the vault-hash so multi-vault setups isolate
  *                           cleanly.
  * @param sourceSessionFile  Absolute path to the parent session .jsonl.
+ * @param parentCwd          Absolute path of the parent pi session's cwd.
+ *                           Pinned into the fork header so the distill
+ *                           subprocess's system prompt `Current working
+ *                           directory:` line matches the parent's,
+ *                           preserving prompt-cache hits across the spawn.
+ *                           Routing of vault writes to the worktree happens
+ *                           via the wrapper's per-distill `napkin` shim,
+ *                           NOT cwd-based vault resolution. See
+ *                           POST-R6-CACHE in features/pi-napkin-distill/deferred.md.
  *
  * @throws DistillError if vault isn't a git repo, worktree creation fails,
  *         or session fork fails.
@@ -430,6 +439,7 @@ export function removeDistillWorktree(
 export function createDistillWorkspace(
   vault: string,
   sourceSessionFile: string,
+  parentCwd: string,
 ): DistillWorkspace {
   assertVaultIsGitRepo(vault);
 
@@ -464,9 +474,16 @@ export function createDistillWorkspace(
     // SessionManager.forkFrom writes to <sessionDir>/<uuid>.jsonl. We want a
     // deterministic name (`session.jsonl`) so the wrapper script can reference
     // it without globbing.
+    //
+    // Target cwd is the PARENT's cwd, not the worktree path. This keeps the
+    // distill subprocess's system prompt `Current working directory:` line
+    // byte-identical to the parent's, which preserves Anthropic-style
+    // prompt-cache hits across the parent→distill boundary. The worktree
+    // is still where vault writes land — routing happens via the napkin
+    // shim installed by the wrapper, not via cwd-based resolution.
     const forkedSm = SessionManager.forkFrom(
       sourceSessionFile,
-      worktreePath,
+      parentCwd,
       distillDir,
     );
     const forkedFile = forkedSm.getSessionFile();
@@ -717,6 +734,31 @@ export interface SpawnDistillResult {
 }
 
 /**
+ * Prefix prepended to the distill prompt only when running through the
+ * worktree spawn path. Tells the agent its writes must stay inside the
+ * per-distill worktree — critical because the agent inherits the parent
+ * session's full message history (which contains absolute paths to the
+ * MAIN vault) and would otherwise route writes there via `edit`/`write`
+ * with absolute paths, silently bypassing worktree isolation.
+ *
+ * The prefix is added inside `spawnDistillInWorktree` (not at call sites)
+ * so every worktree-mode caller gets it automatically. Legacy spawn
+ * (manual /distill on git-less or disabled vaults) does NOT prepend
+ * this — there's no isolation to preserve there.
+ *
+ * Exported for tests; production callers should rely on the implicit
+ * application inside `spawnDistillInWorktree`.
+ *
+ * See POST-R6-CACHE in features/pi-napkin-distill/deferred.md for context.
+ */
+export function buildWorktreeDistillPrompt(
+  worktreePath: string,
+  basePrompt: string,
+): string {
+  return `You are running in an isolated git worktree at ${worktreePath}. Only modify files within the worktree. Do NOT use absolute paths from the conversation history — those refer to the main vault and bypass isolation, causing the distill to silently merge nothing.\n\n${basePrompt}`;
+}
+
+/**
  * Arguments to `spawnDistillInWorktree`. Separated as an interface so callers
  * don't have to remember positional arg order — and so tests can supply the
  * `spawn` override without pulling in the full function signature.
@@ -726,6 +768,13 @@ export interface SpawnDistillOptions {
   vault: string;
   /** Absolute path to the current session .jsonl to fork from. */
   sessionFile: string;
+  /**
+   * Parent pi session's cwd. Pinned into the fork header and used as the
+   * spawn cwd so the distill subprocess's system prompt cwd line matches
+   * the parent's, preserving prompt-cache hits. Vault-write routing to the
+   * worktree is handled by the wrapper's napkin shim, NOT cwd resolution.
+   */
+  parentCwd: string;
   /** Prompt passed to `pi -p`. */
   prompt: string;
   /** Optional model override, `<provider>/<id>`. Undefined → pi's default. */
@@ -792,10 +841,20 @@ export function detectDefaultBranch(vaultPath: string): string {
 export function spawnDistillInWorktree(
   opts: SpawnDistillOptions,
 ): SpawnDistillResult {
-  const { vault, sessionFile, prompt, model } = opts;
+  const { vault, sessionFile, parentCwd, prompt, model } = opts;
   const spawnFn = opts.spawnFn ?? spawn;
 
-  const workspace = createDistillWorkspace(vault, sessionFile);
+  const workspace = createDistillWorkspace(vault, sessionFile, parentCwd);
+
+  // Prepend the worktree-isolation prefix so the agent (which inherits the
+  // parent's full conversation context, including absolute paths to the
+  // MAIN vault) understands its writes must land in the worktree. This is
+  // applied centrally here — every worktree-mode caller benefits without
+  // having to remember to opt in.
+  const finalPrompt = buildWorktreeDistillPrompt(
+    workspace.worktreePath,
+    prompt,
+  );
 
   // Error dir lives on the MAIN vault (not in the worktree — worktrees are
   // removed on cleanup, which would lose the logs). Resolve via Napkin's
@@ -822,22 +881,27 @@ export function spawnDistillInWorktree(
     workspace.worktreePath,
     workspace.branchName,
     workspace.sessionForkPath,
-    prompt,
+    finalPrompt,
     errorDir,
     model ?? "",
     detectDefaultBranch(vault),
+    parentCwd,
   ];
 
   // Detached spawn: stdio "ignore" + unref() so the parent can exit cleanly
-  // while the wrapper continues. cwd is the worktree so if the wrapper itself
-  // crashes before `cd`, any core-dumps etc. land inside the disposable area.
+  // while the wrapper continues. cwd is the PARENT's cwd — not the worktree
+  // — so pi's process.cwd() at startup matches the session-fork header's
+  // cwd, keeping the system prompt's `Current working directory:` line
+  // byte-identical to the parent's. The wrapper handles git ops in the
+  // worktree and installs a napkin shim that auto-routes vault writes to
+  // the worktree.
   //
   // Invoke via `bash` (not `sh`): the wrapper's shebang is `#!/usr/bin/env
   // bash` and it relies on bash-specific syntax (arrays `pi_args=(...)`,
   // `set -o pipefail`). On Ubuntu/Debian, `/bin/sh` is `dash` which
   // parse-errors on bash syntax and exits 2 before the wrapper runs.
   const proc = spawnFn("bash", wrapperArgs, {
-    cwd: workspace.worktreePath,
+    cwd: parentCwd,
     detached: true,
     stdio: "ignore",
     env: {

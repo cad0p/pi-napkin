@@ -579,6 +579,7 @@ export default function (pi: ExtensionAPI) {
             spawnDistillInWorktree({
               vault: vaultInfo.contentPath,
               sessionFile,
+              parentCwd: ctx.cwd,
               prompt: DISTILL_PROMPT,
               model: modelStr,
             });
@@ -999,6 +1000,7 @@ export default function (pi: ExtensionAPI) {
       const result = spawnDistillInWorktree({
         vault: vaultContentPath,
         sessionFile,
+        parentCwd: c.cwd,
         prompt: DISTILL_PROMPT,
         model: modelStr,
       });

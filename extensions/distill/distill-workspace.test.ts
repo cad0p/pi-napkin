@@ -447,7 +447,7 @@ describe("createDistillWorkspace", () => {
   }
 
   test("creates <wt>/.napkin/distill/ with session.jsonl and meta.json", () => {
-    const w = track(createDistillWorkspace(vault, sourceSession));
+    const w = track(createDistillWorkspace(vault, sourceSession, sessionDir));
 
     expect(fs.existsSync(w.worktreePath)).toBe(true);
     expect(fs.existsSync(w.sessionForkPath)).toBe(true);
@@ -465,7 +465,7 @@ describe("createDistillWorkspace", () => {
     // Worktrees must be placed OUTSIDE the vault (see `resolveCacheRoot`
     // docstring) to avoid cloud-sync pollution, plugin re-indexing, and
     // autocommit-cron noise. We pin the expected layout here.
-    const w = track(createDistillWorkspace(vault, sourceSession));
+    const w = track(createDistillWorkspace(vault, sourceSession, sessionDir));
     const expectedPrefix = resolveCacheRoot(vault);
     expect(w.worktreePath.startsWith(expectedPrefix + path.sep)).toBe(true);
     // Belt-and-braces: confirm the worktree is NOT nested inside the vault.
@@ -473,7 +473,7 @@ describe("createDistillWorkspace", () => {
   });
 
   test("meta.json has all DistillMeta fields", () => {
-    const w = track(createDistillWorkspace(vault, sourceSession));
+    const w = track(createDistillWorkspace(vault, sourceSession, sessionDir));
     const meta = JSON.parse(
       fs.readFileSync(w.metaPath, "utf-8"),
     ) as DistillMeta;
@@ -489,13 +489,31 @@ describe("createDistillWorkspace", () => {
   });
 
   test("branch name matches distill/<hex>-<epoch> shape", () => {
-    const w = track(createDistillWorkspace(vault, sourceSession));
+    const w = track(createDistillWorkspace(vault, sourceSession, sessionDir));
     expect(w.branchName).toMatch(/^distill\/[0-9a-f]{6}-\d{10}$/);
   });
 
+  test("POST-R6-CACHE: fork header cwd is parentCwd, not worktreePath", () => {
+    // Cache parity: pi rebuilds the system prompt with `Current working
+    // directory: <header.cwd>`. If the distill's fork header carries the
+    // worktree path, the system prompt diverges from the parent's and
+    // every conversation message gets re-encoded (cache miss for the
+    // entire prefix). Forking with parentCwd keeps prefixes byte-identical
+    // so Anthropic-style prompt caching hits across the parent→distill
+    // boundary.
+    const parentCwd = sessionDir;
+    const w = track(createDistillWorkspace(vault, sourceSession, parentCwd));
+    const firstLine = fs
+      .readFileSync(w.sessionForkPath, "utf-8")
+      .split("\n")[0];
+    const header = JSON.parse(firstLine) as { cwd: string };
+    expect(header.cwd).toBe(parentCwd);
+    expect(header.cwd).not.toBe(w.worktreePath);
+  });
+
   test("two workspaces from the same session are independent", () => {
-    const a = track(createDistillWorkspace(vault, sourceSession));
-    const b = track(createDistillWorkspace(vault, sourceSession));
+    const a = track(createDistillWorkspace(vault, sourceSession, sessionDir));
+    const b = track(createDistillWorkspace(vault, sourceSession, sessionDir));
 
     expect(a.worktreePath).not.toBe(b.worktreePath);
     expect(a.branchName).not.toBe(b.branchName);
@@ -514,9 +532,9 @@ describe("createDistillWorkspace", () => {
   test("throws DistillError if vault is not a git repo", () => {
     const noGit = fs.mkdtempSync(path.join(os.tmpdir(), "no-git-vault-"));
     try {
-      expect(() => createDistillWorkspace(noGit, sourceSession)).toThrow(
-        DistillError,
-      );
+      expect(() =>
+        createDistillWorkspace(noGit, sourceSession, sessionDir),
+      ).toThrow(DistillError);
     } finally {
       fs.rmSync(noGit, { recursive: true, force: true });
     }
@@ -527,7 +545,7 @@ describe("createDistillWorkspace", () => {
       encoding: "utf-8",
     }).stdout;
     expect(() =>
-      createDistillWorkspace(vault, "/tmp/does-not-exist.jsonl"),
+      createDistillWorkspace(vault, "/tmp/does-not-exist.jsonl", sessionDir),
     ).toThrow();
     const after = spawnSync("git", ["-C", vault, "branch"], {
       encoding: "utf-8",
@@ -555,7 +573,7 @@ describe("cleanupDistillWorkspace", () => {
   });
 
   test("removes worktree tree and branch", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     expect(fs.existsSync(w.worktreePath)).toBe(true);
 
     cleanupDistillWorkspace(vault, w);
@@ -568,7 +586,7 @@ describe("cleanupDistillWorkspace", () => {
   });
 
   test("is idempotent (double-cleanup is safe)", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     cleanupDistillWorkspace(vault, w);
     expect(() => cleanupDistillWorkspace(vault, w)).not.toThrow();
   });
@@ -591,7 +609,7 @@ describe("readDistillMeta", () => {
   });
 
   test("returns parsed meta for a real workspace", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     try {
       const meta = readDistillMeta(w.worktreePath);
       expect(meta).not.toBeNull();
@@ -735,7 +753,7 @@ describe("cleanupStaleWorktrees", () => {
   });
 
   test("leaves a live worktree alone (pid = self)", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     // createDistillWorkspace already sets meta.pid to process.pid.
     try {
       const removed = cleanupStaleWorktrees({ contentPath: vault });
@@ -747,7 +765,7 @@ describe("cleanupStaleWorktrees", () => {
   });
 
   test("removes a worktree whose pid is dead", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     // Overwrite meta.json with a dead pid.
     const meta = readDistillMeta(w.worktreePath);
     if (!meta) throw new Error("meta expected");
@@ -764,7 +782,7 @@ describe("cleanupStaleWorktrees", () => {
   });
 
   test("removes a worktree whose meta.json is missing", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     fs.rmSync(w.metaPath);
 
     const removed = cleanupStaleWorktrees({ contentPath: vault });
@@ -773,7 +791,7 @@ describe("cleanupStaleWorktrees", () => {
   });
 
   test("removes a worktree whose meta.json mtime is beyond the stale threshold", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     // Backdate meta.json by ~2 hours.
     const old = (Date.now() - 2 * 60 * 60 * 1000) / 1000;
     fs.utimesSync(w.metaPath, old, old);
@@ -806,15 +824,15 @@ describe("cleanupStaleWorktrees", () => {
 
   test("sweeps mixed state: live, dead-pid, missing-meta, feature-branch", () => {
     // live: untouched meta.pid (self)
-    const live = createDistillWorkspace(vault, sourceSession);
+    const live = createDistillWorkspace(vault, sourceSession, sessionDir);
     // dead-pid
-    const deadPid = createDistillWorkspace(vault, sourceSession);
+    const deadPid = createDistillWorkspace(vault, sourceSession, sessionDir);
     const meta = readDistillMeta(deadPid.worktreePath);
     if (!meta) throw new Error("meta expected");
     meta.pid = findDeadPid();
     fs.writeFileSync(deadPid.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
     // missing-meta
-    const missing = createDistillWorkspace(vault, sourceSession);
+    const missing = createDistillWorkspace(vault, sourceSession, sessionDir);
     fs.rmSync(missing.metaPath);
     // feature-branch (not touched)
     const feat = path.join(vault, "feat-wt");
@@ -874,7 +892,7 @@ describe("createDistillWorkspace records startSha", () => {
     });
     const expectedSha = headRes.stdout.trim();
 
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     try {
       const meta = readDistillMeta(w.worktreePath);
       expect(meta).not.toBeNull();
@@ -924,7 +942,7 @@ describe("getActiveDistills", () => {
   });
 
   test("returns one entry per distill worktree with live pid (self)", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     toCleanup.push(w);
 
     const active = getActiveDistills({ contentPath: vault });
@@ -941,7 +959,7 @@ describe("getActiveDistills", () => {
   });
 
   test("reports alive=false for worktrees whose pid is dead", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     toCleanup.push(w);
 
     // Overwrite meta.pid with a dead pid. Reuse test helper.
@@ -972,9 +990,9 @@ describe("getActiveDistills", () => {
   });
 
   test("mixed state: two distills + one feature branch", () => {
-    const a = createDistillWorkspace(vault, sourceSession);
+    const a = createDistillWorkspace(vault, sourceSession, sessionDir);
     toCleanup.push(a);
-    const b = createDistillWorkspace(vault, sourceSession);
+    const b = createDistillWorkspace(vault, sourceSession, sessionDir);
     toCleanup.push(b);
     const feat = path.join(vault, "feat-wt-2");
     spawnSync(
@@ -994,7 +1012,7 @@ describe("getActiveDistills", () => {
   });
 
   test("tolerates missing meta.json (reports alive=false, pid=-1)", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     toCleanup.push(w);
     fs.rmSync(w.metaPath);
 
@@ -1037,7 +1055,7 @@ describe("getUnmergedDistillBranches", () => {
   });
 
   test("skips branches that are checked out in a worktree", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     try {
       // w.branchName is live (in a worktree) → NOT unmerged.
       expect(getUnmergedDistillBranches({ contentPath: vault })).toEqual([]);
@@ -1073,7 +1091,7 @@ describe("getUnmergedDistillBranches", () => {
   });
 
   test("mixed: one live worktree + one orphan branch → returns only orphan", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     const orphan = "distill/zz-1700000001";
     spawnSync("git", ["-C", vault, "branch", orphan]);
 
@@ -1124,7 +1142,7 @@ describe("getDistillState (consolidated enumeration, CLN-3)", () => {
   });
 
   test("mixed: one live worktree + one orphan branch → active=[live], unmerged=[orphan]", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     const orphan = "distill/zz-1700000002";
     spawnSync("git", ["-C", vault, "branch", orphan]);
 
@@ -1142,7 +1160,7 @@ describe("getDistillState (consolidated enumeration, CLN-3)", () => {
   });
 
   test("agrees with getActiveDistills + getUnmergedDistillBranches on the same state", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     const orphan = "distill/zz-1700000003";
     spawnSync("git", ["-C", vault, "branch", orphan]);
 
@@ -1220,7 +1238,7 @@ describe("R2-4: getActiveDistills skips branch listing", () => {
       : [];
 
   test("getActiveDistills does NOT shell out for `git branch --list`", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     // Drain any setup-phase invocations: only count git calls from
     // getActiveDistills onward.
     fs.writeFileSync(gitLog, "");
@@ -1241,7 +1259,7 @@ describe("R2-4: getActiveDistills skips branch listing", () => {
 
   test("getUnmergedDistillBranches DOES shell out for `git branch --list`", () => {
     // Sanity/contrast: the unmerged path genuinely needs branch listing.
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     fs.writeFileSync(gitLog, "");
 
     try {
@@ -1255,7 +1273,7 @@ describe("R2-4: getActiveDistills skips branch listing", () => {
   });
 
   test("getDistillState DOES shell out for `git branch --list` (composed path)", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     fs.writeFileSync(gitLog, "");
 
     try {
@@ -1286,7 +1304,7 @@ describe("diffWorktreeSinceStart", () => {
   });
 
   test("empty worktree (no changes since startSha) returns []", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     try {
       const meta = readDistillMeta(w.worktreePath);
       expect(
@@ -1301,7 +1319,7 @@ describe("diffWorktreeSinceStart", () => {
   });
 
   test("committed change shows up after startSha", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     try {
       // Write + commit a new file inside the worktree.
       const newFile = path.join(w.worktreePath, "distilled.md");
@@ -1332,7 +1350,7 @@ describe("diffWorktreeSinceStart", () => {
   });
 
   test("legacy meta (no startSha) falls back to status --porcelain", () => {
-    const w = createDistillWorkspace(vault, sourceSession);
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     try {
       // Uncommitted change — status picks it up.
       fs.writeFileSync(path.join(w.worktreePath, "scratch.md"), "# scratch\n");
