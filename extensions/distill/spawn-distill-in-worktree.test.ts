@@ -707,6 +707,74 @@ describe("distill-wrapper.sh (integration)", () => {
     expect(errorContent).toContain("napkin binary not found on wrapper PATH");
     expect(errorContent).toContain("PATH=/usr/bin:/bin");
   });
+
+  test("POST-R6-CACHE: SKIP_PI=1 skips shim install (R7-SC-15)", () => {
+    // R7-SC-15: pin the SKIP_PI=1 contract — the shim install block in
+    // the wrapper is gated on `NAPKIN_DISTILL_SKIP_PI != "1"`. Tests
+    // that stub pi via SKIP_PI=1 depend on the shim NOT existing
+    // afterwards (no napkin invocation to route, and the test
+    // environment may not have napkin on PATH at all). Without this
+    // pin, a future refactor that moves the shim install above the
+    // SKIP_PI gate would silently break those tests' isolation.
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+
+    // HALT_AFTER_SHIM with SKIP_PI=1: the wrapper should reach the
+    // halt point WITHOUT having installed a shim (since the shim
+    // block is skipped under SKIP_PI). The halt clears the cleanup
+    // trap so we can inspect the worktree afterwards.
+    const r = spawnSync(
+      "bash",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+        "main",
+        sessionDir, // parentCwd
+      ],
+      {
+        cwd: sessionDir,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          // PATH=/usr/bin:/bin so even if napkin happened to be on the
+          // dev box's PATH, the SKIP_PI gate is what we're testing.
+          PATH: "/usr/bin:/bin",
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_SKIP_PI: "1",
+          NAPKIN_DISTILL_HALT_AFTER_SHIM: "1",
+        },
+      },
+    );
+    expect(r.status).toBe(0);
+
+    // No shim was installed.
+    const shimPath = path.join(
+      workspace.worktreePath,
+      ".napkin",
+      "distill",
+      "bin",
+      "napkin",
+    );
+    expect(fs.existsSync(shimPath)).toBe(false);
+
+    // Manual teardown.
+    spawnSync(
+      "git",
+      ["-C", vault, "worktree", "remove", "--force", workspace.worktreePath],
+      { encoding: "utf-8" },
+    );
+    spawnSync("git", ["-C", vault, "branch", "-D", workspace.branchName], {
+      encoding: "utf-8",
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------
