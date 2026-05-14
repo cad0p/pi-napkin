@@ -23,8 +23,10 @@ import {
   cleanupDistillWorkspace,
   cleanupStaleWorktrees,
   DistillError,
+  findDistillErrorLogForBranch,
   getDistillState,
   getDistillTouchedFilesPostSquash,
+  resolveDistillErrorDir,
   spawnDistillInWorktree,
 } from "./distill-workspace";
 import { getSessionTouchedFiles } from "./session-touched-files";
@@ -707,6 +709,18 @@ export default function (pi: ExtensionAPI) {
       target: string;
       cleanup: () => void;
       onComplete?: (ctx: RunCtx) => void;
+      /**
+       * Optional probe invoked when `target` disappears. Returns the
+       * path to a wrapper-emitted error log when the spawn failed
+       * silently (i.e. the wrapper exited non-zero before timing out
+       * but after creating its forensic log). Returns null on success.
+       *
+       * The runner uses the result to surface a UI failure on the
+       * worktree path (mirrors the timeout-surfacing pattern). Legacy
+       * spawn doesn't produce error logs in this shape — omit or
+       * return null.
+       */
+      checkFailure?: () => string | null;
       spawnErrorMsg?: string;
     } | null;
   }
@@ -871,7 +885,7 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
-    const { target, cleanup: spawnCleanup, onComplete } = spawned;
+    const { target, cleanup: spawnCleanup, onComplete, checkFailure } = spawned;
 
     // Record the size we spawned on so a shutdown firing between here and
     // completion dedupes against the in-flight distill.
@@ -930,6 +944,37 @@ export default function (pi: ExtensionAPI) {
 
       lastDistillTimestamp = Date.now();
       lastSessionSize = currentSize;
+
+      // Wrapper-failure check (R7-SC-3). Mirrors the timeout-surfacing
+      // pattern: target disappearance is the success condition, but the
+      // wrapper writes a forensic log on any non-success exit (missing
+      // napkin, pi subprocess error, merge-driver 3-strike, etc.). If a
+      // log file matching this distill's branch is present in the
+      // error dir, the run failed even though the worktree is gone.
+      // Surface the failure in the UI so the user can act on it instead
+      // of the run silently disappearing.
+      let failureLogPath: string | null = null;
+      if (checkFailure) {
+        try {
+          failureLogPath = checkFailure();
+        } catch {
+          // best-effort — if the probe throws, treat as success
+          failureLogPath = null;
+        }
+      }
+
+      if (failureLogPath) {
+        if (ctx.hasUI && theme) {
+          if (showStatus) {
+            ctx.ui.setStatus(
+              "napkin-distill",
+              theme.fg("error", "✗") + theme.fg("dim", " distill: failed"),
+            );
+          }
+          ctx.ui.notify(`Distillation failed: see ${failureLogPath}`, "error");
+        }
+        return;
+      }
 
       // Per-completion overlap notice (R7-PERF-2). Strategy-specific
       // hook fires after target disappearance + before UI notify so any
@@ -1072,6 +1117,7 @@ export default function (pi: ExtensionAPI) {
     target: string;
     cleanup: () => void;
     onComplete?: (ctx: RunCtx) => void;
+    checkFailure?: () => string | null;
   } | null {
     const { ctx: c, vaultContentPath, sessionFile, config } = args;
     try {
@@ -1090,6 +1136,11 @@ export default function (pi: ExtensionAPI) {
       // (including meta.json) before completion fires, so we have to
       // capture it here on the JS side.
       const startSha = result.workspace.startSha;
+      // Same for the branch suffix and error dir — needed by the
+      // failure-surfacing probe (R7-SC-3) since the worktree is gone
+      // by the time we look.
+      const branchShort = result.workspace.branchName.replace(/^distill\//, "");
+      const errorDir = resolveDistillErrorDir(vaultContentPath);
       return {
         target: result.workspace.worktreePath,
         cleanup: () => {
@@ -1102,6 +1153,7 @@ export default function (pi: ExtensionAPI) {
         onComplete: (rctx) => {
           postOverlapNoticeOnCompletion(rctx, vaultContentPath, startSha);
         },
+        checkFailure: () => findDistillErrorLogForBranch(errorDir, branchShort),
       };
     } catch (err) {
       const theme = c.hasUI ? c.ui.theme : null;

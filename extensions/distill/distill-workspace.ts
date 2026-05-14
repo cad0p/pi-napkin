@@ -748,6 +748,62 @@ export interface SpawnDistillResult {
 }
 
 /**
+ * Resolve the absolute path to the distill error log directory for a
+ * given vault. Mirrors the logic the wrapper uses internally so the
+ * JS-side completion check can find error logs the wrapper produced.
+ *
+ * Falls back to `<vault>/.napkin/distill/errors/` if napkin's vault
+ * resolution throws (defensive — the upstream caller has typically
+ * already resolved the vault successfully). The returned path may not
+ * exist on disk; callers should check before reading.
+ */
+export function resolveDistillErrorDir(vault: string): string {
+  try {
+    return path.join(new Napkin(vault).vault.configPath, "distill", "errors");
+  } catch {
+    return path.join(vault, ".napkin", "distill", "errors");
+  }
+}
+
+/**
+ * Find the wrapper-emitted error log for a specific distill branch, if
+ * any. The wrapper writes ‘forensic’ logs to
+ * `<errorDir>/<ISO-timestamp>-<pid>-<branch-short>.log` whenever it
+ * fails (missing napkin, pi subprocess error, merge driver 3-strike,
+ * cd parent_cwd failure, …). Returns the absolute path to the first
+ * matching log file, or null when no log exists.
+ *
+ * `branchShort` is the part after `distill/`, e.g. for
+ * `distill/abc1234-1715198400` pass `abc1234-1715198400`.
+ *
+ * Used by `runDistillWith`'s success path to detect wrapper failures
+ * that don't surface as a timeout (e.g. wrapper exited 1 quickly).
+ * Mirrors the timeout-surfacing pattern: target gone + error log
+ * present → paint failure in UI; target gone + no error log → success.
+ */
+export function findDistillErrorLogForBranch(
+  errorDir: string,
+  branchShort: string,
+): string | null {
+  if (!fs.existsSync(errorDir)) return null;
+  if (branchShort.length === 0) return null;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(errorDir);
+  } catch {
+    return null;
+  }
+  const suffix = `-${branchShort}.log`;
+  // Pick the most recent matching file (lexicographic order is
+  // chronologically meaningful because the prefix is an ISO
+  // timestamp). Multiple logs for the same branch shouldn't happen in
+  // practice, but if they do, returning the latest is the right call.
+  const matches = entries.filter((f) => f.endsWith(suffix)).sort();
+  if (matches.length === 0) return null;
+  return path.join(errorDir, matches[matches.length - 1]);
+}
+
+/**
  * Prefix prepended to the distill prompt only when running through the
  * worktree spawn path. Tells the agent its writes must stay inside the
  * per-distill worktree — critical because the agent inherits the parent
@@ -874,19 +930,7 @@ export function spawnDistillInWorktree(
   // removed on cleanup, which would lose the logs). Resolve via Napkin's
   // configPath so legacy (~/.napkin) and new (<content>/.napkin) layouts
   // both work.
-  let errorDir: string;
-  try {
-    errorDir = path.join(
-      new Napkin(vault).vault.configPath,
-      "distill",
-      "errors",
-    );
-  } catch {
-    // Fallback: write under the vault itself. Shouldn't happen since the
-    // vault resolved successfully upstream, but defensive — better than
-    // throwing out of a spawn call.
-    errorDir = path.join(vault, ".napkin", "distill", "errors");
-  }
+  const errorDir = resolveDistillErrorDir(vault);
   fs.mkdirSync(errorDir, { recursive: true });
 
   const wrapperArgs = [
