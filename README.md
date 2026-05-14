@@ -267,7 +267,7 @@ Successful distill lifecycles produce exactly one squash commit on `main`, with 
 
 ## Agent visibility
 
-When the main agent has been writing to vault files that a background distill is also editing, pi-napkin injects a one-line notice into the next turn's system prompt:
+When a background distill completes a squash-merge that touches files you've also written this session, pi-napkin posts a one-line notice into the conversation as a custom session message so the agent knows its recent writes may have been merged or overwritten:
 
 ```
 ⚠️ Background napkin distill is editing files you've also touched: notes/foo.md.
@@ -276,9 +276,11 @@ completion; consider re-reading before further edits.
 ```
 
 Key properties:
-- Injected via `before_agent_start`'s `systemPrompt` return, NOT `message` — so it's per-turn and ephemeral.
-- Zero tokens when there's no overlap. The handler runs, finds no intersection, and returns nothing.
-- Not persisted to the session file — subsequent turns only see the notice if the overlap still exists.
+- **Trigger**: per distill completion (when the wrapper's squash-merge has landed and the worktree is gone), not per agent turn. Files actually changing in the parent's view is the right moment to surface the overlap.
+- **Channel**: posted via `appendCustomMessageEntry` with `customType: "napkin-distill-overlap"`. Lives in session history (so distill subprocesses inherit it cleanly via session-fork) and is displayed in the TUI so you see it too.
+- **Cache parity**: custom messages land at the END of the message array, so Anthropic-style prompt caching's prefix stays byte-identical. The notice itself becomes a one-time cache write rather than the recurring cache-bust the previous per-turn `appendSystemPrompt` mechanism produced.
+- **Frequency**: bounded by the per-distill-completion trigger — typically ~5–12 messages/day for an active session, only when actual file overlap exists.
+- **Cursor**: each completion only considers entries added since the previous completion. On a fresh session this starts at 0; on a resumed session it starts at the pre-resume entry count, so resume doesn't surface stale notices for files written in earlier pi processes.
 
 The session-touched-files detector reimplements pi's internal `extractFileOpsFromMessage` (not exported from pi) and tracks `write`, `edit`, and bash-redirection-style writes. A companion version-check test (`session-touched-files.version-check.test.ts`) pins pi's upstream utility so we get an explicit test failure if pi renames / removes it.
 
