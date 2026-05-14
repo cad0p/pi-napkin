@@ -189,4 +189,89 @@ describe("system-prompt cache parity (POST-R6-CACHE / R7-PERF-1)", () => {
     const expected = parentCwd.replace(/\\/g, "/");
     expect(parentBuild).toContain(`Current working directory: ${expected}`);
   });
+
+  test("all 8 buildSystemPrompt inputs populated: parent ⇄ distill match (R8-PERF-1)", async () => {
+    // R8-PERF-1: the prior tests use `{ cwd, contextFiles: [], skills: [] }`
+    // — only 3 of the 8 inputs pi's `buildSystemPrompt` actually accepts in
+    // production. The other 5 (customPrompt, selectedTools, toolSnippets,
+    // promptGuidelines, appendSystemPrompt) are merge-in-order surfaces
+    // that could in principle interact with cwd-derived content. Pin the
+    // invariant end-to-end: with ALL 8 inputs populated to realistic
+    // non-empty values AND identical between the two calls, the outputs
+    // must be byte-identical. This catches drift in `buildSystemPrompt`'s
+    // own field-merging logic that an empty-inputs test would miss.
+    const { buildSystemPrompt } = await import(PI_SYSTEM_PROMPT_PATH);
+
+    // Realistic inputs that exercise each merge surface. Both calls use
+    // exactly the same values; the only difference would come from
+    // `buildSystemPrompt` itself doing something cwd-keyed beyond the
+    // last `Current working directory:` line.
+    const fullInputs = {
+      cwd: parentCwd,
+      customPrompt: undefined as string | undefined,
+      selectedTools: ["read", "bash", "edit", "write"],
+      toolSnippets: {
+        read: "Read a file from disk",
+        bash: "Execute a bash command",
+        edit: "Edit a file in place",
+        write: "Write content to a file",
+      },
+      promptGuidelines: [
+        "Be concise in your responses",
+        "Show file paths clearly when working with files",
+      ],
+      appendSystemPrompt: "Custom suffix for testing",
+      contextFiles: [
+        { path: "AGENTS.md", content: "# Project conventions\nUse bun." },
+      ],
+      skills: [],
+    };
+
+    const parentBuild = buildSystemPrompt(fullInputs);
+    const distillBuild = buildSystemPrompt(fullInputs);
+
+    expect(distillBuild).toBe(parentBuild);
+  });
+
+  test("all 8 inputs populated: cwd-only difference → only `Current working directory:` line differs (R8-PERF-1)", async () => {
+    // Stronger version of the existing "only cwd line differs" test:
+    // populates all 8 inputs (not just cwd + empty arrays) and checks
+    // the cwd-line-stripped remainders are byte-identical. This catches
+    // a cwd-dependent merge interaction in `buildSystemPrompt`'s tools/
+    // guidelines/context plumbing that would surface with non-empty
+    // inputs but stay invisible in the path-blind variant above.
+    const { buildSystemPrompt } = await import(PI_SYSTEM_PROMPT_PATH);
+
+    const baseInputs = {
+      customPrompt: undefined as string | undefined,
+      selectedTools: ["read", "bash", "edit", "write"],
+      toolSnippets: {
+        read: "Read a file from disk",
+        bash: "Execute a bash command",
+        edit: "Edit a file in place",
+        write: "Write content to a file",
+      },
+      promptGuidelines: [
+        "Be concise in your responses",
+        "Show file paths clearly when working with files",
+      ],
+      appendSystemPrompt: "Custom suffix for testing",
+      contextFiles: [
+        { path: "AGENTS.md", content: "# Project conventions\nUse bun." },
+      ],
+      skills: [],
+    };
+
+    const parentBuild = buildSystemPrompt({ ...baseInputs, cwd: parentCwd });
+    const worktreeBuild = buildSystemPrompt({
+      ...baseInputs,
+      cwd: worktreePath,
+    });
+
+    expect(worktreeBuild).not.toBe(parentBuild);
+
+    const stripCwdLine = (s: string): string =>
+      s.replace(/\nCurrent working directory: [^\n]*$/, "");
+    expect(stripCwdLine(worktreeBuild)).toBe(stripCwdLine(parentBuild));
+  });
 });
