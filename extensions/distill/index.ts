@@ -741,7 +741,6 @@ export default function (pi: ExtensionAPI) {
        * return null.
        */
       checkFailure?: () => string | null;
-      spawnErrorMsg?: string;
     } | null;
   }
 
