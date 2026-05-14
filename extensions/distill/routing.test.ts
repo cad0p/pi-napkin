@@ -254,9 +254,16 @@ function createSeededSession(dir: string): SessionManager {
 // the routing tests pass on a CI runner that has napkin globally
 // installed even when the wrapper is broken; with this, a wrapper-side
 // failure surfaces in the test output via `assertNoWrapperFailures`.
+//
+// Default timeout 30s (R8-CC-4): the wrapper's `napkin --version` smoke
+// test alone is ~155ms, plus shim install + git ops + cleanup. 30s
+// covers most pathological CI conditions (loaded GitHub Actions free
+// tier, slow filesystems) while still catching genuine hangs. The
+// production timeout (`getMaxDistillDurationMs`) defaults to 10
+// minutes, so 30s is comfortably below.
 async function waitForWrapperDone(
   worktreePath: string,
-  timeoutMs = 8000,
+  timeoutMs = 30_000,
 ): Promise<void> {
   const start = Date.now();
   while (fs.existsSync(worktreePath)) {

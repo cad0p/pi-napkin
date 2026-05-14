@@ -6,6 +6,7 @@
  * heavy deps probably belongs in its own file.
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 
 /**
@@ -27,20 +28,27 @@ import * as path from "node:path";
  *   - Capture happens at call time (NOT module load), so each test's
  *     beforeEach gets a fresh snapshot. Avoids the brittle
  *     module-load-const pattern that R7-SC-6 / R7-CC-2 flagged.
- *   - The previous duplicated pattern across `shutdown-handler.test.ts`
- *     used per-describe `let` saves with comments about \"TDZ /
- *     shadowing pitfalls\" — that hazard doesn't actually exist for
- *     sibling describe blocks (they're separate scopes). The shared
- *     helper makes the discipline uniform without that confusion.
+ *   - Throws if `node_modules/.bin/` doesn't exist (R8-CI-1, R8-SC-10).
+ *     The previous silent-no-op behaviour caused wrapper-spawning
+ *     tests to fail with the wrapper's `napkin not found on PATH`
+ *     diagnostic when a developer ran `bun test` before `bun install`,
+ *     pointing at the wrapper instead of at the missing setup step.
+ *     Failing here surfaces the actual problem at the helper.
  *
  * Repo-root resolution: the helper is in `extensions/distill/` so
  * `../../node_modules/.bin/` is the repo's. Relative to `__dirname`
- * (the test file's, since this is a require/import dependency \u2014 same
+ * (the test file's, since this is a require/import dependency — same
  * dir) the same path applies for both this file and any test file in
  * the same directory.
  */
 export function withNapkinOnPath(): { restore: () => void } {
   const localBin = path.resolve(__dirname, "..", "..", "node_modules", ".bin");
+  if (!fs.existsSync(localBin)) {
+    throw new Error(
+      `withNapkinOnPath: ${localBin} does not exist. Run \`bun install\` ` +
+        `before \`bun test\` so the wrapper-spawning tests can resolve \`napkin\`.`,
+    );
+  }
   const saved = process.env.PATH;
   process.env.PATH = `${localBin}${path.delimiter}${process.env.PATH ?? ""}`;
   return {
