@@ -272,7 +272,12 @@ async function waitForWrapperDone(
 function assertNoWrapperFailures(vault: string): void {
   const errorDir = resolveDistillErrorDir(vault);
   if (!fs.existsSync(errorDir)) return;
-  const entries = fs.readdirSync(errorDir);
+  // R8-CC-1: only `.log` files indicate fatal failures. `.partial-merge.log`
+  // files are forensic info from a successful salvage path and don't
+  // count as wrapper failures. Filter accordingly.
+  const entries = fs
+    .readdirSync(errorDir)
+    .filter((f) => f.endsWith(".log") && !f.endsWith(".partial-merge.log"));
   if (entries.length === 0) return;
   // Failed: surface the log content for diagnosis.
   const samples = entries

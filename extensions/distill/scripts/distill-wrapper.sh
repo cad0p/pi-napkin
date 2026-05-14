@@ -130,7 +130,21 @@ fi
 # (already unique per invocation — hex nonce + epoch).
 BRANCH_SHORT="${BRANCH#distill/}"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# Two distinct log files per branch:
+#   *.log              — fatal-error log. Presence of this file is the
+#                       JS-side signal that the wrapper failed (R7-SC-3 +
+#                       R8-CC-1). Lazily created on first `log_error` call.
+#   *.partial-merge.log — forensic log for partial-merge salvage on the
+#                       SUCCESS path: each file the LLM driver 3-strike'd
+#                       and we reverted to the default branch. Presence of
+#                       this file is informational — the wrapper still
+#                       exits 0 and the squash commit lands on main.
+#                       JS-side `findDistillErrorLogForBranch` filters by
+#                       suffix `-<branchShort>.log` (NOT
+#                       `-<branchShort>.partial-merge.log`), so a salvage
+#                       success doesn't surface as a failure.
 ERROR_LOG="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.log"
+PARTIAL_MERGE_LOG="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.partial-merge.log"
 
 # Lazy-create error log on first write. Empty file is the "no error" signal.
 ERROR_LOG_TOUCHED=0
@@ -149,6 +163,35 @@ log_error() {
     ERROR_LOG_TOUCHED=1
   fi
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> "$ERROR_LOG"
+}
+
+# Lazy-create partial-merge log on first write. Forensic-only — distinct
+# filename so the JS-side failure check ignores it. Used by the salvage
+# path on the success branch (each file the LLM driver 3-strike'd is
+# logged here, NOT to the fatal log; the wrapper proceeds to commit and
+# exits 0).
+PARTIAL_MERGE_LOG_TOUCHED=0
+log_partial_merge() {
+  if [ "$PARTIAL_MERGE_LOG_TOUCHED" -eq 0 ]; then
+    mkdir -p "$ERROR_DIR"
+    {
+      echo "# napkin distill partial-merge salvage log"
+      echo "branch: $BRANCH"
+      echo "vault: $VAULT"
+      echo "worktree: $WORKTREE"
+      echo "started: $TIMESTAMP"
+      echo "pid: $$"
+      echo ""
+      echo "# This log records files the LLM merge driver 3-strike'd and"
+      echo "# the wrapper reverted to the default branch's version. The"
+      echo "# distill itself succeeded (other files merged cleanly and the"
+      echo "# squash commit landed on main); see the corresponding"
+      echo "# .log file (if any) for fatal errors."
+      echo
+    } >> "$PARTIAL_MERGE_LOG"
+    PARTIAL_MERGE_LOG_TOUCHED=1
+  fi
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> "$PARTIAL_MERGE_LOG"
 }
 
 # Capture the dangling commit SHA for forensic recovery (git gc grace period
@@ -411,14 +454,17 @@ esac
 
 # Partial-merge salvage: any file still marked unmerged (driver gave up) gets
 # reverted to main's version. This preserves the clean distill content while
-# discarding files we couldn't resolve. Each discarded file is logged.
+# discarding files we couldn't resolve. Each discarded file is logged to the
+# partial-merge log (forensic-only — distinct from the fatal-error log so
+# the JS-side runner doesn't surface a salvage success as a UI failure;
+# R8-CC-1).
 UNMERGED="$(git -C "$WORKTREE" diff --name-only --diff-filter=U 2>/dev/null || true)"
 if [ -n "$UNMERGED" ]; then
   while IFS= read -r f; do
     [ -z "$f" ] && continue
-    log_error "partial-merge: reverted '$f' to $DEFAULT_BRANCH's version (LLM driver 3-strike)"
+    log_partial_merge "reverted '$f' to $DEFAULT_BRANCH's version (LLM driver 3-strike)"
     git -C "$WORKTREE" checkout "$DEFAULT_BRANCH" -- "$f" > /dev/null 2>&1 || \
-      log_error "  failed to checkout $DEFAULT_BRANCH:$f"
+      log_partial_merge "  failed to checkout $DEFAULT_BRANCH:$f"
     git -C "$WORKTREE" add -- "$f" > /dev/null 2>&1 || true
   done <<< "$UNMERGED"
   # Complete the merge commit with whatever's now staged. --no-edit reuses
