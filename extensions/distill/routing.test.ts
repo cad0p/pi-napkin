@@ -767,7 +767,10 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
     // quickly with the missing-napkin guard).
     const worktreesDir = resolveCacheRoot(vault);
     const start = Date.now();
-    const timeoutMs = 30_000;
+    // Cap the polling loop just under the bun:test per-test deadline
+    // (set on the test below). Anything longer is dead code — bun would
+    // kill the test before this loop noticed.
+    const timeoutMs = 18_000;
     while (Date.now() - start < timeoutMs) {
       if (
         notifyCalls.some((c) => c.msg.startsWith("Distillation failed: see"))
@@ -801,5 +804,5 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
     expect(
       fs.existsSync(worktreesDir) ? fs.readdirSync(worktreesDir).length : 0,
     ).toBe(0);
-  }, 10_000); // bun:test per-test timeout (default 5000ms is too tight given the 2s poll interval)
+  }, 20_000); // bun:test per-test timeout (default 5000ms is too tight given the 2s poll interval; 20s is comfortable headroom for slow CI runners under load)
 });

@@ -35,11 +35,9 @@ import * as path from "node:path";
  *     pointing at the wrapper instead of at the missing setup step.
  *     Failing here surfaces the actual problem at the helper.
  *
- * Repo-root resolution: the helper is in `extensions/distill/` so
- * `../../node_modules/.bin/` is the repo's. Relative to `__dirname`
- * (the test file's, since this is a require/import dependency — same
- * dir) the same path applies for both this file and any test file in
- * the same directory.
+ * Repo-root resolution: `__dirname` resolves to this helper's directory
+ * (`extensions/distill/`), so `../../node_modules/.bin/` is the repo's
+ * regardless of which test file imports the helper.
  */
 export function withNapkinOnPath(): { restore: () => void } {
   const localBin = path.resolve(__dirname, "..", "..", "node_modules", ".bin");
