@@ -29,6 +29,7 @@
   "files": [
     "extensions/**/*.ts",
     "!extensions/**/*.test.ts",
+    "!extensions/**/_test-helpers.ts",
     "extensions/**/scripts/**",
     "extensions/**/README.md",
     "skills",
