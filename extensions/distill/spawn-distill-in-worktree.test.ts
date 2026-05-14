@@ -590,13 +590,22 @@ describe("distill-wrapper.sh (integration)", () => {
     // real napkin path is baked in at install-time (resolved via
     // `command -v napkin` in the wrapper), so the agent's PATH order
     // doesn't matter — the shim execs the absolute napkin binary.
+    //
+    // Note: the shim is generated with `printf %q` so paths are shell-
+    // escaped. For clean paths (no spaces / quotes / backticks), %q
+    // emits the path bare; only paths with shell-special characters get
+    // surrounding quotes or backslash escapes. Both the worktree path
+    // (XDG cache + hex hash + hex/epoch suffix) and the resolved napkin
+    // path are normally clean, so we expect the bare-path form.
     const shimContent = fs.readFileSync(shimPath, "utf-8");
     expect(shimContent).toMatch(/^#!\/usr\/bin\/env bash/);
-    expect(shimContent).toContain(`--vault "${workspace.worktreePath}"`);
+    expect(shimContent).toContain(`--vault ${workspace.worktreePath}`);
     // Real napkin path baked in (we test that it's an absolute path —
     // could be /usr/local/bin/napkin or pnpm bin shim, but never just
-    // "napkin" which would recurse).
-    expect(shimContent).toMatch(/exec "\/[^"]+" --vault/);
+    // "napkin" which would recurse). %q quoting may add an outer pair
+    // of single quotes if the path contains shell-special chars; the
+    // common (clean) case is bare path. Match either.
+    expect(shimContent).toMatch(/exec '?\/[^ '"]+'? --vault /);
 
     // Manual teardown: HALT_AFTER_SHIM cleared the trap.
     spawnSync(
@@ -607,6 +616,64 @@ describe("distill-wrapper.sh (integration)", () => {
     spawnSync("git", ["-C", vault, "branch", "-D", workspace.branchName], {
       encoding: "utf-8",
     });
+  });
+
+  test("POST-R6-CACHE: missing napkin on PATH — wrapper fails loud, cleans up, error log records PATH (R7-CC-5, R7-SC-10)", () => {
+    // R7-CC-5 / R7-SC-3: when napkin is unresolvable on the wrapper's
+    // PATH and SKIP_PI is unset (production code path), the wrapper
+    // exits 1, the cleanup trap removes the worktree, and the error
+    // log records the diagnostic + the PATH the wrapper saw (R7-SC-10
+    // — forensic info for the user to fix their environment).
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+
+    // Strip PATH to a system minimum that doesn't contain napkin.
+    const r = spawnSync(
+      "bash",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+        "main",
+        sessionDir,
+      ],
+      {
+        cwd: sessionDir,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          PATH: "/usr/bin:/bin",
+          GIT_AUTHOR_NAME: "test",
+          GIT_AUTHOR_EMAIL: "test@example.com",
+          GIT_COMMITTER_NAME: "test",
+          GIT_COMMITTER_EMAIL: "test@example.com",
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          // SKIP_PI deliberately unset so we exercise the production path.
+        },
+      },
+    );
+    expect(r.status).toBe(1);
+
+    // Cleanup trap fires — worktree is gone.
+    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
+
+    // Error log records the failure with the resolved-path diagnostic
+    // and the wrapper's PATH for forensic recovery.
+    const errors = fs.readdirSync(errorDir);
+    expect(errors.length).toBeGreaterThan(0);
+    const errorContent = fs.readFileSync(
+      path.join(errorDir, errors[0]),
+      "utf-8",
+    );
+    expect(errorContent).toContain("napkin binary not found on wrapper PATH");
+    expect(errorContent).toContain("PATH=/usr/bin:/bin");
   });
 });
 

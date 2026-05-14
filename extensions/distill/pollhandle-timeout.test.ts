@@ -182,6 +182,17 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
     process.env.GIT_AUTHOR_EMAIL = "ci@napkin.test";
     process.env.GIT_COMMITTER_NAME = "Napkin CI";
     process.env.GIT_COMMITTER_EMAIL = "ci@napkin.test";
+    // Make the spawned wrapper halt right after the meta.json pid
+    // rewrite (clears the EXIT trap, exits 0). This keeps the worktree
+    // directory on disk — exactly what the timeout branch needs to
+    // exercise: the JS-side `pollInterval` sees `target` (the worktree)
+    // still present until the timeout fires, then `spawnCleanup`
+    // removes it. Without HALT_AFTER_META the real wrapper would race
+    // with the test's clock (e.g. the POST-R6-CACHE `napkin --version`
+    // smoke test alone is ~155ms vs the test's 100ms timeout window),
+    // leading to a half-cleaned worktree the next auto-tick can't
+    // overwrite cleanly.
+    process.env.NAPKIN_DISTILL_HALT_AFTER_META = "1";
 
     capturedIntervals = [];
     originalSetInterval = globalThis.setInterval;
@@ -202,6 +213,7 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
     if (_savedRecurse !== undefined)
       process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    delete process.env.NAPKIN_DISTILL_HALT_AFTER_META;
     for (const [key, val] of [
       ["GIT_AUTHOR_NAME", _savedGitEnv.authorName],
       ["GIT_AUTHOR_EMAIL", _savedGitEnv.authorEmail],

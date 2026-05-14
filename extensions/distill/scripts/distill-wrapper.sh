@@ -240,24 +240,63 @@ if [ "${NAPKIN_DISTILL_SKIP_PI:-}" != "1" ]; then
   SHIM_DIR="$WORKTREE/.napkin/distill/bin"
   REAL_NAPKIN="$(command -v napkin || true)"
   if [ -z "$REAL_NAPKIN" ]; then
+    # Include $PATH in the error log so the user can diagnose missing
+    # PATH entries (e.g. cron / systemd / launchd-launched pi with a
+    # stripped PATH) without further trial. The error log is vault-local
+    # and never leaves the user's machine.
     log_error "napkin binary not found on wrapper PATH; cache-preserving shim cannot be installed"
+    log_error "  PATH=$PATH"
     exit 1
   fi
-  mkdir -p "$SHIM_DIR"
-  # Generate the shim with the resolved napkin path baked in. Heredoc
-  # delimiter is unquoted so $REAL_NAPKIN and $WORKTREE expand at install
-  # time; literal `\$@` is escaped so it expands inside the shim at
-  # invocation time.
-  cat > "$SHIM_DIR/napkin" <<EOF
-#!/usr/bin/env bash
-# Auto-generated distill napkin shim. Routes every napkin command to
-# the distill worktree at $WORKTREE so vault writes from the agent's
-# bash tool land inside the worktree even though pi's cwd is the
-# parent session's cwd (set that way to preserve prompt-cache hits).
-# Removed when the worktree is removed.
-exec "$REAL_NAPKIN" --vault "$WORKTREE" "\$@"
-EOF
-  chmod +x "$SHIM_DIR/napkin"
+  # Refuse to install on top of another distill shim (recursion footgun:
+  # an inherited PATH from an aborted run could leave a stale shim ahead
+  # of the real napkin, and the new shim would exec the OLD shim, which
+  # exec's the real napkin with a stale --vault — multi-hop indirection
+  # at every napkin call). The pattern matches our own shim path layout.
+  case "$REAL_NAPKIN" in
+    */.napkin/distill/bin/napkin)
+      log_error "refusing to install shim — \`command -v napkin\` resolved to another distill shim ($REAL_NAPKIN); check PATH for a stale .napkin/distill/bin/ entry"
+      log_error "  PATH=$PATH"
+      exit 1
+      ;;
+  esac
+  # Smoke-test that the resolved napkin actually executes. `command -v`
+  # only verifies PATH resolution; bun installs napkin as a symlink to
+  # `dist/main.js` with `#!/usr/bin/env node` shebang, which fails at
+  # exec time if `node` isn't on PATH. Catching that here surfaces a
+  # clean diagnostic instead of cryptic "node: not found" on every
+  # agent napkin call.
+  if ! "$REAL_NAPKIN" --version >/dev/null 2>&1; then
+    log_error "napkin not runnable on wrapper PATH (resolved to '$REAL_NAPKIN'); cache-preserving shim cannot be installed"
+    log_error "  PATH=$PATH"
+    exit 1
+  fi
+  if ! mkdir -p "$SHIM_DIR"; then
+    log_error "failed to mkdir shim dir: $SHIM_DIR"
+    exit 1
+  fi
+  # Generate the shim with `printf %q` so $REAL_NAPKIN and $WORKTREE are
+  # shell-escaped at install time. This is escape-safe: any `"`, `\`,
+  # `$`, or backtick in either path is quoted so the resulting shim is
+  # always well-formed. Plain heredoc-with-interpolation (used
+  # previously) was a latent injection surface — see R7-SC-2 / R7-CI-4
+  # in features/pi-napkin-distill/pr-11/reviews/.
+  if ! {
+    printf '#!/usr/bin/env bash\n'
+    printf '# Auto-generated distill napkin shim. Routes every napkin command\n'
+    printf '# to the distill worktree so vault writes from the agent'\''s bash\n'
+    printf '# tool land inside the worktree even though pi'\''s cwd is the\n'
+    printf '# parent session'\''s cwd (set that way to preserve prompt-cache\n'
+    printf '# hits). Removed when the worktree is removed.\n'
+    printf 'exec %q --vault %q "$@"\n' "$REAL_NAPKIN" "$WORKTREE"
+  } > "$SHIM_DIR/napkin"; then
+    log_error "failed to write shim to $SHIM_DIR/napkin"
+    exit 1
+  fi
+  if ! chmod +x "$SHIM_DIR/napkin"; then
+    log_error "failed to chmod +x shim: $SHIM_DIR/napkin"
+    exit 1
+  fi
   export PATH="$SHIM_DIR:$PATH"
 fi
 
