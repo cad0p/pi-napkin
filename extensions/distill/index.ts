@@ -487,6 +487,23 @@ export default function (pi: ExtensionAPI) {
     }
 
     lastDistillTimestamp = Date.now();
+    // Initialize the per-completion overlap cursor to the current end of
+    // the session entries. For a new session this is 0 (empty session);
+    // for a resumed session (`reason` in {`resume`,`fork`,`startup`,...})
+    // this is the prior entry count, so the FIRST distill completion in
+    // the new pi process only walks entries added AFTER session_start —
+    // not the full pre-resume history. Without this, a resumed session
+    // with N pre-existing entries would surface stale overlap notices
+    // for files written in earlier pi processes (whose distills already
+    // landed on main). R8-CC-3 / R8-PERF-3.
+    try {
+      lastDistillCompletionMessageCursor =
+        ctx.sessionManager.getEntries().length;
+    } catch {
+      // Best-effort: if getEntries throws (shouldn't — it's a basic
+      // accessor), leave the cursor at its prior value (0 on first
+      // session_start).
+    }
     const intervalMs = config.intervalMinutes * 60 * 1000;
 
     uiRef = { hasUI: ctx.hasUI, ui: ctx.ui, showStatus, intervalMs };

@@ -366,4 +366,39 @@ describe("per-completion overlap notice (integration, R7-PERF-2)", () => {
     });
     expect(out2.overlap).toEqual(["notes/y.md"]);
   });
+
+  test("resumed session: cursor initialised to entries.length skips pre-resume history (R8-CC-3 / R8-PERF-3)", () => {
+    // The session_start handler initializes
+    // `lastDistillCompletionMessageCursor` to the SessionManager's
+    // current entries.length. For a resumed session with N pre-existing
+    // assistant write entries, the FIRST completion in the new pi
+    // process should NOT walk those entries: they belong to a previous
+    // pi process whose distills already landed (or are unrelated to
+    // this distill's startSha).
+    //
+    // Simulate: SessionManager has 3 pre-resume assistant write
+    // entries, then session_start initialises the cursor to 3, then
+    // the first distill completion fires.
+    const sm = SessionManager.create(sessionDir, sessionDir);
+    for (const p of ["old/a.md", "old/b.md", "old/c.md"]) {
+      sm.appendMessage({
+        role: "assistant",
+        content: [{ type: "toolCall", name: "write", arguments: { path: p } }],
+        // biome-ignore lint/suspicious/noExplicitAny: minimal message
+      } as any);
+    }
+    const initialCursor = sm.getEntries().length; // what session_start sets
+    expect(initialCursor).toBeGreaterThan(0);
+
+    // First post-resume completion: distill touched the SAME files as
+    // pre-resume parent writes. With the correct cursor init, those
+    // are SKIPPED (already-walked-in-prior-process semantics).
+    const out = computeOverlapForCompletion({
+      distillTouchedFiles: ["old/a.md", "old/b.md", "old/c.md"],
+      sessionEntries: sm.getEntries(),
+      cursor: initialCursor,
+    });
+    expect(out.overlap).toEqual([]);
+    expect(out.newCursor).toBe(initialCursor);
+  });
 });
