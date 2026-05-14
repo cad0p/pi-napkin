@@ -90,14 +90,17 @@ layout.
 
 ### Why
 
-Worktree-based concurrency relies on napkin's `findVault(cwd)` resolving
-`cwd=worktree` back to the worktree itself. On a subdir-layout vault, the
-branch tracks `.napkin/config.json`, so the worktree has a `.napkin/`
-subdir that findVault picks up. On a legacy-embedded vault, the branch
-has no `.napkin/` subdir, findVault walks past the worktree, and
-resolves to the user's REAL vault via the global-config fallback —
-distill writes bypass the worktree entirely and the concurrency
-guarantee silently degrades to nothing.
+Worktree-based concurrency relies on the worktree having a `.napkin/`
+subdir post-checkout, so the wrapper's `git add -A` + `git commit` +
+`git merge --squash` operations on the worktree see the isolated
+vault layout. On a subdir-layout vault, the branch tracks
+`.napkin/config.json`, so every checked-out worktree has the
+`.napkin/` subdir. On a legacy-embedded vault, the branch has no
+`.napkin/` subdir at all (`.napkin/` IS the vault), so the worktree
+has nothing to operate on — the wrapper would silently produce empty
+commits, and the per-distill napkin shim's `--vault $WORKTREE` would
+point at a directory napkin doesn't recognize as a vault. The
+concurrency guarantee silently degrades to nothing.
 
 ### Where worktrees live
 
@@ -247,7 +250,7 @@ Running multiple pi sessions against the same vault (for example, autonomous age
 
 ### Worktree per distill
 
-Each auto-distill invocation (interval fire or shutdown) creates its own temporary branch and worktree under `$XDG_CACHE_HOME/napkin-distill/<vault-hash>/<branch-suffix>/` (typically `~/.cache/napkin-distill/…`). The distill subprocess runs with `cwd` pointing at the worktree, so napkin's vault resolution picks up the isolated copy. See [Where worktrees live](#where-worktrees-live) for why placement is external.
+Each auto-distill invocation (interval fire or shutdown) creates its own temporary branch and worktree under `$XDG_CACHE_HOME/napkin-distill/<vault-hash>/<branch-suffix>/` (typically `~/.cache/napkin-distill/…`). pi runs at the **parent session's cwd** (not the worktree) so the system prompt's `Current working directory:` line stays byte-identical to the parent's, preserving prompt-cache hits. Vault writes from the agent's bash tool are routed back to the worktree by a per-distill napkin shim at `<worktree>/.napkin/distill/bin/napkin` that injects `--vault <worktree>` into every napkin invocation. The wrapper's own git operations (`git add` / `commit` / `merge --squash`) all run with `git -C <worktree>` against the isolated checkout. See [Where worktrees live](#where-worktrees-live) for why the worktree dir is external to the vault.
 
 ### LLM merge driver
 

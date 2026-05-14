@@ -292,10 +292,16 @@ export default function (pi: ExtensionAPI) {
    * files (`git log --name-only <startSha>..HEAD` from the main vault)
    * yields the overlap set.
    *
-   * Initial value 0 means "start of the session" — the first distill's
-   * completion compares against everything the parent has done so far.
-   * Updated on every successful distill completion (also when overlap is
-   * empty) so subsequent completions only see the new slice.
+   * Initialised on `session_start` to `getEntries().length` (R8-CC-3 /
+   * R8-PERF-3): for a fresh session this is 0; for a resumed session
+   * with N pre-existing entries this is N, so the first post-resume
+   * completion only walks entries added AFTER session_start — not the
+   * full pre-resume history (which would surface stale notices for
+   * files written in earlier pi processes whose distills already
+   * landed).
+   *
+   * Updated on every successful distill completion (also when overlap
+   * is empty) so subsequent completions only see the new slice.
    *
    * Closure-scoped (sync, no race): the per-completion path runs inside
    * the JS-side poll callback, single-threaded with everything else in

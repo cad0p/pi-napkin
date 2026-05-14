@@ -1237,6 +1237,16 @@ export function diffWorktreeSinceStart(
  *
  * Paths are returned relative to the vault root (matching
  * `getSessionTouchedFiles` output for the intersection step).
+ *
+ * Downstream `intersectFiles` matches paths in three layers — exact /
+ * symmetric-suffix / basename-fallback. The basename-fallback's known
+ * false-positive shape (two unrelated `README.md`s in different
+ * subtrees match) flows through here too; accepted because the overlap
+ * notice is non-destructive (advisory message, doesn't modify files).
+ * Concurrent-distill log noise is a separate accepted false-positive
+ * class (when two pi sessions on the same vault complete in close
+ * succession, the second's `<startSha>..HEAD` includes the first's
+ * squash commit). See `deferred.md` R8-CC-5.
  */
 export function getDistillTouchedFilesPostSquash(
   vaultPath: string,
