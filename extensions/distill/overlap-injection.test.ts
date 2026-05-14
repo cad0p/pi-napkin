@@ -114,4 +114,32 @@ describe("formatOverlapNotice", () => {
     // footprint low on quiet turns.
     expect(notice.trim().length).toBeLessThan(400);
   });
+
+  test("single-file notice token budget upper bound (R10-PERF-4)", () => {
+    // R10-PERF-4: pin the per-fire token cost so a future doc-style
+    // edit can't double the prefix. The per-completion mechanism
+    // (R7-PERF-2) accepts ~5–12 fires/day across active sessions; cost
+    // = fires × tokens. Char-count proxy at ~4 chars/token; assert
+    // <100 tokens for a single-file notice.
+    const notice = formatOverlapNotice(["notes/foo.md"]);
+    const estimatedTokens = Math.ceil(notice.length / 4);
+    expect(estimatedTokens).toBeLessThan(100);
+  });
+
+  test("multi-file notice scales linearly with file count, no surprise overhead", () => {
+    // Defensive: a 50-file notice shouldn't be quadratically large.
+    // The implementation joins with ', ' so token cost is roughly
+    // (fixed prefix) + N × (avg file-path length / 4 chars/token).
+    const fixedPart = formatOverlapNotice(["x"]).length;
+    const fifty = formatOverlapNotice(
+      Array.from({ length: 50 }, (_, i) => `notes/file${i}.md`),
+    );
+    // Each entry is ~16 chars + ', ' = ~18 chars. 50 × 18 = 900 chars
+    // for the file list, plus ~fixedPart for the surrounding text.
+    expect(fifty.length).toBeLessThan(fixedPart + 1200);
+    // Sanity: 50-file notice still fits in ~400 tokens — well under
+    // any reasonable single-message budget. Compaction kicks in if
+    // they accumulate over many days.
+    expect(Math.ceil(fifty.length / 4)).toBeLessThan(400);
+  });
 });
