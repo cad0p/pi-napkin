@@ -5,7 +5,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { resolveCacheRoot } from "./distill-workspace";
+import { withNapkinOnPath } from "./_test-helpers";
+import { resolveCacheRoot, resolveDistillErrorDir } from "./distill-workspace";
 import distillExtension from "./index";
 
 /**
@@ -246,6 +247,50 @@ function createSeededSession(dir: string): SessionManager {
   return sm;
 }
 
+// POST-R6-CACHE / R7-CI-2: the detached wrapper is observable only by
+// its filesystem effects — the JS test side has no handle to wait on it.
+// `waitForWrapperDone` waits until the worktree directory disappears
+// (cleanup trap fired — wrapper exited) or a hard timeout. Without this,
+// the routing tests pass on a CI runner that has napkin globally
+// installed even when the wrapper is broken; with this, a wrapper-side
+// failure surfaces in the test output via `assertNoWrapperFailures`.
+async function waitForWrapperDone(
+  worktreePath: string,
+  timeoutMs = 8000,
+): Promise<void> {
+  const start = Date.now();
+  while (fs.existsSync(worktreePath)) {
+    if (Date.now() - start > timeoutMs) {
+      throw new Error(
+        `Wrapper did not finish within ${timeoutMs}ms: ${worktreePath}`,
+      );
+    }
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+function assertNoWrapperFailures(vault: string): void {
+  const errorDir = resolveDistillErrorDir(vault);
+  if (!fs.existsSync(errorDir)) return;
+  const entries = fs.readdirSync(errorDir);
+  if (entries.length === 0) return;
+  // Failed: surface the log content for diagnosis.
+  const samples = entries
+    .slice(0, 3)
+    .map((f) => {
+      const full = path.join(errorDir, f);
+      try {
+        return `${f}:\n${fs.readFileSync(full, "utf-8")}`;
+      } catch {
+        return f;
+      }
+    })
+    .join("\n---\n");
+  throw new Error(
+    `Wrapper produced ${entries.length} error log(s):\n${samples}`,
+  );
+}
+
 describe("runAutoDistill vs runDistill routing (Item 7)", () => {
   let vault: string;
   let sm: SessionManager;
@@ -254,11 +299,21 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
   let xdgCacheDir: string;
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
   const _savedXdgCache = process.env.XDG_CACHE_HOME;
+  // POST-R6-CACHE: shim install requires napkin on PATH; CI runners don't
+  // have a global install. Augment via the shared helper. (R7-CI-2.)
+  let _napkinPath: { restore: () => void } | null = null;
 
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "routing-xdg-"));
     process.env.XDG_CACHE_HOME = xdgCacheDir;
+    _napkinPath = withNapkinOnPath();
+    // R7-CI-2: stub pi with /usr/bin/true so the wrapper completes
+    // quickly during routing tests. Without the stub the wrapper would
+    // either spawn the real pi (slow, may hit auth/model errors and
+    // write a forensic log) or fail on missing pi (also writes a log).
+    // Routing tests assert on routing decisions, not pi behaviour.
+    process.env.NAPKIN_DISTILL_PI_BIN = "true";
     vault = createEnabledGitVault(60);
     sm = createSeededSession(vault);
 
@@ -289,7 +344,10 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     if (_savedRecurse !== undefined)
       process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    delete process.env.NAPKIN_DISTILL_PI_BIN;
     globalThis.setInterval = originalSetInterval;
+    _napkinPath?.restore();
+    _napkinPath = null;
     // Best-effort cleanup of any dangling worktrees + branches the detached
     // wrapper may have left during the test window. Worktrees live under
     // the per-test XDG cache dir set in beforeEach.
@@ -349,6 +407,17 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     const entries = fs.readdirSync(worktreesDir);
     expect(entries.length).toBe(1);
     expect(entries[0]).toMatch(/^[0-9a-f]{6}-\d+$/);
+
+    // R7-CI-2: wait for the detached wrapper to finish and assert it
+    // didn't write a forensic error log. With NAPKIN_DISTILL_NO_RECURSE
+    // set on the spawned wrapper, pi inside the wrapper exits early
+    // (no actual distillation), the wrapper proceeds through
+    // git add/commit/merge with nothing to commit, and exits 0 — the
+    // happy path the cleanup trap removes the worktree on. A wrapper-
+    // side failure (missing napkin, broken shebang) lands an error log.
+    const wt = path.join(worktreesDir, entries[0]);
+    await waitForWrapperDone(wt);
+    assertNoWrapperFailures(vault);
   });
 
   test("/distill on a git-backed vault creates a worktree (matches auto-distill)", async () => {
@@ -377,6 +446,11 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
       .filter((n) => n.startsWith("napkin-distill-"));
     const newTmpDirs = tmpAfter.filter((n) => !tmpBefore.has(n));
     expect(newTmpDirs.length).toBe(0);
+
+    // R7-CI-2: same wrapper-outcome assertion as the auto-distill test.
+    const wt = path.join(worktreesDir, entries[0]);
+    await waitForWrapperDone(wt);
+    assertNoWrapperFailures(vault);
   });
 
   test("/distill on a non-git vault falls back to tmp dir (legacy path)", async () => {
