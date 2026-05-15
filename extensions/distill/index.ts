@@ -1719,6 +1719,20 @@ export function formatOutcomeNotification(args: {
         statusGlyph: "✓",
         statusText: ` distill ${elapsedSec}s`,
       };
+    case "merged-local":
+      // PR #12: agent landed content on main but origin wasn't reached
+      // (push failed, network down, or origin moved and the agent gave
+      // up rather than loop indefinitely). Local main is ahead of
+      // origin/<default>. User must push manually or wait for the next
+      // distill's push to carry both forward. Surface as `warning` per
+      // the locked notification severity contract.
+      return {
+        level: "warning",
+        message: `Distillation complete locally; not pushed to origin (${elapsedSec}s)`,
+        statusKey: "warning",
+        statusGlyph: "⚠",
+        statusText: " distill: local-only",
+      };
     case "no-content":
       return {
         level: "warning",
@@ -1748,7 +1762,22 @@ export function formatOutcomeNotification(args: {
         statusText: " distill: partial",
       };
     }
-    default:
+    default: {
+      // PR #12: `failed:<reason>` carries a reason code identifying
+      // which validator tripped (markers-after-agent-exit,
+      // head-not-on-default, agent-exit-nonzero, agent-timeout). Surface
+      // as `error` with the reason in the message so the user can
+      // diagnose without opening the error log first.
+      if (outcome.outcomeClass.startsWith("failed:")) {
+        const reason = outcome.outcomeClass.slice("failed:".length);
+        return {
+          level: "error",
+          message: `Distillation failed: ${reason}`,
+          statusKey: "error",
+          statusGlyph: "✗",
+          statusText: ` distill: ${reason}`,
+        };
+      }
       return {
         level: "warning",
         message: `Distillation: unrecognised outcome '${outcome.outcomeClass}'`,
@@ -1756,6 +1785,7 @@ export function formatOutcomeNotification(args: {
         statusGlyph: "⚠",
         statusText: " distill: unknown outcome",
       };
+    }
   }
 }
 

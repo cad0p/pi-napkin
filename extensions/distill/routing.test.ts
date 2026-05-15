@@ -954,12 +954,7 @@ describe("runDistillWith outcome dispatch (POST-CONV-5)", () => {
     return { ui, notifyCalls, setStatusCalls };
   }
 
-  // PR #12 A2: the wrapper writes `merged-content` unconditionally on
-  // agent exit 0 (validation is stubbed pending A3). A3 wires
-  // `validate_commit_count` which detects the agent produced no commits
-  // since startSha and writes `no-content` instead. This test is skipped
-  // until A3 lands.
-  test.skip("no-content outcome → warning notify", async () => {
+  test("no-content outcome → warning notify", async () => {
     // pi stub is /usr/bin/true — no content produced. Wrapper writes
     // outcome=no-content; JS poller surfaces as warn.
     const { ui, notifyCalls, setStatusCalls } = makeUI();

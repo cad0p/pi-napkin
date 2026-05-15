@@ -23,6 +23,13 @@
 # on agent-exit-0 unconditionally; that placeholder becomes a proper
 # class-detection in A3.
 #
+# A3 update: post-agent-exit validation is wired (markers, HEAD on
+# default, commit count, merged-local detection). On validation failure
+# the wrapper writes `failed:<reason>` and exits 1 — the cleanup trap
+# still removes the worktree+branch best-effort. A4 will replace this
+# with an explicit salvage helper that force-cleans the worktree+branch
+# pre-exit and emits a recovery hint into the outcome sidecar.
+#
 # Usage:
 #   distill-wrapper.sh <vault> <worktree> <branch> <sessionFork> <prompt> <errorDir> [<model>] [<defaultBranch>] [<parentCwd>] [<maxDurationSecs>]
 #
@@ -72,15 +79,20 @@
 #                                                 main, pushes if origin, cleans
 #                                                 up worktree+branch — see
 #                                                 extensions/distill/distill-prompt.md)
-#   4. validate agent output                     (TODO(A3): markers/HEAD/commit-count;
-#                                                 stubbed in this A2 commit — assumes
-#                                                 success on exit 0)
+#   4. validate agent output                     (A3: markers, HEAD on default,
+#                                                 commit count; A4 salvage on
+#                                                 fail — stubbed in this A3 commit)
 #   5. salvage if validation fails               (TODO(A4): force-cleanup worktree+
 #                                                 branch + write `failed:<reason>`
-#                                                 outcome; stubbed in this A2 commit)
-#   6. write outcome sidecar                     (`merged-content` placeholder until A3
-#                                                 differentiates merged-content vs
-#                                                 merged-local; A4 adds `failed:<reason>`)
+#                                                 outcome with recovery hint;
+#                                                 stubbed in this A3 commit —
+#                                                 currently writes the outcome but
+#                                                 leaves the cleanup to the trap)
+#   6. write outcome sidecar                     (`merged-content` on happy path;
+#                                                 `merged-local` when local diverges
+#                                                 from origin; `no-content` on 0
+#                                                 commits since startSha; `failed:<reason>`
+#                                                 on validation failure)
 #   7. cleanup (trap): force-remove worktree, prune, force-delete branch
 #
 # Error handling:
@@ -261,6 +273,165 @@ write_outcome() {
   mkdir -p "$ERROR_DIR" 2>/dev/null || true
   printf '%s\n' "$class" > "$OUTCOME_PATH" 2>/dev/null || true
 }
+
+# --- Post-agent-exit validation helpers (PR #12 A3) -------------------------
+#
+# Each helper inspects the vault's post-agent state and returns 0 (pass) or
+# 1 (fail). Diagnostics go to the error log on failure so the user can see
+# what tripped the validator. Helpers are intentionally side-effect-free
+# beyond logging — the salvage path (A4) is the only thing that mutates
+# the worktree/branch on validation failure.
+
+# validate_no_markers <vault>
+#
+# Searches the vault's working tree for residual git conflict markers
+# (`<<<<<<< `, `======= ` exact, `>>>>>>> `) at line start. Returns 0
+# (pass) when no markers are found, 1 (fail) when any are present. A
+# fail logs the offending file paths so recovery is straightforward.
+#
+# Why scan post-squash on the vault: the agent merges into its branch
+# inside the worktree, then squashes onto the default branch in the
+# vault. Markers in the agent's branch get squashed into the vault's
+# default branch — they become committed corruption in the vault. The
+# vault working tree is the canonical post-condition.
+#
+# Pattern matches what `napkin-distill-merge` flagged historically (PR #11).
+# Restricted to `*.md` because that's the only file class the agent
+# touches; scanning the entire vault would false-positive on user
+# scripts that legitimately discuss markers.
+#
+# We use a `git ls-files` enumeration (so .gitignore'd content like
+# `.napkin/distill/` is skipped automatically) intersected with `*.md`.
+# `xargs -I{} grep ...` is portable across BSD/GNU grep.
+validate_no_markers() {
+  local vault="$1"
+  local hits
+  # `--cached` includes staged files; -z|null-delimit handles spaces in
+  # paths. Filter to *.md to bound the scan. `git grep` would be cleaner
+  # but only searches committed/indexed content — we want to catch any
+  # working-tree drift the agent may have left uncommitted.
+  hits="$(
+    git -C "$vault" ls-files -z -- '*.md' 2>/dev/null \
+      | xargs -0 -I{} grep -lE '^(<{7} |={7}$|>{7} )' -- "$vault/{}" 2>/dev/null \
+      || true
+  )"
+  if [ -n "$hits" ]; then
+    log_error "validate_no_markers: residual conflict markers found in vault \`$vault\`:"
+    while IFS= read -r f; do
+      [ -z "$f" ] && continue
+      log_error "  $f"
+    done <<< "$hits"
+    return 1
+  fi
+  return 0
+}
+
+# validate_head_on_default <vault> <default_branch>
+#
+# Confirms the vault's HEAD is the symbolic ref `refs/heads/<default>`.
+# Per V3 verification (research/v2-v3-verification.md), use
+# `git symbolic-ref --short HEAD` — it returns the short branch name on
+# a normal checkout and exits non-zero on detached HEAD. The other two
+# options (`branch --show-current` returns empty on detached;
+# `rev-parse --abbrev-ref HEAD` returns literal `HEAD` on detached)
+# silently false-positive.
+#
+# Returns 0 (pass) when HEAD == default. Returns 1 (fail) on any other
+# state, including detached HEAD. Refusing to act on detached HEAD is
+# correct: the agent should have exited with HEAD on default after
+# step 8, and the wrapper must not silently accept a vault in the
+# wrong state.
+validate_head_on_default() {
+  local vault="$1"
+  local default="$2"
+  local head
+  head="$(git -C "$vault" symbolic-ref --short HEAD 2>/dev/null || true)"
+  if [ -z "$head" ]; then
+    log_error "validate_head_on_default: vault HEAD is detached (not on a branch); expected '$default'"
+    return 1
+  fi
+  if [ "$head" != "$default" ]; then
+    log_error "validate_head_on_default: vault HEAD is '$head', expected '$default'"
+    return 1
+  fi
+  return 0
+}
+
+# validate_commit_count <vault> <start_sha>
+#
+# Prints (to stdout) the number of commits on the vault's current HEAD
+# since `<start_sha>` (exclusive). Returns 0 unless the rev-list call
+# itself fails (which would be a hard error — startSha must be reachable
+# from HEAD or the wrapper's invariants are broken).
+#
+# Used by the wrapper to dispatch among:
+#   - 0 commits   -> no-content (agent ran but produced nothing)
+#   - 1+ commits  -> merged-content / merged-local (agent landed work)
+#
+# This is intentionally a count, not a boolean: future telemetry
+# (POST-CONV-7-TELEM) wants the number for outcome distribution
+# analysis. The wrapper's own dispatch only needs `>= 1`.
+#
+# Rev-list semantics: `<start_sha>..HEAD` includes commits reachable
+# from HEAD that are NOT reachable from start_sha. If main moved since
+# distill spawn (concurrent user commit + agent's squash), both are
+# counted — acceptable looseness for the no-content vs has-content
+# dispatch (we err on the side of "has content").
+validate_commit_count() {
+  local vault="$1"
+  local start_sha="$2"
+  local count
+  count="$(git -C "$vault" rev-list --count "$start_sha..HEAD" 2>/dev/null || true)"
+  if [ -z "$count" ]; then
+    log_error "validate_commit_count: git rev-list failed for $start_sha..HEAD in $vault"
+    return 1
+  fi
+  printf '%s\n' "$count"
+  return 0
+}
+
+# detect_local_only <vault> <default_branch>
+#
+# Determines whether the vault has commits on `<default_branch>` that
+# haven't reached `origin/<default_branch>`. Returns 0 (yes —
+# `merged-local`) when origin is configured AND local is ahead of
+# origin (the agent's push didn't land or didn't run). Returns 1 (no)
+# when there's no divergence — either origin isn't configured at all
+# (push wasn't expected) or local matches origin (push succeeded).
+#
+# Per the PR #12 design "Outcome classes" section: the wrapper
+# computes this deterministically post-agent so the agent doesn't
+# need to know about merged-local; push retries / network handling
+# stay entirely in the agent's hands.
+detect_local_only() {
+  local vault="$1"
+  local default="$2"
+  # No origin configured at all → push was never expected; not local-only.
+  if ! git -C "$vault" remote get-url origin >/dev/null 2>&1; then
+    return 1
+  fi
+  local local_sha remote_sha
+  local_sha="$(git -C "$vault" rev-parse "$default" 2>/dev/null || true)"
+  remote_sha="$(git -C "$vault" rev-parse "origin/$default" 2>/dev/null || true)"
+  # Origin configured but no remote-tracking ref yet (e.g. never fetched)
+  # → treat as local-only because origin is the user's intent and the
+  # agent's push didn't materialise.
+  if [ -z "$remote_sha" ]; then
+    log_error "detect_local_only: origin configured but origin/$default unreachable; treating as merged-local"
+    return 0
+  fi
+  if [ -z "$local_sha" ]; then
+    # Default branch doesn't exist locally — unexpected; surface as
+    # not-local-only and let the markers / commit-count validators
+    # decide the outcome.
+    return 1
+  fi
+  if [ "$local_sha" != "$remote_sha" ]; then
+    return 0
+  fi
+  return 1
+}
+
 
 # Trap-based cleanup: always remove the worktree + branch on exit (success or
 # failure). `git worktree remove --force` also handles partially-initialized
@@ -540,51 +711,97 @@ if [ "${NAPKIN_DISTILL_SKIP_PI:-}" != "1" ]; then
   rm -f "$pi_stderr"
 fi
 
-# --- TODO(A3): post-agent validation ----------------------------------------
+# --- Post-agent-exit dispatch (PR #12 A3) -----------------------------------
 #
+# Validates the agent's output and writes the appropriate outcome class.
 # A3 wires:
-#   - validate_no_markers      — grep -rEln '^(<<<<<<< |======= |>>>>>>> )'
-#                                across the vault working tree
-#   - validate_head_on_default — git symbolic-ref --short HEAD == $DEFAULT_BRANCH
-#   - validate_commit_count    — main has at least one new commit since
-#                                $START_SHA
-#   - detect_local_only        — when origin exists and local main is ahead
-#                                of origin/$DEFAULT_BRANCH, classify as
-#                                `merged-local` instead of `merged-content`
+#   - validate_no_markers       (markers-after-agent-exit on fail)
+#   - validate_head_on_default  (head-not-on-default on fail)
+#   - validate_commit_count     (no-content when 0 commits since startSha)
+#   - detect_local_only         (merged-local when origin diverges)
 #
-# At A2 the wrapper writes `merged-content` unconditionally on agent
-# exit 0; on agent non-zero exit, no outcome is written (the
-# absent-sidecar JS-side path surfaces a warning). A4 will overwrite the
-# non-zero path with a `failed:<reason>` outcome via the salvage helper.
+# Salvage at A3 is minimal: write `failed:<reason>` outcome + record
+# dangling SHA + exit 1. The cleanup trap still runs (worktree+branch
+# best-effort removal). A4 will replace this with the explicit salvage
+# helper that force-cleans pre-exit and emits a recovery hint into the
+# outcome sidecar.
+#
+# Reason codes (from the V3 verification report):
+#   markers-after-agent-exit   — V1 fail, conflict markers in vault *.md
+#   head-not-on-default        — V2 fail, vault HEAD not on default branch
+#   agent-exit-nonzero         — pi exited non-zero with no other diagnostic
+#   agent-timeout              — timeout(1) killed the agent (rc 124 or 137)
+#
+# These four codes match the JS-side dispatch table in
+# formatOutcomeNotification (extensions/distill/index.ts).
 
-# --- TODO(A4): salvage path -------------------------------------------------
+# `timeout(1)` exit codes per coreutils:
+#   124 = timeout fired and target exited within grace period
+#   137 = timeout sent SIGKILL after grace period (128 + 9)
+# Other non-zero codes are agent crashes proper.
 #
-# A4 wires:
-#   - force-cleanup worktree + distill branch (already partially handled
-#     by the trap, but A4 makes it explicit + idempotent on the failure
-#     path so the failed-outcome write happens after the cleanup)
-#   - write `failed:<reason>` outcome where <reason> is one of:
-#       markers-after-agent-exit
-#       head-not-on-default
-#       agent-exit-nonzero
-#       agent-timeout
-#   - record recovery hint in the outcome sidecar (git revert HEAD,
-#     reflog window for distill branches)
-#
-# At A2: on AGENT_RC != 0 we exit 1 without writing an outcome; the
-# JS-side poller surfaces "abnormal termination — no outcome record"
-# (warning), which is conservative until A4 lands.
+# Magic-number rationale (per the methodology guide's never-deferrable
+# magic-number rule): 124 and 137 are coreutils-defined exit codes,
+# not arbitrary thresholds. Naming them as constants here keeps the
+# case statement readable.
+TIMEOUT_TERM_RC=124
+TIMEOUT_KILL_RC=137
 
-if [ "$AGENT_RC" -ne 0 ]; then
-  # Agent failed (crash, timeout 124, kill 137, or generic non-zero).
-  # A4 will replace this with a real salvage + failed-outcome write;
-  # at A2 we exit 1 so the JS-side abnormal-termination path fires.
+if [ "$AGENT_RC" -eq "$TIMEOUT_TERM_RC" ] || [ "$AGENT_RC" -eq "$TIMEOUT_KILL_RC" ]; then
+  log_error "agent task exceeded ${MAX_DURATION_SECS}s budget; SIGTERM/SIGKILL fired (rc $AGENT_RC)"
   record_dangling_sha
+  write_outcome "failed:agent-timeout"
   exit 1
 fi
 
-# Agent exit-0 path. At A2 this is unconditional `merged-content`.
-# A3 differentiates merged-content vs merged-local vs failed:<reason>
-# based on the validation helpers above.
+if [ "$AGENT_RC" -ne 0 ]; then
+  log_error "agent subprocess exited non-zero (rc $AGENT_RC); see stderr above"
+  record_dangling_sha
+  write_outcome "failed:agent-exit-nonzero"
+  exit 1
+fi
+
+# Agent exit-0 path. Run validators in order: head-on-default first
+# (cheap; fails loud on detached HEAD or wrong branch), then markers
+# (slightly more expensive scan), then commit count + local-only
+# dispatch.
+if ! validate_head_on_default "$VAULT" "$DEFAULT_BRANCH"; then
+  record_dangling_sha
+  write_outcome "failed:head-not-on-default"
+  exit 1
+fi
+
+if ! validate_no_markers "$VAULT"; then
+  record_dangling_sha
+  write_outcome "failed:markers-after-agent-exit"
+  exit 1
+fi
+
+VAULT_COMMIT_COUNT="$(validate_commit_count "$VAULT" "$START_SHA" 2>/dev/null || echo "")"
+if [ -z "$VAULT_COMMIT_COUNT" ]; then
+  log_error "validate_commit_count returned empty; refusing to classify outcome"
+  record_dangling_sha
+  write_outcome "failed:agent-exit-nonzero"
+  exit 1
+fi
+
+if [ "$VAULT_COMMIT_COUNT" -eq 0 ]; then
+  # Genuine no-op — agent ran but produced nothing for main. Outcome
+  # surfaces as a `warning` notification per the locked notification
+  # severity contract.
+  write_outcome "no-content"
+  exit 0
+fi
+
+if detect_local_only "$VAULT" "$DEFAULT_BRANCH"; then
+  # Origin configured but local main is ahead — agent's push didn't
+  # land. Outcome surfaces as `warning` ("distilled but not pushed").
+  write_outcome "merged-local"
+  exit 0
+fi
+
+# Happy path: vault HEAD on default, no markers, at least one commit
+# since startSha, and either (a) origin is in sync OR (b) origin not
+# configured. Surface as `info` ("Distillation complete").
 write_outcome "merged-content"
 exit 0
