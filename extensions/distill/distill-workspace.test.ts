@@ -414,6 +414,30 @@ describe("removeDistillWorktree", () => {
       removeDistillWorktree(gone, "/tmp/wt", "distill/zz-1"),
     ).not.toThrow();
   });
+
+  // POST-CONV-4: rmdir parent vault-hash dir after last leaf removed.
+  test("keeps parent dir when other distills exist; rmdirs it on last leaf", () => {
+    const parent = path.join(vault, "test-worktrees");
+    const branch1 = generateDistillBranchName();
+    const branch2 = generateDistillBranchName();
+    // Branch names are time-seeded; ensure they differ.
+    expect(branch1).not.toBe(branch2);
+    const wt1 = path.join(parent, "wt-1");
+    const wt2 = path.join(parent, "wt-2");
+    createDistillWorktree(vault, branch1, wt1);
+    createDistillWorktree(vault, branch2, wt2);
+    expect(fs.existsSync(parent)).toBe(true);
+
+    // Removing the first leaf must NOT rmdir the parent — wt2 still lives.
+    removeDistillWorktree(vault, wt1, branch1);
+    expect(fs.existsSync(wt1)).toBe(false);
+    expect(fs.existsSync(parent)).toBe(true);
+
+    // Removing the last leaf rmdirs the now-empty parent.
+    removeDistillWorktree(vault, wt2, branch2);
+    expect(fs.existsSync(wt2)).toBe(false);
+    expect(fs.existsSync(parent)).toBe(false);
+  });
 });
 
 describe("createDistillWorkspace", () => {

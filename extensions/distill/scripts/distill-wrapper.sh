@@ -253,6 +253,10 @@ cleanup() {
   # -D (force) because the distill branch is never marked "merged" (we use
   # squash merge on main, which leaves the branch dangling).
   git -C "$VAULT" branch -D "$BRANCH" 2>/dev/null || true
+  # Best-effort rmdir of the parent vault-hash dir — succeeds when this
+  # was the last distill for the vault. ENOTEMPTY (other concurrent
+  # distills) and ENOENT (race) are both expected and benign.
+  rmdir "$(dirname "$WORKTREE")" 2>/dev/null || true
   exit "$rc"
 }
 trap cleanup EXIT
