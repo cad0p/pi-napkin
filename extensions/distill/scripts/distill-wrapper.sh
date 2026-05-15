@@ -242,6 +242,12 @@ cleanup() {
   if [ -d "$WORKTREE" ]; then
     git -C "$VAULT" worktree remove --force "$WORKTREE" 2>/dev/null || true
   fi
+  # `git worktree remove --force` can leave the leaf dir behind when
+  # gitignored content is present (e.g. .napkin/distill/). Mirror the
+  # JS-side contract at distill-workspace.ts:572 with an rm -rf fallback.
+  if [ -d "$WORKTREE" ]; then
+    rm -rf "$WORKTREE" 2>/dev/null || true
+  fi
   # Prune in case the worktree entry is stale but the dir is gone.
   git -C "$VAULT" worktree prune 2>/dev/null || true
   # -D (force) because the distill branch is never marked "merged" (we use

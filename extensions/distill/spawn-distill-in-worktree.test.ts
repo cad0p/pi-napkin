@@ -1705,3 +1705,102 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
     expect(fs.existsSync(path.join(vault, "new-note.md"))).toBe(true);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Wrapper cleanup-trap rm-rf fallback (POST-CONV-3).
+// ---------------------------------------------------------------------------
+
+describe("distill-wrapper.sh cleanup rm-rf fallback (POST-CONV-3)", () => {
+  let xdgCacheDir: string;
+  let _savedXdgCache: string | undefined;
+
+  beforeEach(() => {
+    _savedXdgCache = process.env.XDG_CACHE_HOME;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-fallback-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
+  });
+
+  afterEach(() => {
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
+  });
+
+  /**
+   * Reproduce the wrapper cleanup() trap's "remove worktree, then rm -rf
+   * the leaf if it survives" sequence in isolation. Exercises the contract:
+   * even when `git worktree remove --force` cannot fully delete the leaf,
+   * the leaf is gone after cleanup.
+   *
+   * We simulate the failure mode by passing an unregistered directory:
+   * `git worktree remove` rejects unknown paths, so the leaf survives the
+   * git step and only the rm -rf fallback can finish the job.
+   */
+  test("rm -rf fallback removes the leaf when git worktree remove fails", () => {
+    // Minimal vault for the `git -C $VAULT worktree remove` call to target.
+    const vault = fs.mkdtempSync(path.join(os.tmpdir(), "fallback-vault-"));
+    const gitInit = spawnSync("git", ["init", "-q", "-b", "main", vault], {
+      encoding: "utf-8",
+    });
+    expect(gitInit.status).toBe(0);
+
+    // Populated directory that is NOT a registered worktree of $VAULT.
+    // git will refuse to remove it ("is not a working tree"), the leaf
+    // survives the git step, and only rm -rf finishes the cleanup.
+    const leaf = path.join(xdgCacheDir, "orphan-leaf");
+    fs.mkdirSync(path.join(leaf, ".napkin", "distill"), { recursive: true });
+    fs.writeFileSync(path.join(leaf, ".napkin", "distill", "meta.json"), "{}");
+    expect(fs.existsSync(leaf)).toBe(true);
+
+    // Mirror the wrapper cleanup() body verbatim. This is the contract the
+    // POST-CONV-3 fix added: rm -rf fallback when git's force-remove leaves
+    // the leaf.
+    const cleanup = `
+set -u
+VAULT=${JSON.stringify(vault)}
+WORKTREE=${JSON.stringify(leaf)}
+if [ -d "$WORKTREE" ]; then
+  git -C "$VAULT" worktree remove --force "$WORKTREE" 2>/dev/null || true
+fi
+if [ -d "$WORKTREE" ]; then
+  rm -rf "$WORKTREE" 2>/dev/null || true
+fi
+`;
+    const r = spawnSync("bash", ["-c", cleanup], { encoding: "utf-8" });
+    expect(r.status).toBe(0);
+
+    // Leaf is gone — the rm -rf fallback fired because `git worktree remove`
+    // failed on an unregistered path.
+    expect(fs.existsSync(leaf)).toBe(false);
+
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test("cleanup is idempotent: running twice succeeds with leaf already gone", () => {
+    const vault = fs.mkdtempSync(path.join(os.tmpdir(), "fallback-idem-"));
+    spawnSync("git", ["init", "-q", "-b", "main", vault], {
+      encoding: "utf-8",
+    });
+
+    const leaf = path.join(xdgCacheDir, "already-gone-leaf");
+    // Don't create the leaf — first cleanup pass already happened.
+    expect(fs.existsSync(leaf)).toBe(false);
+
+    const cleanup = `
+set -u
+VAULT=${JSON.stringify(vault)}
+WORKTREE=${JSON.stringify(leaf)}
+if [ -d "$WORKTREE" ]; then
+  git -C "$VAULT" worktree remove --force "$WORKTREE" 2>/dev/null || true
+fi
+if [ -d "$WORKTREE" ]; then
+  rm -rf "$WORKTREE" 2>/dev/null || true
+fi
+`;
+    const r = spawnSync("bash", ["-c", cleanup], { encoding: "utf-8" });
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(leaf)).toBe(false);
+
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+});
