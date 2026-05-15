@@ -475,7 +475,15 @@ fi
 # Placement is post-shim-install so the worktree has gitignored
 # content (.napkin/distill/bin/napkin shim) that survives
 # `git worktree remove --force`, exercising the rm-rf fallback.
+#
+# Emit a distinguishable diagnostic so tests can verify the wrapper
+# exited from THIS hook, not from the napkin-not-found / node-not-found
+# / meta-missing-startSha paths above (R13-CC-1: the previous test
+# was passing for the wrong reason — PATH stripped of napkin made
+# the wrapper exit at the shim-install block before ever reaching
+# this hook).
 if [ "${NAPKIN_DISTILL_FORCE_CLEANUP:-}" = "1" ]; then
+  log_error "FORCE_CLEANUP hook fired post-shim-install (test hook); triggering cleanup trap"
   exit 1
 fi
 

@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-
+import { withNapkinOnPath } from "./_test-helpers";
 import {
   buildWorktreeDistillPrompt,
   cleanupDistillWorkspace,
@@ -1977,6 +1977,7 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
   let vault: string;
   let sessionDir: string;
   let sessionFile: string;
+  let napkinPathRestore: { restore: () => void } | undefined;
 
   beforeEach(() => {
     _savedXdgCache = process.env.XDG_CACHE_HOME;
@@ -1985,6 +1986,17 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
     vault = createGitVault();
     sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-cleanup-src-"));
     sessionFile = createSeededSessionFile(sessionDir, sessionDir);
+    // R13-CC-1: the previous setup used NAPKIN_STRIPPED_PATH (no
+    // node_modules/.bin) AND NAPKIN_DISTILL_SKIP_PI=1 — the shim
+    // install block was bypassed entirely, so the FORCE_CLEANUP hook
+    // fired post-NOTHING and the rm-rf fallback test pinned a
+    // worktree that had no gitignored shim to survive `git worktree
+    // remove --force`. The hook was effectively a no-op for this
+    // test. Use withNapkinOnPath() so napkin resolves, the shim
+    // install block runs, the FORCE_CLEANUP hook fires post-shim-
+    // install, and the rm-rf fallback genuinely targets a gitignored
+    // file the worktree-remove couldn't clean.
+    napkinPathRestore = withNapkinOnPath();
   });
 
   afterEach(() => {
@@ -1993,10 +2005,15 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
     if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
+    if (napkinPathRestore) {
+      napkinPathRestore.restore();
+      napkinPathRestore = undefined;
+    }
   });
 
   function runWrapperForceCleanup(workspace: DistillWorkspace): {
     exitCode: number;
+    errorDir: string;
   } {
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
@@ -2019,21 +2036,24 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
         encoding: "utf-8",
         env: {
           ...process.env,
-          PATH: NAPKIN_STRIPPED_PATH,
+          // PATH inherited from withNapkinOnPath() so napkin resolves
+          // and the shim install actually runs. SKIP_PI deliberately
+          // unset — we want the shim block to execute so the
+          // FORCE_CLEANUP hook below fires from its documented post-
+          // shim-install location, not from the SKIP_PI bypass.
           GIT_AUTHOR_NAME: "test",
           GIT_AUTHOR_EMAIL: "test@example.com",
           GIT_COMMITTER_NAME: "test",
           GIT_COMMITTER_EMAIL: "test@example.com",
           NAPKIN_DISTILL_NO_RECURSE: "1",
-          NAPKIN_DISTILL_SKIP_PI: "1",
           NAPKIN_DISTILL_FORCE_CLEANUP: "1",
         },
       },
     );
-    return { exitCode: r.status ?? -1 };
+    return { exitCode: r.status ?? -1, errorDir };
   }
 
-  test("rm -rf fallback removes leaf when git worktree remove leaves gitignored content (POST-CONV-3)", () => {
+  test("rm -rf fallback removes leaf when git worktree remove leaves gitignored content (POST-CONV-3, R13-CC-1)", () => {
     const { createDistillWorkspace } = require("./distill-workspace");
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
@@ -2042,9 +2062,28 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
     );
     expect(fs.existsSync(workspace.worktreePath)).toBe(true);
 
-    const r = runWrapperForceCleanup(workspace);
+    const { exitCode, errorDir } = runWrapperForceCleanup(workspace);
     // FORCE_CLEANUP exits 1 deliberately. The cleanup trap then fires.
-    expect(r.exitCode).toBe(1);
+    expect(exitCode).toBe(1);
+
+    // Pin the exit path: the wrapper exited from the FORCE_CLEANUP
+    // hook (post-shim-install), NOT from the napkin-not-found,
+    // node-not-found, or meta-missing-startSha paths above. Without
+    // this assertion the test was passing for the wrong reason
+    // (R13-CC-1 — PATH stripped of napkin made it bail at the shim-
+    // install block, never reaching the hook).
+    const errorFiles = fs
+      .readdirSync(errorDir)
+      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+    expect(errorFiles.length).toBeGreaterThan(0);
+    const errorContent = errorFiles
+      .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
+      .join("\n");
+    expect(errorContent).toContain(
+      "FORCE_CLEANUP hook fired post-shim-install",
+    );
+    expect(errorContent).not.toContain("napkin binary not found");
+    expect(errorContent).not.toContain("node binary not found");
 
     // The shim install put a gitignored file under .napkin/distill/
     // that survives `git worktree remove --force`. The rm-rf fallback
@@ -2058,7 +2097,7 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
     expect(branches).not.toContain(workspace.branchName);
   });
 
-  test("rmdir removes parent vault-hash dir after last distill cleared (POST-CONV-4)", () => {
+  test("rmdir removes parent vault-hash dir after last distill cleared (POST-CONV-4, R13-CC-1)", () => {
     const { createDistillWorkspace } = require("./distill-workspace");
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
@@ -2068,8 +2107,21 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
     const parentDir = path.dirname(workspace.worktreePath);
     expect(fs.existsSync(parentDir)).toBe(true);
 
-    const r = runWrapperForceCleanup(workspace);
-    expect(r.exitCode).toBe(1);
+    const { exitCode, errorDir } = runWrapperForceCleanup(workspace);
+    expect(exitCode).toBe(1);
+
+    // Pin the exit path here too — R13-CC-1 affected both tests in
+    // this describe block, since both share runWrapperForceCleanup.
+    const errorFiles = fs
+      .readdirSync(errorDir)
+      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+    expect(errorFiles.length).toBeGreaterThan(0);
+    const errorContent = errorFiles
+      .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
+      .join("\n");
+    expect(errorContent).toContain(
+      "FORCE_CLEANUP hook fired post-shim-install",
+    );
 
     // Single-distill setup — rmdir parent succeeded because no
     // sibling distills survive in the same vault-hash dir.
