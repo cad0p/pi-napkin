@@ -1435,6 +1435,9 @@ describe.skip("distill-wrapper.sh (partial-merge salvage)", () => {
 // the merge is incomplete. The wrapper bails and writes to error log.
 // Previously dead code in CI (no mock mode emitted conflict markers).
 // Covers coverage-review G4.
+//
+// PR #12 A2: the merge driver is gone (the agent owns merge resolution).
+// These tests assert the deleted code path. // will be deleted in Phase B
 // ---------------------------------------------------------------------------
 
 describe.skip("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
@@ -1645,6 +1648,9 @@ describe.skip("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
 // the driver, the driver fires during `git merge main` in the wrapper, and
 // the driver's output reaches main. Previous salvage tests only force
 // `fail`; these pin the happy path.
+//
+// PR #12 A2: the merge driver is gone (the agent owns merge resolution).
+// These tests assert the deleted code path. // will be deleted in Phase B
 // ---------------------------------------------------------------------------
 
 describe.skip("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {

@@ -17,18 +17,10 @@
 #      absent, HEAD on default, commit count) and salvages on failure.
 #   5. Wrapper writes the outcome sidecar and exits.
 #
-# A2 transitional state: validation + salvage are stubs in this commit
-# (see TODO(A3) and TODO(A4) markers below). A3 wires post-validation;
-# A4 wires the salvage path. At A2 the wrapper writes `merged-content`
-# on agent-exit-0 unconditionally; that placeholder becomes a proper
-# class-detection in A3.
-#
-# A3 update: post-agent-exit validation is wired (markers, HEAD on
-# default, commit count, merged-local detection). On validation failure
-# the wrapper writes `failed:<reason>` and exits 1 — the cleanup trap
-# still removes the worktree+branch best-effort. A4 will replace this
-# with an explicit salvage helper that force-cleans the worktree+branch
-# pre-exit and emits a recovery hint into the outcome sidecar.
+# Implementation history: validation (A3) and salvage (A4) landed in
+# commits afed6ae and 0d0a262 respectively. The numbered lifecycle
+# below reflects the current shape; see git log for the staged
+# rollout.
 #
 # Usage:
 #   distill-wrapper.sh <vault> <worktree> <branch> <sessionFork> <prompt> <errorDir> [<model>] [<defaultBranch>] [<parentCwd>] [<maxDurationSecs>]
@@ -79,15 +71,16 @@
 #                                                 main, pushes if origin, cleans
 #                                                 up worktree+branch — see
 #                                                 extensions/distill/distill-prompt.md)
-#   4. validate agent output                     (A3: markers, HEAD on default,
-#                                                 commit count; A4 salvage on
-#                                                 fail — stubbed in this A3 commit)
-#   5. salvage if validation fails               (TODO(A4): force-cleanup worktree+
-#                                                 branch + write `failed:<reason>`
-#                                                 outcome with recovery hint;
-#                                                 stubbed in this A3 commit —
-#                                                 currently writes the outcome but
-#                                                 leaves the cleanup to the trap)
+#   4. validate agent output                     (markers, HEAD on default,
+#                                                 commit count; see
+#                                                 validate_no_markers /
+#                                                 validate_head_on_default /
+#                                                 validate_commit_count below)
+#   5. salvage if validation fails               (force-cleanup worktree+
+#                                                 branch + write
+#                                                 `failed:<reason>` outcome
+#                                                 with recovery hint; see
+#                                                 salvage() below)
 #   6. write outcome sidecar                     (`merged-content` on happy path;
 #                                                 `merged-local` when local diverges
 #                                                 from origin; `no-content` on 0
@@ -966,8 +959,8 @@ fi
 # inhibits the inner pi from auto-distilling.
 #
 # Agent responsibilities: everything between distill and cleanup. The
-# wrapper validates the agent's output post-exit (TODO(A3)) and salvages
-# on validation failure (TODO(A4)) — at A2 those are stubs.
+# wrapper validates the agent's output post-exit and salvages on
+# validation failure (validate_* helpers + salvage() below).
 
 cd "$PARENT_CWD" || { log_error "cd parent cwd failed: $PARENT_CWD"; exit 1; }
 
