@@ -441,4 +441,61 @@ git -C "${s.vault}" commit -m "distill: ahead" >/dev/null
       fs.rmSync(s.root, { recursive: true, force: true });
     }
   }, 30_000);
+
+  test("SIGTERM-ignoring agent \u2192 SIGKILL escalates within grace, classifies as agent-timeout (CLEAN-A-1, SEC-A-3, CI-A-1)", () => {
+    // Regression for the missing -k/--kill-after on timeout(1). A stub
+    // that traps SIGTERM and ignores it must still be killed via
+    // SIGKILL after TIMEOUT_KILL_GRACE_SECS so the wrapper exits
+    // cleanly (rc 137, classified as agent-timeout). Without the -k
+    // flag the wrapper would hang indefinitely waiting on the SIGTERM-
+    // resistant child.
+    //
+    // Test budget: maxDurationSecs=1 + grace=2 + slack=~5 = ~8s wall.
+    // The stub records its start time; if SIGKILL didn't happen it
+    // would still be alive at wall-clock = grace + maxDuration + slack.
+    const s = makeScaffold();
+    const stubMarker = path.join(s.root, "stub-completed");
+    try {
+      writeStubPi(
+        s,
+        `
+# Trap SIGTERM and ignore it \u2014 simulates a stuck agent that won't
+# exit on the budget-boundary SIGTERM. timeout(1) must escalate via
+# SIGKILL after the grace period.
+trap '' TERM
+# Sleep is interruptible only by SIGKILL while the SIGTERM trap is
+# active. We sleep well past any plausible test budget so that the
+# wrapper's grace period is what kills us, not the sleep returning.
+sleep 60
+# This line only runs if SIGKILL didn't fire \u2014 marker proves the
+# escalation didn't happen, so the test should fail loud.
+touch ${JSON.stringify(stubMarker)}
+`,
+      );
+      const start = Date.now();
+      const r = runWrapper(s, {
+        maxDurationSecs: "1",
+        extraEnv: { NAPKIN_DISTILL_TIMEOUT_KILL_GRACE_SECS: "2" },
+      });
+      const elapsedMs = Date.now() - start;
+
+      // Wrapper classified as agent-timeout (rc 137 from SIGKILL
+      // escalation, distinguished from rc 124 from SIGTERM by the
+      // dispatch case but routed to the same outcome class).
+      expect(r.exitCode).toBe(1);
+      expect(r.outcome).toBe("failed:agent-timeout");
+
+      // The stub never reached its `touch` line \u2014 SIGKILL fired
+      // before `sleep 60` returned.
+      expect(fs.existsSync(stubMarker)).toBe(false);
+
+      // Wall-clock is bounded: maxDurationSecs=1 + grace=2 + slack.
+      // 15s is comfortably loose; a regression where -k is dropped
+      // would either hang past the outer timeout (\u2265 30s) or
+      // require some other mechanism to kill the child.
+      expect(elapsedMs).toBeLessThan(15_000);
+    } finally {
+      fs.rmSync(s.root, { recursive: true, force: true });
+    }
+  }, 30_000);
 });

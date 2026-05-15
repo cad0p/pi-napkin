@@ -137,6 +137,14 @@
 #                                the EXIT trap — the cleanup function
 #                                fires and tests assert on its post-state
 #                                (rm-rf fallback, rmdir parent, etc.).
+#   NAPKIN_DISTILL_TIMEOUT_KILL_GRACE_SECS=<n>
+#                                override TIMEOUT_KILL_GRACE_SECS (the
+#                                seconds the SIGTERM→SIGKILL escalation
+#                                waits before killing a stuck agent).
+#                                Production default is 30s; tests assert
+#                                escalation against SIGTERM-ignoring stubs
+#                                with a short grace so the assertion
+#                                completes within the outer test timeout.
 
 set -uo pipefail
 
@@ -147,6 +155,36 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # all merge/squash/push retries). Phase B will drop the source line.
 # shellcheck source=./git_retry.sh
 source "$HERE/git_retry.sh"
+
+# coreutils timeout(1) is required for the agent task's hard wall-clock
+# budget. macOS without `brew install coreutils` doesn't ship `timeout`
+# at all; Homebrew installs it as `gtimeout` by default. Detect both
+# names and prefer whichever is present so the wrapper works on Linux
+# (`timeout`) and stock macOS-with-Homebrew-coreutils (`gtimeout`)
+# without further configuration. Fail fast with an actionable error if
+# neither is on PATH — silently routing through the no-timeout path
+# would let a misbehaving agent leak the wrapper indefinitely
+# (CI-A-1, CLEAN-A-1, SEC-A-3).
+TIMEOUT_BIN="$(command -v timeout || command -v gtimeout || true)"
+if [ -z "$TIMEOUT_BIN" ]; then
+  echo "distill-wrapper: GNU coreutils timeout(1) not found on PATH (looked for 'timeout' and 'gtimeout'). Install coreutils (e.g. \`brew install coreutils\` on macOS) and re-run." >&2
+  exit 2
+fi
+
+# SIGKILL escalation grace period: after timeout(1) sends SIGTERM at
+# the budget boundary, wait this many seconds before escalating to
+# SIGKILL. Without `-k` on the timeout invocation, escalation never
+# happens — a SIGTERM-ignoring agent (a stuck-in-libc-syscall pi
+# process, a tool subprocess that traps SIGTERM, OOM-killing-deadlock)
+# would hang the wrapper indefinitely. 30s is comfortably longer than
+# typical SIGTERM-handler shutdown paths and short enough that a
+# stuck distill clears within ~30s+budget total. Per the methodology
+# guide's never-deferrable magic-number rule.
+#
+# Tests can override via NAPKIN_DISTILL_TIMEOUT_KILL_GRACE_SECS so a
+# SIGTERM-ignoring stub assertion completes within the test timeout
+# budget without waiting the full 30s grace.
+TIMEOUT_KILL_GRACE_SECS="${NAPKIN_DISTILL_TIMEOUT_KILL_GRACE_SECS:-30}"
 
 VAULT="${1:-}"
 WORKTREE="${2:-}"
@@ -800,16 +838,20 @@ if [ "${NAPKIN_DISTILL_SKIP_PI:-}" != "1" ]; then
   # discarded — the agent's chatter isn't useful forensically; what
   # matters is the post-exit filesystem state.
   pi_stderr="$(mktemp)"
-  # `timeout --foreground` sends SIGTERM (then SIGKILL after a 10s grace)
-  # to the entire process group when the budget elapses; `--foreground`
+  # `timeout(1) --foreground -k <secs> <budget>` sends SIGTERM at the
+  # budget boundary, then escalates to SIGKILL after the grace period
+  # (TIMEOUT_KILL_GRACE_SECS) if the target hasn't exited. `--foreground`
   # ensures TTY-attached signals propagate even when invoked without a
   # controlling terminal (which is our case — detached + stdio:ignore).
   #
   # When timeout fires SIGTERM, exit code = 124. SIGKILL escalation
   # exit code = 137. The wrapper distinguishes these from a regular
   # agent crash via case below.
+  #
+  # TIMEOUT_BIN is detected at wrapper start (resolves to either
+  # `timeout` on Linux or `gtimeout` on macOS-with-Homebrew-coreutils).
   NAPKIN_DISTILL_NO_RECURSE=1 \
-    timeout --foreground "$MAX_DURATION_SECS" \
+    "$TIMEOUT_BIN" --foreground -k "$TIMEOUT_KILL_GRACE_SECS" "$MAX_DURATION_SECS" \
       "$PI_BIN" "${pi_args[@]}" > /dev/null 2> "$pi_stderr" || AGENT_RC=$?
   # Write stderr to error log on non-zero exit so post-mortem inspection
   # is possible even when the wrapper went on to write a success
