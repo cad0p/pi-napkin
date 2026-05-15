@@ -4,10 +4,8 @@
  * real LLM to confirm the prompt at `extensions/distill/distill-prompt.md`
  * still produces clean instruction-following on a multi-step procedure.
  *
- * This is the (b) gate from PR #12's design (see
- * `features/pi-napkin-distill/pr-12-agent-driven-merge/design.md`,
- * section "CI vs ad-hoc V2 replay"): manual on-demand re-validation when
- * the prompt is edited or a model is rotated. CI uses bash-stub
+ * This is the (b) gate from PR #12 (manual on-demand re-validation when
+ * the prompt is edited or a model is rotated). CI uses bash-stub
  * fixtures under `extensions/distill/test-fixtures/agent-stubs/` instead
  * (Phase C) to avoid burning tokens.
  *
@@ -27,15 +25,21 @@
  *   6. Invokes `pi --session $TMPDIR/session.jsonl --model $MODEL -p $PROMPT`
  *      with `NAPKIN_DISTILL_NO_RECURSE=1` so a nested distill can't
  *      re-spawn against this verification vault.
- *   7. After pi exits, runs the same six post-conditions documented in
- *      the V2 fixture (`research/v2-v3-verification.md`):
+ *   7. After pi exits, runs six post-conditions on the resulting vault:
  *        a. No conflict markers in `*.md`
  *        b. Vault HEAD on default branch
- *        c. New squash commit on default branch (rev-list --count > 0)
+ *        c. New squash commit on default branch
+ *           (rev-list --count >= 2 — fixture pre-adds 1 "main edit"
+ *           commit before pi runs, so >= 2 means the agent landed at
+ *           least 1 squash on top of it)
  *        d. Distill branch removed (or only worktree-tracked)
- *        e. No `--force` push attempted (pre-/post-push not relevant
- *           here since this fixture has no remote)
+ *        e. Worktree removed from `git worktree list`
+ *           (V2's "no force-push attempted" is unverifiable on this
+ *           remoteless fixture; this slot substitutes the design-locked
+ *           post-validation requirement that the wrapper teardown left
+ *           no worktree behind)
  *        f. Conflict resolution shape — `note.md` no longer has markers
+ *           and at least one source version's text survived
  *
  *   Prints a PASS / FAIL summary, exits 0 on PASS, 1 on FAIL.
  *
