@@ -132,6 +132,21 @@ else
   # dropped. TMPDIR is the documented portable fallback. (R12-CI-1.)
   LOG_DIR="${TMPDIR:-/tmp}/napkin-distill/merge-driver-logs"
 fi
+# Tighten umask BEFORE LOG_DIR creation so the dir lands at 0700 and
+# all subsequent forensic writes (LOG_FILE appends, .base/.ours/.theirs
+# snapshots) inherit 0600 instead of the default 0755/0644. Vault
+# content snapshots and pi stderr captures are private; world-readable
+# on multi-user systems leaks PII / credentials / model-output excerpts
+# (R13-SC-1, paired with R12-PERF-1's retention policy in v0.1.1).
+# Also closes a DoS-by-squat vector in the TMPDIR fallback path: a
+# hostile local user pre-creating /tmp/napkin-distill/ mode 0700 would
+# cause legitimate forensic writes to fail silently — a 0077 umask
+# means our own mkdir -p returns 0700 immediately, so the squat
+# attempt collides instead of going undetected. The driver is short-
+# lived (one process per conflicted file) so a global setting at this
+# point persists cleanly for all subsequent writes without scope
+# concerns.
+umask 0077
 mkdir -p "$LOG_DIR" 2>/dev/null || true
 LOG_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 LOG_FILE_HASH="$(printf '%s' "$FILENAME" | sha256sum 2>/dev/null | head -c "$SHA256_FILE_HASH_LEN")"

@@ -642,6 +642,69 @@ describe("napkin-distill-merge forensic logging (POST-CONV-6)", () => {
       fs.rmSync(tmpdirOverride, { recursive: true, force: true });
     }
   });
+
+  // R13-SC-1: TMPDIR fallback path lands forensic snapshots in a
+  // potentially world-writable /tmp subtree. Default umask 0022 → dir
+  // 0755 / files 0644 — vault content (.base/.ours/.theirs), pi
+  // stderr captures, and per-attempt diagnostic logs are then
+  // world-readable on multi-user systems, leaking PII / credentials
+  // / model-output excerpts. The driver tightens umask to 0077
+  // before LOG_DIR setup so the dir is 0700 and all subsequent files
+  // (LOG_FILE, .base, .ours, .theirs) inherit 0600.
+  test("forensic record perms are 0700/0600 in the TMPDIR fallback path (R13-SC-1)", () => {
+    const tmpdirOverride = fs.mkdtempSync(
+      path.join(os.tmpdir(), "merge-umask-"),
+    );
+    try {
+      withFixture(({ base, ours, theirs }) => {
+        const r = runMergeDriverWithEnv(
+          base,
+          ours,
+          theirs,
+          "vault/notes/sec.md",
+          "fail",
+          {
+            NAPKIN_DISTILL_ERROR_DIR: undefined,
+            XDG_CACHE_HOME: undefined,
+            HOME: undefined,
+            TMPDIR: tmpdirOverride,
+          },
+        );
+        expect(r.exitCode).toBe(1);
+
+        const fallbackDir = path.join(
+          tmpdirOverride,
+          "napkin-distill",
+          "merge-driver-logs",
+        );
+        // Use Node's fs.statSync().mode for stat-flag portability
+        // (GNU coreutils `stat -c` vs BSD `stat -f` would diverge on
+        // macOS/Linux CI). The 0o777 mask drops file-type bits.
+        const dirMode = fs.statSync(fallbackDir).mode & 0o777;
+        expect(dirMode).toBe(0o700);
+
+        const logFiles = fs
+          .readdirSync(fallbackDir)
+          .filter((f) => f.endsWith(".merge-driver.log"));
+        expect(logFiles.length).toBeGreaterThan(0);
+        const logFile = path.join(fallbackDir, logFiles[0]);
+        const logMode = fs.statSync(logFile).mode & 0o777;
+        expect(logMode).toBe(0o600);
+
+        // 3-strike snapshots (.base/.ours/.theirs) co-locate with
+        // LOG_FILE; same private-perm requirement — they hold byte-
+        // exact vault content.
+        for (const ext of ["base", "ours", "theirs"]) {
+          const snapPath = `${logFile}.${ext}`;
+          expect(fs.existsSync(snapPath)).toBe(true);
+          const snapMode = fs.statSync(snapPath).mode & 0o777;
+          expect(snapMode).toBe(0o600);
+        }
+      });
+    } finally {
+      fs.rmSync(tmpdirOverride, { recursive: true, force: true });
+    }
+  });
 });
 
 /**
