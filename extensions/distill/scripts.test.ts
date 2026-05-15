@@ -547,6 +547,44 @@ describe("napkin-distill-merge forensic logging (POST-CONV-6)", () => {
       }
     }
   });
+
+  // R12-CC-1 + R12-SC-7: pre-fix the LOG_FILE name was
+  // `<ts>-<filehash>.merge-driver.log`. Two driver invocations spawned
+  // in the same calendar second against the same FILENAME collided on
+  // the same log path — second invocation's lazy-init header
+  // overwrote (or appended to) the first's, mangling the forensic
+  // record. Adding `$$` (PID) to the name mirrors the wrapper's own
+  // `${TIMESTAMP}-$$-${BRANCH_SHORT}.log` pattern. Each spawnSync
+  // creates a fresh OS process so PIDs are guaranteed distinct.
+  test("concurrent runs against same FILENAME produce distinct log files (R12-CC-1, R12-SC-7)", () => {
+    const errorDir = fs.mkdtempSync(path.join(os.tmpdir(), "merge-collide-"));
+    try {
+      withFixture(({ base, ours, theirs }) => {
+        for (let i = 0; i < 3; i++) {
+          const r = runMergeDriverWithEnv(
+            base,
+            ours,
+            theirs,
+            "vault/notes/colliding.md",
+            "fail",
+            { NAPKIN_DISTILL_ERROR_DIR: errorDir },
+          );
+          expect(r.exitCode).toBe(1);
+        }
+        const logFiles = fs
+          .readdirSync(errorDir)
+          .filter((f) => f.endsWith(".merge-driver.log"));
+        // Three distinct logs even when timestamps collide.
+        expect(logFiles).toHaveLength(3);
+        // Each log's PID segment differs (filename shape:
+        // `<ts>-<pid>-<hash>.merge-driver.log`).
+        const pids = new Set(logFiles.map((f) => f.split("-")[1]));
+        expect(pids.size).toBe(3);
+      });
+    } finally {
+      fs.rmSync(errorDir, { recursive: true, force: true });
+    }
+  });
 });
 
 /**

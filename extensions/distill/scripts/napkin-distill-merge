@@ -131,7 +131,7 @@ if [ -z "$LOG_FILE_HASH" ]; then
   # the log path is still bounded.
   LOG_FILE_HASH="$(basename "$FILENAME" | tr -c 'A-Za-z0-9' '_' | head -c "$SHA256_FILE_HASH_LEN")"
 fi
-LOG_FILE="$LOG_DIR/${LOG_TIMESTAMP}-${LOG_FILE_HASH}.merge-driver.log"
+LOG_FILE="$LOG_DIR/${LOG_TIMESTAMP}-$$-${LOG_FILE_HASH}.merge-driver.log"
 LOG_FILE_TOUCHED=0
 
 log_init_if_needed() {
