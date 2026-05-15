@@ -1007,11 +1007,14 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
     const errorLogs: string[] = [];
     if (fs.existsSync(errorDir)) {
       for (const f of fs.readdirSync(errorDir)) {
-        // Skip the new `.outcome` sidecar (POST-CONV-5) — not a log;
-        // tests assert outcome separately. Keep both `.log` (fatal)
-        // and `.partial-merge.log` (R8-CC-1 forensic) — partial-merge
-        // tests below assert content of the latter.
+        // Skip the `.outcome` sidecar (POST-CONV-5) — not a log; tests
+        // assert outcome separately. Skip `.merge-driver*` files
+        // (R12-SC-1: driver now co-locates its forensic log + 3-strike
+        // snapshots here too). Keep both `.log` (fatal) and
+        // `.partial-merge.log` (R8-CC-1 forensic) — partial-merge tests
+        // below assert content of the latter.
         if (f.endsWith(".outcome")) continue;
+        if (f.includes(".merge-driver")) continue;
         errorLogs.push(fs.readFileSync(path.join(errorDir, f), "utf-8"));
       }
     }
@@ -1153,6 +1156,62 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
       fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
     ).toBe("no-content");
   });
+
+  // R12-SC-1: the wrapper sets NAPKIN_DISTILL_ERROR_DIR but historically
+  // forgot to `export` it, so the merge driver — spawned by `git merge`
+  // two layers below the wrapper — fell through to its XDG_CACHE_HOME
+  // fallback. Tests didn't catch the drift because `runMergeDriverWithEnv`
+  // in scripts.test.ts sets the env var explicitly. This regression
+  // exercises the export through the real wrapper-driver call chain.
+  test("merge-driver log co-locates in vault errorDir, not XDG cache", () => {
+    const conflictPath = path.join(vault, "conflict.md");
+    fs.writeFileSync(
+      conflictPath,
+      "---\ntitle: conflict\n---\n# initial content\n",
+    );
+    runGitOrThrow(vault, ["add", "-A"]);
+    runGitOrThrow(vault, ["commit", "-q", "-m", "add baseline"]);
+
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+      sessionDir,
+    );
+
+    fs.writeFileSync(
+      conflictPath,
+      "---\ntitle: conflict\n---\n# MAIN's later version\n",
+    );
+    runGitOrThrow(vault, ["add", "conflict.md"]);
+    runGitOrThrow(vault, ["commit", "-q", "-m", "main mutates conflict"]);
+
+    const r = runWrapperWithMockFail(workspace, {
+      "conflict.md":
+        "---\ntitle: conflict\n---\n# DISTILL's different version\n",
+    });
+    expect(r.exitCode).toBe(0);
+
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const driverLogsInVault = fs
+      .readdirSync(errorDir)
+      .filter((f) => f.endsWith(".merge-driver.log"));
+    expect(driverLogsInVault.length).toBeGreaterThan(0);
+
+    // XDG fallback dir must not have received any merge-driver logs.
+    // beforeEach overrides XDG_CACHE_HOME to a per-test temp; the
+    // pre-export bug landed logs at $xdgCacheDir/napkin-distill/
+    // merge-driver-logs/ instead.
+    const xdgFallbackDir = path.join(
+      xdgCacheDir,
+      "napkin-distill",
+      "merge-driver-logs",
+    );
+    const xdgFallbackEntries = fs.existsSync(xdgFallbackDir)
+      ? fs.readdirSync(xdgFallbackDir)
+      : [];
+    expect(xdgFallbackEntries).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1267,6 +1326,11 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
     const errorLogs = fs.existsSync(errorDir)
       ? fs
           .readdirSync(errorDir)
+          // Skip `.outcome` (sidecar) and `.merge-driver*` (R12-SC-1
+          // driver-side forensic) — we want the wrapper-side fatal log.
+          .filter(
+            (f) => !f.endsWith(".outcome") && !f.includes(".merge-driver"),
+          )
           .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
       : [];
     expect(errorLogs.length).toBeGreaterThan(0);
@@ -1338,6 +1402,10 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
     const errorLogs = fs.existsSync(errorDir)
       ? fs
           .readdirSync(errorDir)
+          // Skip `.outcome` (sidecar) and `.merge-driver*` (R12-SC-1).
+          .filter(
+            (f) => !f.endsWith(".outcome") && !f.includes(".merge-driver"),
+          )
           .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
       : [];
     expect(errorLogs.length).toBeGreaterThan(0);
@@ -1459,11 +1527,12 @@ describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
     const errorLogs: string[] = [];
     if (fs.existsSync(errorDir)) {
       for (const f of fs.readdirSync(errorDir)) {
-        // Skip the new `.outcome` sidecar (POST-CONV-5) — not a log;
-        // tests assert outcome separately. Keep both `.log` (fatal)
-        // and `.partial-merge.log` (R8-CC-1 forensic) — partial-merge
-        // tests below assert content of the latter.
+        // Skip the `.outcome` sidecar (POST-CONV-5) and `.merge-driver*`
+        // files (R12-SC-1). Keep both `.log` (fatal) and
+        // `.partial-merge.log` (R8-CC-1 forensic) — partial-merge tests
+        // below assert content of the latter.
         if (f.endsWith(".outcome")) continue;
+        if (f.includes(".merge-driver")) continue;
         errorLogs.push(fs.readFileSync(path.join(errorDir, f), "utf-8"));
       }
     }
@@ -1685,10 +1754,13 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
     const errorLogs = fs.existsSync(errorDir)
       ? fs
           .readdirSync(errorDir)
-          // Skip the new `.outcome` sidecar (POST-CONV-5) — success-path
-          // marker, not a log. `.partial-merge.log` (R8-CC-1) is also a
-          // success-path forensic file but doesn't appear here (no salvage).
-          .filter((f) => !f.endsWith(".outcome"))
+          // Skip `.outcome` (POST-CONV-5 success-path marker) and
+          // `.merge-driver*` (R12-SC-1 driver forensic). `.partial-merge.log`
+          // (R8-CC-1) is also a success-path forensic file but doesn't
+          // appear here (no salvage).
+          .filter(
+            (f) => !f.endsWith(".outcome") && !f.includes(".merge-driver"),
+          )
           .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
       : [];
     expect(errorLogs).toEqual([]);

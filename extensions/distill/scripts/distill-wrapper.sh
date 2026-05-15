@@ -126,6 +126,14 @@ if [ -z "$VAULT" ] || [ -z "$WORKTREE" ] || [ -z "$BRANCH" ] || \
   exit 2
 fi
 
+# Export so the merge driver subprocess (spawned by `git merge` two layers
+# down) inherits it and co-locates its forensic logs in the wrapper's
+# vault-local errorDir. Without `export`, this stays a wrapper-only local
+# and the driver falls through to the XDG_CACHE_HOME fallback at
+# napkin-distill-merge:124, contradicting the production-doc claim that
+# all per-distill artefacts live under <vault>/.napkin/distill/errors/.
+export NAPKIN_DISTILL_ERROR_DIR="$ERROR_DIR"
+
 # Compute error log path. `branch-short-hash` is the portion after `distill/`
 # (already unique per invocation — hex nonce + epoch).
 BRANCH_SHORT="${BRANCH#distill/}"
