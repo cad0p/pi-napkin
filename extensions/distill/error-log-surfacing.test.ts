@@ -136,6 +136,23 @@ describe("findDistillErrorLogForBranch (R7-SC-3)", () => {
     // Fatal log wins.
     expect(r).toBe(path.join(errorDir, fatalLog));
   });
+
+  test("warning log files are NOT picked up as failures (CORR-2)", () => {
+    // CORR-2 (Phase C Round 1): the wrapper's `log_warning` writes to
+    // `<base>.warning.log` for observed-but-accepted invariant breaches
+    // (e.g. squash-invariant violation when commit_count > 1). The
+    // JS-side failure-surfacing must NOT pick up these warning logs —
+    // a `merged-content` run with a warning attached is still a success.
+    const branchShort = "ghi789-1715198600";
+    const warningLog = `2026-05-14T12:00:00Z-12347-${branchShort}.warning.log`;
+    fs.writeFileSync(
+      path.join(errorDir, warningLog),
+      "# napkin distill warning log\nWARNING: squash-invariant violation\n",
+    );
+    const r = findDistillErrorLogForBranch(errorDir, branchShort);
+    // Warning log present, but no fatal log → returns null.
+    expect(r).toBeNull();
+  });
 });
 
 describe("findDistillOutcomeForBranch (POST-CONV-5)", () => {

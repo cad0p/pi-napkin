@@ -315,6 +315,39 @@ log_error() {
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> "$ERROR_LOG"
 }
 
+# Soft-warning entries are written to a separate `.warning.log` file
+# (distinct from `.log` which is the fatal-error signal the JS-side
+# `findDistillErrorLogForBranch` picks up). Used for observed-but-
+# accepted invariant breaches the wrapper does NOT escalate to a
+# `failed:*` outcome (e.g. agent committed multiple times to default
+# without squashing — design.md "Mocked-pi behaviors" #6: accepted
+# as `merged-content` but the squash-invariant is documented and
+# worth logging for forensic clarity).
+#
+# Naming convention follows `<base>.partial-merge.log` (see
+# error-log-surfacing.test.ts "partial-merge salvage log files are
+# NOT picked up as failures"): `findDistillErrorLogForBranch` matches
+# only the suffix `-<branchShort>.log`, so `<base>.warning.log` is
+# safely ignored by the JS-side poller.
+WARNING_LOG="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.warning.log"
+WARNING_LOG_TOUCHED=0
+log_warning() {
+  if [ "$WARNING_LOG_TOUCHED" -eq 0 ]; then
+    mkdir -p "$ERROR_DIR"
+    {
+      echo "# napkin distill warning log"
+      echo "branch: $BRANCH"
+      echo "vault: $VAULT"
+      echo "worktree: $WORKTREE"
+      echo "started: $TIMESTAMP"
+      echo "pid: $$"
+      echo
+    } >> "$WARNING_LOG"
+    WARNING_LOG_TOUCHED=1
+  fi
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) WARNING: $*" >> "$WARNING_LOG"
+}
+
 # Capture the dangling commit SHA for forensic recovery (git gc grace period
 # is 2 weeks by default; `git reflog` holds 90 days). Printed into the error
 # log on any fatal failure path so the user can `git cat-file -p <sha>` to
@@ -1389,6 +1422,18 @@ if [ "$VAULT_COMMIT_COUNT" -eq 0 ]; then
   # severity contract.
   write_outcome "no-content"
   exit 0
+fi
+
+# CORR-2 (Phase C Round 1): design.md "Mocked-pi behaviors" #6 — agent
+# committed 2+ times to default directly (rather than to its branch +
+# squash-merge). The wrapper accepts the outcome as `merged-content`
+# (the dispatch is no-content vs has-content; the squash invariant is
+# a soft suggestion baked into the prompt, not a hard wrapper-side
+# constraint), but logs a warning so the forensic record reflects
+# that the squash didn't collapse to one commit. Keeps the design's
+# spec literally implemented.
+if [ "$VAULT_COMMIT_COUNT" -gt 1 ]; then
+  log_warning "validate_commit_count: agent landed $VAULT_COMMIT_COUNT commits on $DEFAULT_BRANCH since startSha (squash-invariant violation; expected 1). Outcome accepted as merged-content but the squash didn't collapse to a single commit."
 fi
 
 # Run merged-local / divergent-history detection. detect_local_only returns:

@@ -248,7 +248,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
   // case to keep the dispatch invariant locked.
   // -------------------------------------------------------------------------
 
-  test("multiple-commits-on-main fixture \u2192 merged-content (2+ commits accepted)", () => {
+  test("multiple-commits-on-main fixture \u2192 merged-content (2+ commits accepted) + squash-invariant warning logged (CORR-2)", () => {
     const s = makeScaffold();
     try {
       const r = runWrapperWithStub(s, {
@@ -266,6 +266,35 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
         { encoding: "utf-8" },
       ).stdout.trim();
       expect(count).toBe("2");
+
+      // CORR-2 (Phase C Round 1): design.md "Mocked-pi behaviors" #6
+      // requires the wrapper to LOG A WARNING when the squash invariant
+      // is violated (commit_count > 1) even though the outcome is
+      // accepted as `merged-content`. The warning lives in a sibling
+      // `.warning.log` file (distinct from `.log` which is the fatal-
+      // error signal — adding to `.log` would mis-surface as a failed
+      // distillation in the UI). The naming convention mirrors the
+      // existing `.partial-merge.log` precedent — see
+      // error-log-surfacing.test.ts.
+      const branchShort = r.branch.replace(/^distill\//, "");
+      const warningLogs = fs
+        .readdirSync(s.errorDir)
+        .filter((f) => f.endsWith(`-${branchShort}.warning.log`));
+      expect(warningLogs.length).toBe(1);
+      const warningBody = fs.readFileSync(
+        path.join(s.errorDir, warningLogs[0]),
+        "utf-8",
+      );
+      expect(warningBody).toContain("WARNING:");
+      expect(warningBody).toContain("squash-invariant violation");
+      expect(warningBody).toMatch(/landed 2 commits on main/);
+
+      // The fatal `.log` must NOT exist (no failure surface).
+      const fatalLogs = fs
+        .readdirSync(s.errorDir)
+        .filter((f) => f.endsWith(`-${branchShort}.log`))
+        .filter((f) => !f.endsWith(".warning.log"));
+      expect(fatalLogs.length).toBe(0);
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
