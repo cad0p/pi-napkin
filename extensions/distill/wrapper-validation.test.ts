@@ -437,15 +437,22 @@ git -C "${s.vault}" commit -m "distill: ahead" >/dev/null
     }
   });
 
-  test("detect_local_only DIVERGENT: origin rewritten under local \u2192 failed:force-push-detected (SEC-A-1)", () => {
+  test("detect_local_only DIVERGENT: origin diverges from local \u2192 failed:divergent-history (SEC-A-1, SEC-1/CORR-2)", () => {
     // Spec at "Push behavior: never force" mandates a wrapper-side
     // ancestry check. Equality alone (the pre-fix detect_local_only)
-    // couldn't distinguish a fast-forward push from a force-push: in
-    // either case after the agent's push fetches back, local == origin.
-    // Here we simulate a force-push by giving origin a divergent
-    // history (commit not in local's reachability) before the wrapper
-    // runs detect_local_only; the helper must return rc=2 and the
-    // wrapper must classify as failed:force-push-detected.
+    // couldn't distinguish a fast-forward push from a divergent
+    // history: in either case after the agent's push fetches back,
+    // local == origin. Here we simulate divergence by giving origin
+    // a history that doesn't share commits with local's main beyond
+    // the seed; the helper must return rc=2 and the wrapper must
+    // classify as failed:divergent-history.
+    //
+    // The reason code was renamed from `force-push-detected` to
+    // `divergent-history` in Pass 2A: the original name implied
+    // attacker action when the common cause is a teammate (or the
+    // user from another clone) pushing to origin while this distill
+    // ran \u2014 a non-ancestral but entirely benign event. The recovery
+    // hint now leads with the normal case.
     const s = makeScaffold();
     try {
       // Stand up a bare-repo origin.
@@ -497,7 +504,13 @@ git -C "${s.vault}" commit -m "distill: local" >/dev/null
       );
       const r = runWrapper(s);
       expect(r.exitCode).toBe(1);
-      expect(r.outcome).toBe("failed:force-push-detected");
+      expect(r.outcome).toBe("failed:divergent-history");
+      // The recovery hint should mention the common (third-party-push)
+      // case so users aren't misled into thinking only an attack
+      // produces this outcome (SEC-1/CORR-2).
+      const sidecar = fs.readFileSync(r.outcomePath ?? "", "utf-8");
+      expect(sidecar).toMatch(/diverged/);
+      expect(sidecar).toMatch(/teammate|another clone/i);
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }

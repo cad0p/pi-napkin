@@ -433,7 +433,7 @@ safe_rm_worktree() {
 #   head-not-on-default
 #   agent-exit-nonzero
 #   agent-timeout
-#   force-push-detected
+#   divergent-history
 #
 # Cleanup operations are best-effort: a failed `worktree remove` or
 # `branch -D` does NOT prevent the outcome write — the JS-side
@@ -503,8 +503,8 @@ salvage() {
     agent-timeout)
       hint="Agent task exceeded the maxDurationMinutes budget and was killed. Bump 'distill.maxDurationMinutes' in vault config.json if this happens repeatedly. Distill content (if any) is recoverable from 'git -C $vault reflog'."
       ;;
-    force-push-detected)
-      hint="origin/$DEFAULT_BRANCH and local $DEFAULT_BRANCH have diverged (force-push or remote rewrite). Inspect with 'git -C $vault log origin/$DEFAULT_BRANCH..$DEFAULT_BRANCH' and 'git -C $vault log $DEFAULT_BRANCH..origin/$DEFAULT_BRANCH'. Resolve manually before next distill. Distill content is recoverable from 'git -C $vault reflog'."
+    divergent-history)
+      hint="origin/$DEFAULT_BRANCH and local $DEFAULT_BRANCH have diverged — typically because someone (you or a teammate) pushed to origin from another clone before this distill ran. Less commonly, someone force-pushed there. Inspect with 'git -C $vault log origin/$DEFAULT_BRANCH..$DEFAULT_BRANCH' (your local commits not on origin) and 'git -C $vault log $DEFAULT_BRANCH..origin/$DEFAULT_BRANCH' (origin commits not local), then resolve by pulling-and-merging or by inspecting the divergence and choosing the right recovery (revert, manual merge, etc.). Distill content is recoverable from 'git -C $vault reflog' for ~90 days."
       ;;
     *)
       hint="Distill failed with an unrecognised reason. See the error log for diagnostics. Distill content (if any) is recoverable from 'git -C $vault reflog'."
@@ -667,9 +667,9 @@ validate_commit_count() {
 # haven't reached `origin/<default_branch>`. Distinguishes legitimate
 # fast-forward state (local ahead of remote, remote is ancestor of
 # local — the agent didn't push but origin's history is intact) from
-# divergent state (remote is NOT an ancestor of local — origin's
-# history was rewritten, e.g. by a force-push the agent ran despite
-# the prompt's `NEVER use --force` prohibition).
+# divergent state (remote is NOT an ancestor of local — origin and
+# local share no linear ancestry, e.g. because a teammate pushed from
+# another clone or, less commonly, someone force-pushed origin).
 #
 # Per the spec at "Push behavior: never force":
 #   "Spec the prohibition in the prompt; the wrapper post-validates by
@@ -687,9 +687,15 @@ validate_commit_count() {
 #       (no remote-tracking ref yet OR remote is ancestor of local).
 #       Either case is legitimate “distilled but not pushed” state.
 #   1 — in sync OR no origin configured: proceed to `merged-content`.
-#   2 — divergent histories (`failed:force-push-detected` outcome):
-#       remote is NOT an ancestor of local. Force-push or remote
-#       rewrite happened.
+#   2 — divergent histories (`failed:divergent-history` outcome):
+#       remote is NOT an ancestor of local. The wrapper surfaces this
+#       as a failure because the agent's safe-recovery flow
+#       (pull --no-rebase + push) did not run or did not converge,
+#       and the user must inspect/resolve before the next distill.
+#       The naming is neutral on cause: a benign third-party push
+#       from another clone is the common case, force-push the rare
+#       one (and SEC-1/CORR-2 round-2 review elevated this to a
+#       cross-reviewer-consensus rename from `force-push-detected`).
 detect_local_only() {
   local vault="$1"
   local default="$2"
@@ -718,7 +724,7 @@ detect_local_only() {
     return 1
   fi
   # Local differs from remote. Ancestry decides whether the divergence
-  # is legitimate (fast-forward pending) or rewritten (force-push).
+  # is legitimate (fast-forward pending) or non-linear (`divergent-history`).
   if git -C "$vault" merge-base --is-ancestor "$remote_sha" "$local_sha"; then
     # Remote is ancestor of local — fast-forward pending. Either the
     # agent didn't push, or the push failed and the agent fell back
@@ -726,10 +732,12 @@ detect_local_only() {
     return 0
   fi
   # Remote is NOT an ancestor of local — origin and local share no
-  # linear ancestry. The only way this happens after agent exit is a
-  # force-push that rewrote origin's history (or, very rarely, a
-  # concurrent third-party rewrite of origin). The spec forbids
-  # force-push; the wrapper enforces it here.
+  # linear ancestry. The common case is a teammate (or the user from
+  # another clone) pushing to origin while this distill ran; the rare
+  # case is a force-push that rewrote origin's history. Either way
+  # the agent's safe-recovery path (pull --no-rebase + push) did not
+  # converge, so the wrapper surfaces a `divergent-history` failure
+  # for the user to inspect and resolve.
   log_error "detect_local_only: origin/$default at $remote_sha is not an ancestor of local $default at $local_sha (divergent histories)"
   return 2
 }
@@ -1040,8 +1048,9 @@ fi
 #   head-not-on-default        — V2 fail, vault HEAD not on default branch
 #   agent-exit-nonzero         — pi exited non-zero with no other diagnostic
 #   agent-timeout              — timeout(1) killed the agent (rc 124 or 137)
-#   force-push-detected        — origin/<default> diverges from local <default>
-#                                 (force-push or remote rewrite; spec at
+#   divergent-history          — origin/<default> diverges from local <default>
+#                                 (typically a teammate's push from another
+#                                 clone; rarely a force-push). Spec at
 #                                 "Push behavior: never force" mandates this
 #                                 wrapper-side ancestry validation — SEC-A-1)
 #
@@ -1106,15 +1115,19 @@ if [ "$VAULT_COMMIT_COUNT" -eq 0 ]; then
   exit 0
 fi
 
-# Run merged-local / force-push detection. detect_local_only returns:
+# Run merged-local / divergent-history detection. detect_local_only returns:
 #   0 — local-only (`merged-local` outcome): origin configured AND
 #       local is ahead of remote in a fast-forwardable way.
 #   1 — in sync OR no origin configured: proceed to `merged-content`.
-#   2 — divergent histories (`failed:force-push-detected` outcome):
-#       remote is NOT an ancestor of local. Force-push or remote
-#       rewrite happened despite the prompt's `NEVER use --force`
-#       prohibition (SEC-A-1: spec at "Push behavior: never force"
-#       mandates wrapper-side ancestry validation).
+#   2 — divergent histories (`failed:divergent-history` outcome):
+#       remote is NOT an ancestor of local. Either a teammate's push
+#       to origin from another clone or, more rarely, a force-push
+#       that rewrote origin's history. The agent's safe-recovery
+#       path (pull --no-rebase + push) did not converge, so the
+#       wrapper surfaces it for user inspection (SEC-A-1: spec at
+#       "Push behavior: never force" mandates wrapper-side ancestry
+#       validation; SEC-1/CORR-2 round-2 renamed the reason code
+#       from `force-push-detected` to neutral-on-cause naming).
 #
 # Capture rc explicitly because `if detect_local_only … ; then` would
 # only branch on rc=0 vs rc!=0, collapsing the rc=1 (in sync) and
@@ -1128,9 +1141,9 @@ if [ "$LOCAL_ONLY_RC" -eq 0 ]; then
   exit 0
 fi
 if [ "$LOCAL_ONLY_RC" -eq 2 ]; then
-  log_error "detect_local_only signaled divergent histories (rc 2) — force-push or remote rewrite happened despite the prompt's prohibition"
+  log_error "detect_local_only signaled divergent histories (rc 2) — origin/$DEFAULT_BRANCH and local $DEFAULT_BRANCH share no linear ancestry; agent's pull-merge-push recovery did not converge"
   record_dangling_sha
-  salvage "$VAULT" "$WORKTREE" "$BRANCH" "force-push-detected"
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "divergent-history"
   exit 1
 fi
 
