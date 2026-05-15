@@ -976,6 +976,17 @@ cleanup() {
   if [ -n "${PRE_DISTILL_MARKER_FILES_FILE:-}" ]; then
     rm -f "$PRE_DISTILL_MARKER_FILES_FILE" 2>/dev/null || true
   fi
+  # SEC-2 R3: pi_stderr is the agent's stderr capture file (allocated
+  # via mktemp before invoking pi). Normal-path cleanup happens inline
+  # at the post-agent block, but a SIGTERM-on-grace, OOM kill, or any
+  # crash before that block leaves the file orphaned in $TMPDIR. The
+  # EXIT trap doesn't fire on SIGKILL (kernel-enforced) but DOES fire
+  # on SIGTERM grace and on every normal exit — register the cleanup
+  # here for defense-in-depth. Empty string when pi was skipped
+  # (NAPKIN_DISTILL_SKIP_PI=1) or we crashed before the mktemp.
+  if [ -n "${pi_stderr:-}" ]; then
+    rm -f "$pi_stderr" 2>/dev/null || true
+  fi
   exit "$rc"
 }
 trap cleanup EXIT
@@ -1226,7 +1237,14 @@ if [ "${NAPKIN_DISTILL_SKIP_PI:-}" != "1" ]; then
   # Capture pi's stderr into the error log on non-zero exit. stdout is
   # discarded — the agent's chatter isn't useful forensically; what
   # matters is the post-exit filesystem state.
-  pi_stderr="$(mktemp)"
+  #
+  # SEC-2 R3: use the napkin-distill- prefix so abandoned tmpfiles
+  # (post-SIGKILL, OOM, etc.) are attributable to this wrapper instead
+  # of orphaning as anonymous `tmp.XXXXXX` files in $TMPDIR. The
+  # EXIT trap registers an rm -f for $pi_stderr as defense-in-depth
+  # against the SIGTERM-grace path (kernel doesn't fire EXIT on
+  # SIGKILL, but does on SIGTERM and normal exit).
+  pi_stderr="$(mktemp -t napkin-distill-pi_stderr.XXXXXX)"
   # `timeout(1) --foreground -k <secs> <budget>` sends SIGTERM at the
   # budget boundary, then escalates to SIGKILL after the grace period
   # (TIMEOUT_KILL_GRACE_SECS) if the target hasn't exited. `--foreground`
