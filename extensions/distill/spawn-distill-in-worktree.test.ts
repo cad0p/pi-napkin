@@ -403,6 +403,17 @@ describe("distill-wrapper.sh (integration)", () => {
     const mainFile = path.join(vault, "note.md");
     expect(fs.existsSync(mainFile)).toBe(true);
     expect(fs.readFileSync(mainFile, "utf-8")).toContain("# new note");
+
+    // POST-CONV-5: outcome sidecar records `merged-content`.
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const branchShort = branch.replace(/^distill\//, "");
+    const outcomeFiles = fs
+      .readdirSync(errorDir)
+      .filter((f) => f.endsWith(`-${branchShort}.outcome`));
+    expect(outcomeFiles).toHaveLength(1);
+    expect(
+      fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
+    ).toBe("merged-content");
   });
 
   test("empty distill (no changes): exits 0 and cleans up without creating a commit", () => {
@@ -428,6 +439,17 @@ describe("distill-wrapper.sh (integration)", () => {
       encoding: "utf-8",
     }).stdout;
     expect(logAfter).toBe(logBefore);
+
+    // POST-CONV-5: outcome sidecar records `no-content`.
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const branchShort = branch.replace(/^distill\//, "");
+    const outcomeFiles = fs
+      .readdirSync(errorDir)
+      .filter((f) => f.endsWith(`-${branchShort}.outcome`));
+    expect(outcomeFiles).toHaveLength(1);
+    expect(
+      fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
+    ).toBe("no-content");
   });
 
   test("POST-CONV-1: pi-self-committed content squashes to main (no silent drop)", () => {
@@ -493,6 +515,18 @@ describe("distill-wrapper.sh (integration)", () => {
     expect(fs.readFileSync(mainFile, "utf-8")).toContain(
       "# pi self-committed this",
     );
+
+    // POST-CONV-5: outcome sidecar records `merged-content` even though
+    // the wrapper did not run its own `git commit` step.
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const branchShort = branch.replace(/^distill\//, "");
+    const outcomeFiles = fs
+      .readdirSync(errorDir)
+      .filter((f) => f.endsWith(`-${branchShort}.outcome`));
+    expect(outcomeFiles).toHaveLength(1);
+    expect(
+      fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
+    ).toBe("merged-content");
   });
 
   test("concurrent worktrees don't interfere (both complete)", () => {
@@ -949,6 +983,11 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
     const errorLogs: string[] = [];
     if (fs.existsSync(errorDir)) {
       for (const f of fs.readdirSync(errorDir)) {
+        // Skip the new `.outcome` sidecar (POST-CONV-5) — not a log;
+        // tests assert outcome separately. Keep both `.log` (fatal)
+        // and `.partial-merge.log` (R8-CC-1 forensic) — partial-merge
+        // tests below assert content of the latter.
+        if (f.endsWith(".outcome")) continue;
         errorLogs.push(fs.readFileSync(path.join(errorDir, f), "utf-8"));
       }
     }
@@ -1022,6 +1061,18 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
     // Main has a squash commit.
     const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "5"]);
     expect(log).toContain("distill: merge");
+
+    // POST-CONV-5: outcome sidecar records `partial-merge` (squash
+    // landed on main, but some files reverted to default-branch's copy).
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const branchShort = workspace.branchName.replace(/^distill\//, "");
+    const outcomeFiles = fs
+      .readdirSync(errorDir)
+      .filter((f) => f.endsWith(`-${branchShort}.outcome`));
+    expect(outcomeFiles).toHaveLength(1);
+    expect(
+      fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
+    ).toBe("partial-merge");
   });
 
   test("all files conflict: salvage reverts everything, no squash commit created", () => {
@@ -1063,6 +1114,20 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
     // Error log records the salvage.
     expect(r.errorLogs.length).toBeGreaterThan(0);
     expect(r.errorLogs.join("\n")).toContain("a.md");
+
+    // POST-CONV-5: outcome sidecar records `no-content` because the
+    // squash produced no staged changes on main (all files reverted to
+    // main's existing version). Even though the inner merge ran the
+    // salvage path, no distill content reached main this round.
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const branchShort = workspace.branchName.replace(/^distill\//, "");
+    const outcomeFiles = fs
+      .readdirSync(errorDir)
+      .filter((f) => f.endsWith(`-${branchShort}.outcome`));
+    expect(outcomeFiles).toHaveLength(1);
+    expect(
+      fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
+    ).toBe("no-content");
   });
 });
 
@@ -1354,6 +1419,11 @@ describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
     const errorLogs: string[] = [];
     if (fs.existsSync(errorDir)) {
       for (const f of fs.readdirSync(errorDir)) {
+        // Skip the new `.outcome` sidecar (POST-CONV-5) — not a log;
+        // tests assert outcome separately. Keep both `.log` (fatal)
+        // and `.partial-merge.log` (R8-CC-1 forensic) — partial-merge
+        // tests below assert content of the latter.
+        if (f.endsWith(".outcome")) continue;
         errorLogs.push(fs.readFileSync(path.join(errorDir, f), "utf-8"));
       }
     }
@@ -1566,6 +1636,10 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
     const errorLogs = fs.existsSync(errorDir)
       ? fs
           .readdirSync(errorDir)
+          // Skip the new `.outcome` sidecar (POST-CONV-5) — success-path
+          // marker, not a log. `.partial-merge.log` (R8-CC-1) is also a
+          // success-path forensic file but doesn't appear here (no salvage).
+          .filter((f) => !f.endsWith(".outcome"))
           .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
       : [];
     expect(errorLogs).toEqual([]);

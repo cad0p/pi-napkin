@@ -24,6 +24,7 @@ import {
   cleanupStaleWorktrees,
   DistillError,
   findDistillErrorLogForBranch,
+  findDistillOutcomeForBranch,
   getDistillState,
   getDistillTouchedFilesPostSquash,
   resolveDistillErrorDir,
@@ -747,6 +748,23 @@ export default function (pi: ExtensionAPI) {
        * return null.
        */
       checkFailure?: () => string | null;
+      /**
+       * Optional probe invoked when `target` disappears AND `checkFailure`
+       * returned null (no fatal error). Returns the wrapper-emitted
+       * outcome sidecar (POST-CONV-5): `{ outcomeClass, outcomePath,
+       * partialMergeLogPath }` when present, null when missing.
+       *
+       * Missing sidecar AND missing failure log = abnormal termination
+       * (SIGKILL / `set -e` / disk full / race) — the runner surfaces
+       * a warn-level notification per the locked notification severity
+       * contract. Legacy spawn doesn't produce outcome sidecars — omit
+       * or return null.
+       */
+      checkOutcome?: () => {
+        outcomeClass: string;
+        outcomePath: string;
+        partialMergeLogPath: string | null;
+      } | null;
     } | null;
   }
 
@@ -910,7 +928,13 @@ export default function (pi: ExtensionAPI) {
       }
       return;
     }
-    const { target, cleanup: spawnCleanup, onComplete, checkFailure } = spawned;
+    const {
+      target,
+      cleanup: spawnCleanup,
+      onComplete,
+      checkFailure,
+      checkOutcome,
+    } = spawned;
 
     // Record the size we spawned on so a shutdown firing between here and
     // completion dedupes against the in-flight distill.
@@ -1015,14 +1039,57 @@ export default function (pi: ExtensionAPI) {
         }
       }
 
+      // Outcome dispatch (POST-CONV-5). The wrapper writes a one-line
+      // `*.outcome` sidecar before any successful exit-0 path; the
+      // class string drives the UI severity per the locked notification
+      // severity contract. See `formatOutcomeNotification` for the
+      // full mapping. Strategies that don't produce sidecars (legacy
+      // /distill on git-less or disabled vaults) skip this entire
+      // dispatch and fall through to the default info notification.
+      let outcome: {
+        outcomeClass: string;
+        outcomePath: string;
+        partialMergeLogPath: string | null;
+      } | null = null;
+      if (checkOutcome) {
+        try {
+          outcome = checkOutcome();
+        } catch {
+          outcome = null;
+        }
+      }
+
       if (ctx.hasUI && theme) {
+        let level: "info" | "warning" | "error" = "info";
+        let message = `Distillation complete (${elapsed}s)`;
+        let statusGlyph = theme.fg("success", "✓");
+        let statusText = ` distill ${elapsed}s`;
+
+        if (checkOutcome) {
+          const dispatch = formatOutcomeNotification({
+            outcome,
+            elapsedSec: elapsed,
+            readPartialMergeLog: (p) => {
+              try {
+                return fs.readFileSync(p, "utf-8");
+              } catch {
+                return null;
+              }
+            },
+          });
+          level = dispatch.level;
+          message = dispatch.message;
+          statusGlyph = theme.fg(dispatch.statusKey, dispatch.statusGlyph);
+          statusText = dispatch.statusText;
+        }
+
         if (showStatus) {
           ctx.ui.setStatus(
             "napkin-distill",
-            theme.fg("success", "✓") + theme.fg("dim", ` distill ${elapsed}s`),
+            statusGlyph + theme.fg("dim", statusText),
           );
         }
-        ctx.ui.notify(`Distillation complete (${elapsed}s)`, "info");
+        ctx.ui.notify(message, level);
       }
     }, 2000);
   }
@@ -1143,6 +1210,11 @@ export default function (pi: ExtensionAPI) {
     cleanup: () => void;
     onComplete?: (ctx: RunCtx) => void;
     checkFailure?: () => string | null;
+    checkOutcome?: () => {
+      outcomeClass: string;
+      outcomePath: string;
+      partialMergeLogPath: string | null;
+    } | null;
   } | null {
     const { ctx: c, vaultContentPath, sessionFile, config } = args;
     try {
@@ -1179,6 +1251,7 @@ export default function (pi: ExtensionAPI) {
           postOverlapNoticeOnCompletion(rctx, vaultContentPath, startSha);
         },
         checkFailure: () => findDistillErrorLogForBranch(errorDir, branchShort),
+        checkOutcome: () => findDistillOutcomeForBranch(errorDir, branchShort),
       };
     } catch (err) {
       const theme = c.hasUI ? c.ui.theme : null;
@@ -1581,6 +1654,107 @@ export function formatOverlapNotice(overlapFiles: string[]): string {
     "merged automatically at distill completion; consider re-reading before " +
     "further edits."
   );
+}
+
+/**
+ * Pure helper for the POST-CONV-5 outcome-sidecar dispatch. Maps the
+ * wrapper's exit-0 outcome class (or its absence) to the UI severity +
+ * notification text. Caller (runDistillWith) applies theme styling +
+ * dispatches to `ctx.ui.notify` / `ctx.ui.setStatus`.
+ *
+ * Inputs:
+ *   - `outcome`: the parsed sidecar (`{ outcomeClass, partialMergeLogPath }`)
+ *               or null when no sidecar exists at all (abnormal termination).
+ *   - `elapsedSec`: wall-clock seconds since spawn, used in the
+ *                  default success message (`merged-content`).
+ *   - `readPartialMergeLog`: optional reader injected for testability.
+ *                            Returns the log content as a string, or
+ *                            null on read failure. Production passes
+ *                            an `fs.readFileSync` wrapper.
+ *
+ * Outputs `{ level, message, statusKey, statusText }` per class:
+ *   merged-content   → info  / "Distillation complete (Ns)"
+ *   no-content       → warn  / "Distillation ran but saved no content"
+ *   partial-merge    → warn  / "Distillation: partial merge — N file(s) reverted to main; see <log>"
+ *   <unknown>        → warn  / defensive class string
+ *   missing sidecar  → warn  / "Distillation terminated abnormally — no outcome record"
+ *
+ * `statusKey` maps to the theme's `fg(severity, glyph)` palette:
+ *   success | warning | error.
+ *
+ * Exported for unit tests; production wiring lives in `runDistillWith`.
+ */
+export function formatOutcomeNotification(args: {
+  outcome: {
+    outcomeClass: string;
+    partialMergeLogPath: string | null;
+  } | null;
+  elapsedSec: number;
+  readPartialMergeLog?: (path: string) => string | null;
+}): {
+  level: "info" | "warning" | "error";
+  message: string;
+  statusKey: "success" | "warning" | "error";
+  statusGlyph: string;
+  statusText: string;
+} {
+  const { outcome, elapsedSec, readPartialMergeLog } = args;
+  if (!outcome) {
+    return {
+      level: "warning",
+      message: "Distillation terminated abnormally — no outcome record",
+      statusKey: "warning",
+      statusGlyph: "⚠",
+      statusText: " distill: abnormal",
+    };
+  }
+  switch (outcome.outcomeClass) {
+    case "merged-content":
+      return {
+        level: "info",
+        message: `Distillation complete (${elapsedSec}s)`,
+        statusKey: "success",
+        statusGlyph: "✓",
+        statusText: ` distill ${elapsedSec}s`,
+      };
+    case "no-content":
+      return {
+        level: "warning",
+        message: "Distillation ran but saved no content",
+        statusKey: "warning",
+        statusGlyph: "⚠",
+        statusText: " distill: no content",
+      };
+    case "partial-merge": {
+      let revertedCount = 0;
+      if (outcome.partialMergeLogPath && readPartialMergeLog) {
+        const content = readPartialMergeLog(outcome.partialMergeLogPath);
+        if (content) {
+          revertedCount = content
+            .split("\n")
+            .filter((line) => /\breverted '/.test(line)).length;
+        }
+      }
+      const message = outcome.partialMergeLogPath
+        ? `Distillation: partial merge — ${revertedCount} file${revertedCount === 1 ? "" : "s"} reverted to main; see ${outcome.partialMergeLogPath}`
+        : "Distillation: partial merge — some files reverted to main";
+      return {
+        level: "warning",
+        message,
+        statusKey: "warning",
+        statusGlyph: "⚠",
+        statusText: " distill: partial",
+      };
+    }
+    default:
+      return {
+        level: "warning",
+        message: `Distillation: unrecognised outcome '${outcome.outcomeClass}'`,
+        statusKey: "warning",
+        statusGlyph: "⚠",
+        statusText: " distill: unknown outcome",
+      };
+  }
 }
 
 /**

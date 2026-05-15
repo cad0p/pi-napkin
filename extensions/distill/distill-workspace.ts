@@ -817,6 +817,70 @@ export function findDistillErrorLogForBranch(
 }
 
 /**
+ * Find the most recent outcome sidecar for a distill branch. Returns
+ * `{ class, outcomePath, partialMergeLogPath }` when a `*.outcome` file
+ * exists for `branchShort`, else null.
+ *
+ * The outcome sidecar (POST-CONV-5) is written by the wrapper as the
+ * LAST action before any successful exit-0 path. One-line content is
+ * the class string: `merged-content` / `no-content` / `partial-merge`.
+ * Used by the JS-side `runDistillWith` poller to dispatch the right UI
+ * severity (info vs warn) since multiple `exit 0` wrapper paths
+ * previously produced the same notification.
+ *
+ * Missing outcome AND missing fatal error log = abnormal termination
+ * (SIGKILL / `set -e` / disk full / race) — caller must surface this
+ * as a warn since the wrapper is detached and we have no other signal
+ * channel.
+ *
+ * `partialMergeLogPath` is populated when the class is `partial-merge`
+ * AND a matching `.partial-merge.log` (R8-CC-1) exists in the same
+ * directory; null otherwise. Caller can read the log to count
+ * reverted files for the user-facing message.
+ */
+export function findDistillOutcomeForBranch(
+  errorDir: string,
+  branchShort: string,
+): {
+  outcomeClass: string;
+  outcomePath: string;
+  partialMergeLogPath: string | null;
+} | null {
+  if (!fs.existsSync(errorDir)) return null;
+  if (branchShort.length === 0) return null;
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(errorDir);
+  } catch {
+    return null;
+  }
+  const outcomeSuffix = `-${branchShort}.outcome`;
+  const outcomes = entries.filter((f) => f.endsWith(outcomeSuffix)).sort();
+  if (outcomes.length === 0) return null;
+  const outcomePath = path.join(errorDir, outcomes[outcomes.length - 1]);
+  let outcomeClass = "";
+  try {
+    outcomeClass = fs.readFileSync(outcomePath, "utf-8").trim();
+  } catch {
+    // Treat unreadable outcome as missing — caller will fall through to
+    // abnormal-termination handling.
+    return null;
+  }
+  let partialMergeLogPath: string | null = null;
+  if (outcomeClass === "partial-merge") {
+    const pmSuffix = `-${branchShort}.partial-merge.log`;
+    const pmMatches = entries.filter((f) => f.endsWith(pmSuffix)).sort();
+    if (pmMatches.length > 0) {
+      partialMergeLogPath = path.join(
+        errorDir,
+        pmMatches[pmMatches.length - 1],
+      );
+    }
+  }
+  return { outcomeClass, outcomePath, partialMergeLogPath };
+}
+
+/**
  * Prefix prepended to the distill prompt only when running through the
  * worktree spawn path. Tells the agent its writes must stay inside the
  * per-distill worktree — critical because the agent inherits the parent

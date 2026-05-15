@@ -3,7 +3,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { DEFAULT_DISTILL, loadVaultConfig } from "./index";
+import {
+  DEFAULT_DISTILL,
+  formatOutcomeNotification,
+  loadVaultConfig,
+} from "./index";
 
 /**
  * Writes a vault config.json and returns its parent dir (the vault path to
@@ -139,5 +143,112 @@ describe("loadVaultConfig", () => {
       provider: "kiro",
       id: "claude-sonnet-4-6",
     });
+  });
+});
+
+describe("formatOutcomeNotification (POST-CONV-5)", () => {
+  test("missing sidecar → abnormal-termination warning", () => {
+    const r = formatOutcomeNotification({ outcome: null, elapsedSec: 12 });
+    expect(r.level).toBe("warning");
+    expect(r.message).toBe(
+      "Distillation terminated abnormally \u2014 no outcome record",
+    );
+    expect(r.statusKey).toBe("warning");
+    expect(r.statusText).toContain("abnormal");
+  });
+
+  test("merged-content → info + elapsed seconds", () => {
+    const r = formatOutcomeNotification({
+      outcome: { outcomeClass: "merged-content", partialMergeLogPath: null },
+      elapsedSec: 42,
+    });
+    expect(r.level).toBe("info");
+    expect(r.message).toBe("Distillation complete (42s)");
+    expect(r.statusKey).toBe("success");
+    expect(r.statusText).toContain("42s");
+  });
+
+  test("no-content → warning", () => {
+    const r = formatOutcomeNotification({
+      outcome: { outcomeClass: "no-content", partialMergeLogPath: null },
+      elapsedSec: 5,
+    });
+    expect(r.level).toBe("warning");
+    expect(r.message).toBe("Distillation ran but saved no content");
+    expect(r.statusKey).toBe("warning");
+  });
+
+  test("partial-merge with log: counts reverted lines", () => {
+    const log = [
+      "# napkin distill partial-merge salvage log",
+      "2026-05-14T10:00:00Z reverted 'foo.md' to main's version (LLM driver 3-strike)",
+      "2026-05-14T10:00:01Z reverted 'bar/baz.md' to main's version (LLM driver 3-strike)",
+      "2026-05-14T10:00:02Z   failed to checkout main:bar/baz.md",
+    ].join("\n");
+    const r = formatOutcomeNotification({
+      outcome: {
+        outcomeClass: "partial-merge",
+        partialMergeLogPath: "/tmp/dummy.partial-merge.log",
+      },
+      elapsedSec: 30,
+      readPartialMergeLog: () => log,
+    });
+    expect(r.level).toBe("warning");
+    expect(r.message).toContain("2 files reverted to main");
+    expect(r.message).toContain("/tmp/dummy.partial-merge.log");
+  });
+
+  test("partial-merge with log: singular when count is 1", () => {
+    const log =
+      "# napkin distill partial-merge salvage log\n2026-05-14T10:00:00Z reverted 'foo.md' to main's version";
+    const r = formatOutcomeNotification({
+      outcome: {
+        outcomeClass: "partial-merge",
+        partialMergeLogPath: "/tmp/dummy.partial-merge.log",
+      },
+      elapsedSec: 1,
+      readPartialMergeLog: () => log,
+    });
+    expect(r.message).toContain("1 file reverted to main");
+    expect(r.message).not.toContain("1 files");
+  });
+
+  test("partial-merge without log path: generic message", () => {
+    const r = formatOutcomeNotification({
+      outcome: {
+        outcomeClass: "partial-merge",
+        partialMergeLogPath: null,
+      },
+      elapsedSec: 1,
+    });
+    expect(r.level).toBe("warning");
+    expect(r.message).toBe(
+      "Distillation: partial merge \u2014 some files reverted to main",
+    );
+  });
+
+  test("partial-merge: log read returns null → zero-count fallback", () => {
+    const r = formatOutcomeNotification({
+      outcome: {
+        outcomeClass: "partial-merge",
+        partialMergeLogPath: "/tmp/dummy.partial-merge.log",
+      },
+      elapsedSec: 1,
+      readPartialMergeLog: () => null,
+    });
+    expect(r.level).toBe("warning");
+    expect(r.message).toContain("0 files reverted");
+  });
+
+  test("unknown class → defensive warning with class verbatim", () => {
+    const r = formatOutcomeNotification({
+      outcome: {
+        outcomeClass: "weird-future-class",
+        partialMergeLogPath: null,
+      },
+      elapsedSec: 7,
+    });
+    expect(r.level).toBe("warning");
+    expect(r.message).toContain("weird-future-class");
   });
 });

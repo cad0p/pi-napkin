@@ -21,6 +21,7 @@ import * as path from "node:path";
 
 import {
   findDistillErrorLogForBranch,
+  findDistillOutcomeForBranch,
   resolveDistillErrorDir,
 } from "./distill-workspace";
 
@@ -134,6 +135,115 @@ describe("findDistillErrorLogForBranch (R7-SC-3)", () => {
     const r = findDistillErrorLogForBranch(errorDir, branchShort);
     // Fatal log wins.
     expect(r).toBe(path.join(errorDir, fatalLog));
+  });
+});
+
+describe("findDistillOutcomeForBranch (POST-CONV-5)", () => {
+  let errorDir: string;
+  beforeEach(() => {
+    errorDir = fs.mkdtempSync(path.join(os.tmpdir(), "find-outcome-"));
+  });
+  afterEach(() => {
+    fs.rmSync(errorDir, { recursive: true, force: true });
+  });
+
+  test("missing dir: returns null", () => {
+    const r = findDistillOutcomeForBranch(
+      path.join(errorDir, "no-such"),
+      "abc-1",
+    );
+    expect(r).toBeNull();
+  });
+
+  test("empty dir: returns null", () => {
+    expect(findDistillOutcomeForBranch(errorDir, "abc-1")).toBeNull();
+  });
+
+  test("empty branchShort: returns null (defensive guard)", () => {
+    fs.writeFileSync(path.join(errorDir, "x.outcome"), "merged-content\n");
+    expect(findDistillOutcomeForBranch(errorDir, "")).toBeNull();
+  });
+
+  test("matching outcome: returns class + path, no partial-merge log", () => {
+    const branchShort = "abc123-1";
+    const fname = `2026-05-14T10:00:00Z-12345-${branchShort}.outcome`;
+    const full = path.join(errorDir, fname);
+    fs.writeFileSync(full, "merged-content\n");
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r).not.toBeNull();
+    expect(r?.outcomeClass).toBe("merged-content");
+    expect(r?.outcomePath).toBe(full);
+    expect(r?.partialMergeLogPath).toBeNull();
+  });
+
+  test("no-content class: returns class + path, no partial-merge log", () => {
+    const branchShort = "abc-2";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
+      "no-content\n",
+    );
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r?.outcomeClass).toBe("no-content");
+    expect(r?.partialMergeLogPath).toBeNull();
+  });
+
+  test("partial-merge class with matching .partial-merge.log: returns log path", () => {
+    const branchShort = "def-3";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
+      "partial-merge\n",
+    );
+    const pmLog = path.join(
+      errorDir,
+      `2026-05-14T10:00:00Z-1-${branchShort}.partial-merge.log`,
+    );
+    fs.writeFileSync(pmLog, "# log\nreverted 'foo.md' to main\n");
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r?.outcomeClass).toBe("partial-merge");
+    expect(r?.partialMergeLogPath).toBe(pmLog);
+  });
+
+  test("partial-merge class without .partial-merge.log: log path is null", () => {
+    const branchShort = "def-4";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
+      "partial-merge\n",
+    );
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r?.outcomeClass).toBe("partial-merge");
+    expect(r?.partialMergeLogPath).toBeNull();
+  });
+
+  test("non-matching outcome (different branch): returns null", () => {
+    fs.writeFileSync(
+      path.join(errorDir, "2026-05-14T10:00:00Z-1-other-99.outcome"),
+      "merged-content\n",
+    );
+    expect(findDistillOutcomeForBranch(errorDir, "abc-1")).toBeNull();
+  });
+
+  test("multiple outcomes for same branch: returns the most recent", () => {
+    const branchShort = "abc-5";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
+      "no-content\n",
+    );
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:30:00Z-2-${branchShort}.outcome`),
+      "merged-content\n",
+    );
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r?.outcomeClass).toBe("merged-content");
+  });
+
+  test("trims trailing newline + whitespace from class string", () => {
+    const branchShort = "abc-6";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
+      "  merged-content  \n\n",
+    );
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r?.outcomeClass).toBe("merged-content");
   });
 });
 

@@ -145,6 +145,16 @@ TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 #                       success doesn't surface as a failure.
 ERROR_LOG="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.log"
 PARTIAL_MERGE_LOG="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.partial-merge.log"
+# Outcome sidecar (POST-CONV-5) — one-line classification of why the
+# wrapper exited 0. The detached wrapper's exit status is unobservable
+# to the parent (`stdio:ignore` + `unref()`); the filesystem is the
+# only signal channel. JS-side `runDistillWith` poller dispatches
+# UI severity per class:
+#   merged-content  → info  "distill: completed"
+#   no-content      → warn  "distill ran but saved no content"
+#   partial-merge   → warn  "distill: N files reverted to main"
+# Missing sidecar AND missing error log → warn (abnormal termination).
+OUTCOME_PATH="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.outcome"
 
 # Lazy-create error log on first write. Empty file is the "no error" signal.
 ERROR_LOG_TOUCHED=0
@@ -205,6 +215,22 @@ record_dangling_sha() {
     log_error "dangling distill commit SHA: $sha"
   fi
 }
+
+# Write the outcome sidecar (POST-CONV-5). One line, one class string.
+# Caller must invoke this immediately before any successful `exit 0`
+# path. Idempotent: a double call would just rewrite the same file.
+write_outcome() {
+  local class="$1"
+  mkdir -p "$ERROR_DIR" 2>/dev/null || true
+  printf '%s\n' "$class" > "$OUTCOME_PATH" 2>/dev/null || true
+}
+
+# Tracks whether the partial-merge salvage path fired during this run.
+# Read at the final `exit 0` to pick the right outcome class
+# (merged-content vs partial-merge). Salvage is on the success path —
+# the squash still lands — but the user must be warned that some
+# files reverted to the default branch.
+PARTIAL_MERGE_OCCURRED=0
 
 # Trap-based cleanup: always remove the worktree + branch on exit (success or
 # failure). `git worktree remove --force` also handles partially-initialized
@@ -426,11 +452,13 @@ git -C "$WORKTREE" add -A
 if [ -n "$START_SHA" ]; then
   if git -C "$WORKTREE" diff --quiet "$START_SHA"; then
     # Genuinely no-op — pi explicitly produced nothing. Skip straight
-    # to cleanup. (Outcome sidecar wiring lands in POST-CONV-5.)
+    # to cleanup and signal `no-content` to the JS-side poller.
+    write_outcome "no-content"
     exit 0
   fi
 else
   if git -C "$WORKTREE" diff --cached --quiet; then
+    write_outcome "no-content"
     exit 0
   fi
 fi
@@ -492,6 +520,7 @@ esac
 # R8-CC-1).
 UNMERGED="$(git -C "$WORKTREE" diff --name-only --diff-filter=U 2>/dev/null || true)"
 if [ -n "$UNMERGED" ]; then
+  PARTIAL_MERGE_OCCURRED=1
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     log_partial_merge "reverted '$f' to $DEFAULT_BRANCH's version (LLM driver 3-strike)"
@@ -555,6 +584,11 @@ fi
 # in main — unlikely in practice but possible with concurrent distills that
 # took the same content). Skip the commit if so.
 if git diff --cached --quiet; then
+  # Squash produced nothing for main — user-facing this is no-content
+  # (no new lines on main). Salvage state is irrelevant here: even if
+  # the inner merge salvaged some files, none of the distill content
+  # made it to main this round.
+  write_outcome "no-content"
   exit 0
 fi
 
@@ -565,5 +599,13 @@ if ! git_retry git commit -m "$SQUASH_MSG" > /dev/null 2>&1; then
   exit 1
 fi
 
-# Success — the trap cleans up on exit 0.
+# Success — the trap cleans up on exit 0. Outcome class depends on
+# whether the inner merge had to salvage files: a clean merge is
+# `merged-content`; a salvage that still landed something on main is
+# `partial-merge` (the user must know N files reverted to main).
+if [ "$PARTIAL_MERGE_OCCURRED" -eq 1 ]; then
+  write_outcome "partial-merge"
+else
+  write_outcome "merged-content"
+fi
 exit 0

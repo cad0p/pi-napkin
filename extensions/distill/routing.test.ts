@@ -806,3 +806,174 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
     ).toBe(0);
   }, 20_000); // bun:test per-test timeout (default 5000ms is too tight given the 2s poll interval; 20s is comfortable headroom for slow CI runners under load)
 });
+
+// ---------------------------------------------------------------------------
+// POST-CONV-5: outcome sidecar dispatch wiring.
+//
+// Pins the four-class warning UI dispatch: when the wrapper writes a
+// `*.outcome` sidecar, runDistillWith reads its class and routes the
+// notification to the correct severity per the locked notification
+// severity contract:
+//
+//   merged-content   → info
+//   no-content       → warning
+//   partial-merge    → warning + log path
+//   no sidecar       → warning  ("abnormal termination")
+//
+// Drives the wrapper through the worktree path with `pi` stubbed out via
+// NAPKIN_DISTILL_PI_BIN=true (no actual pi spawn) and verifies the JS-
+// side notify call. Test runs the integration end-to-end — unit-testing
+// runDistillWith would require carving out new injection seams; the
+// wrapper-stub approach is cleaner.
+// ---------------------------------------------------------------------------
+
+describe("runDistillWith outcome dispatch (POST-CONV-5)", () => {
+  let vault: string;
+  let sm: SessionManager;
+  let capturedInterval: (() => void) | null = null;
+  let originalSetInterval: typeof setInterval;
+  let xdgCacheDir: string;
+  let savedRecurse: string | undefined;
+  let savedXdgCache: string | undefined;
+  let _napkinPath: { restore: () => void } | null = null;
+
+  beforeEach(() => {
+    savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+    savedXdgCache = process.env.XDG_CACHE_HOME;
+    delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "outcome-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
+    _napkinPath = withNapkinOnPath();
+    // pi stub: /usr/bin/true completes instantly with exit 0 + zero
+    // output, so the wrapper's diff-since-startSha check will report
+    // no-content unless the test pre-stages files into the worktree.
+    process.env.NAPKIN_DISTILL_PI_BIN = "true";
+    vault = createEnabledGitVault(60);
+    sm = createSeededSession(vault);
+
+    originalSetInterval = globalThis.setInterval;
+    capturedInterval = null;
+    globalThis.setInterval = ((
+      cb: () => void,
+      ms: number,
+      ...rest: unknown[]
+    ) => {
+      if (ms > 10_000 && capturedInterval === null) {
+        capturedInterval = cb;
+        return { unref: () => {}, ref: () => {} } as unknown as NodeJS.Timeout;
+      }
+      return originalSetInterval(cb, ms, ...rest);
+    }) as typeof setInterval;
+  });
+
+  afterEach(() => {
+    if (savedRecurse !== undefined)
+      process.env.NAPKIN_DISTILL_NO_RECURSE = savedRecurse;
+    else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    delete process.env.NAPKIN_DISTILL_PI_BIN;
+    globalThis.setInterval = originalSetInterval;
+    _napkinPath?.restore();
+    _napkinPath = null;
+    const worktreesDir = resolveCacheRoot(vault);
+    if (fs.existsSync(worktreesDir)) {
+      for (const entry of fs.readdirSync(worktreesDir)) {
+        spawnSync(
+          "git",
+          [
+            "-C",
+            vault,
+            "worktree",
+            "remove",
+            "--force",
+            path.join(worktreesDir, entry),
+          ],
+          { encoding: "utf-8" },
+        );
+      }
+    }
+    spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
+    fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = savedXdgCache;
+  });
+
+  /**
+   * Runs the interval callback (which spawns the detached wrapper) and
+   * waits up to `timeoutMs` for `notifyCalls` to receive any entry whose
+   * `msg` matches `predicate`. Returns once matched or rejects on
+   * timeout. Mirrors the polling pattern from the R8-SC-7 test.
+   */
+  async function waitForNotify(
+    notifyCalls: { msg: string; severity: string }[],
+    predicate: (msg: string) => boolean,
+    timeoutMs = 18_000,
+  ): Promise<void> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (notifyCalls.some((c) => predicate(c.msg))) return;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+
+  function makeUI(): {
+    // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
+    ui: any;
+    notifyCalls: { msg: string; severity: string }[];
+    setStatusCalls: { id: string; content: string }[];
+  } {
+    const notifyCalls: { msg: string; severity: string }[] = [];
+    const setStatusCalls: { id: string; content: string }[] = [];
+    // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
+    const ui: any = {
+      theme: { fg: (_severity: string, str: string) => str },
+      notify: (msg: string, severity: string) => {
+        notifyCalls.push({ msg, severity });
+      },
+      setStatus: (id: string, content: string) => {
+        setStatusCalls.push({ id, content });
+      },
+    };
+    return { ui, notifyCalls, setStatusCalls };
+  }
+
+  test("no-content outcome → warning notify", async () => {
+    // pi stub is /usr/bin/true — no content produced. Wrapper writes
+    // outcome=no-content; JS poller surfaces as warn.
+    const { ui, notifyCalls, setStatusCalls } = makeUI();
+    const { api, captured } = makeMockExtensionAPI();
+    distillExtension(api as never);
+
+    // biome-ignore lint/suspicious/noExplicitAny: partial ExtensionContext
+    const ctx: any = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+    await captured.handlers.session_start({ reason: "new" }, ctx);
+    expect(capturedInterval).not.toBeNull();
+
+    capturedInterval?.();
+    await waitForNotify(notifyCalls, (m) =>
+      m.startsWith("Distillation ran but saved no content"),
+    );
+
+    const warnNotifies = notifyCalls.filter((c) =>
+      c.msg.startsWith("Distillation ran but saved no content"),
+    );
+    expect(warnNotifies).toHaveLength(1);
+    expect(warnNotifies[0].severity).toBe("warning");
+
+    // Status reflects the no-content state (not 'completed').
+    const noContentStatuses = setStatusCalls.filter((c) =>
+      c.content.includes("no content"),
+    );
+    expect(noContentStatuses.length).toBeGreaterThan(0);
+
+    // Outcome sidecar exists with class=no-content.
+    const errorDir = resolveDistillErrorDir(vault);
+    const outcomes = fs.existsSync(errorDir)
+      ? fs.readdirSync(errorDir).filter((f) => f.endsWith(".outcome"))
+      : [];
+    expect(outcomes).toHaveLength(1);
+    expect(
+      fs.readFileSync(path.join(errorDir, outcomes[0]), "utf-8").trim(),
+    ).toBe("no-content");
+  }, 20_000);
+});
