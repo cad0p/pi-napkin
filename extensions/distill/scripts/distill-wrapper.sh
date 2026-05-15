@@ -76,6 +76,13 @@
 #                                is installed at <worktree>/.napkin/distill/bin/napkin
 #                                — lets tests inspect the shim contents and PATH
 #                                injection without the cleanup trap wiping it.
+#   NAPKIN_DISTILL_FORCE_CLEANUP=1
+#                                trigger the cleanup trap from a controlled
+#                                exit point post-shim-install. Unlike the
+#                                HALT_AFTER_* hooks this does NOT clear
+#                                the EXIT trap — the cleanup function
+#                                fires and tests assert on its post-state
+#                                (rm-rf fallback, rmdir parent, etc.).
 #   NAPKIN_DISTILL_FORCE_MERGE_HEAD=1
 #                                force MERGE_HEAD to exist right before the
 #                                escape-hatch check — lets tests cover the
@@ -434,6 +441,19 @@ fi
 if [ "${NAPKIN_DISTILL_HALT_AFTER_SHIM:-}" = "1" ]; then
   trap - EXIT
   exit 0
+fi
+
+# Testing hook: trigger the cleanup trap from a controlled exit point
+# so tests can drive the actual rm-rf fallback (POST-CONV-3) and rmdir
+# parent (POST-CONV-4) paths through the wrapper instead of
+# reproducing them in inline bash. Unlike HALT_AFTER_META and
+# HALT_AFTER_SHIM, this hook does NOT clear the EXIT trap — cleanup
+# fires normally and the test asserts on the post-cleanup state.
+# Placement is post-shim-install so the worktree has gitignored
+# content (.napkin/distill/bin/napkin shim) that survives
+# `git worktree remove --force`, exercising the rm-rf fallback.
+if [ "${NAPKIN_DISTILL_FORCE_CLEANUP:-}" = "1" ]; then
+  exit 1
 fi
 
 # --- Step 1: run pi at PARENT_CWD (cache parity) -----------------------------

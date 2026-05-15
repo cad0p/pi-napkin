@@ -1861,100 +1861,116 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Wrapper cleanup-trap rm-rf fallback (POST-CONV-3).
+// Wrapper cleanup-trap rm-rf fallback (POST-CONV-3) and rmdir parent
+// vault-hash dir (POST-CONV-4). Driven through the actual wrapper EXIT
+// trap via the NAPKIN_DISTILL_FORCE_CLEANUP=1 halt hook (R12-CC-4) so
+// the test exercises the production cleanup path, not an inline-bash
+// reproduction. The hook fires `exit 1` post-shim-install without
+// clearing the trap, letting the cleanup function fire normally.
 // ---------------------------------------------------------------------------
 
-describe("distill-wrapper.sh cleanup rm-rf fallback (POST-CONV-3)", () => {
+describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
   let xdgCacheDir: string;
   let _savedXdgCache: string | undefined;
+  let vault: string;
+  let sessionDir: string;
+  let sessionFile: string;
 
   beforeEach(() => {
     _savedXdgCache = process.env.XDG_CACHE_HOME;
-    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-fallback-xdg-"));
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-cleanup-xdg-"));
     process.env.XDG_CACHE_HOME = xdgCacheDir;
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-cleanup-src-"));
+    sessionFile = createSeededSessionFile(sessionDir, sessionDir);
   });
 
   afterEach(() => {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
     if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
-  /**
-   * Reproduce the wrapper cleanup() trap's "remove worktree, then rm -rf
-   * the leaf if it survives" sequence in isolation. Exercises the contract:
-   * even when `git worktree remove --force` cannot fully delete the leaf,
-   * the leaf is gone after cleanup.
-   *
-   * We simulate the failure mode by passing an unregistered directory:
-   * `git worktree remove` rejects unknown paths, so the leaf survives the
-   * git step and only the rm -rf fallback can finish the job.
-   */
-  test("rm -rf fallback removes the leaf when git worktree remove fails", () => {
-    // Minimal vault for the `git -C $VAULT worktree remove` call to target.
-    const vault = fs.mkdtempSync(path.join(os.tmpdir(), "fallback-vault-"));
-    const gitInit = spawnSync("git", ["init", "-q", "-b", "main", vault], {
+  function runWrapperForceCleanup(workspace: DistillWorkspace): {
+    exitCode: number;
+  } {
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "bash",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+        "main",
+        sessionDir, // parentCwd
+      ],
+      {
+        cwd: sessionDir,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          PATH: NAPKIN_STRIPPED_PATH,
+          GIT_AUTHOR_NAME: "test",
+          GIT_AUTHOR_EMAIL: "test@example.com",
+          GIT_COMMITTER_NAME: "test",
+          GIT_COMMITTER_EMAIL: "test@example.com",
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_SKIP_PI: "1",
+          NAPKIN_DISTILL_FORCE_CLEANUP: "1",
+        },
+      },
+    );
+    return { exitCode: r.status ?? -1 };
+  }
+
+  test("rm -rf fallback removes leaf when git worktree remove leaves gitignored content (POST-CONV-3)", () => {
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+      sessionDir,
+    );
+    expect(fs.existsSync(workspace.worktreePath)).toBe(true);
+
+    const r = runWrapperForceCleanup(workspace);
+    // FORCE_CLEANUP exits 1 deliberately. The cleanup trap then fires.
+    expect(r.exitCode).toBe(1);
+
+    // The shim install put a gitignored file under .napkin/distill/
+    // that survives `git worktree remove --force`. The rm-rf fallback
+    // is what makes the leaf disappear.
+    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
+
+    // Branch was force-deleted by the trap.
+    const branches = spawnSync("git", ["-C", vault, "branch"], {
       encoding: "utf-8",
-    });
-    expect(gitInit.status).toBe(0);
-
-    // Populated directory that is NOT a registered worktree of $VAULT.
-    // git will refuse to remove it ("is not a working tree"), the leaf
-    // survives the git step, and only rm -rf finishes the cleanup.
-    const leaf = path.join(xdgCacheDir, "orphan-leaf");
-    fs.mkdirSync(path.join(leaf, ".napkin", "distill"), { recursive: true });
-    fs.writeFileSync(path.join(leaf, ".napkin", "distill", "meta.json"), "{}");
-    expect(fs.existsSync(leaf)).toBe(true);
-
-    // Mirror the wrapper cleanup() body verbatim. This is the contract the
-    // POST-CONV-3 fix added: rm -rf fallback when git's force-remove leaves
-    // the leaf.
-    const cleanup = `
-set -u
-VAULT=${JSON.stringify(vault)}
-WORKTREE=${JSON.stringify(leaf)}
-if [ -d "$WORKTREE" ]; then
-  git -C "$VAULT" worktree remove --force "$WORKTREE" 2>/dev/null || true
-fi
-if [ -d "$WORKTREE" ]; then
-  rm -rf "$WORKTREE" 2>/dev/null || true
-fi
-`;
-    const r = spawnSync("bash", ["-c", cleanup], { encoding: "utf-8" });
-    expect(r.status).toBe(0);
-
-    // Leaf is gone — the rm -rf fallback fired because `git worktree remove`
-    // failed on an unregistered path.
-    expect(fs.existsSync(leaf)).toBe(false);
-
-    fs.rmSync(vault, { recursive: true, force: true });
+    }).stdout;
+    expect(branches).not.toContain(workspace.branchName);
   });
 
-  test("cleanup is idempotent: running twice succeeds with leaf already gone", () => {
-    const vault = fs.mkdtempSync(path.join(os.tmpdir(), "fallback-idem-"));
-    spawnSync("git", ["init", "-q", "-b", "main", vault], {
-      encoding: "utf-8",
-    });
+  test("rmdir removes parent vault-hash dir after last distill cleared (POST-CONV-4)", () => {
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+      sessionDir,
+    );
+    const parentDir = path.dirname(workspace.worktreePath);
+    expect(fs.existsSync(parentDir)).toBe(true);
 
-    const leaf = path.join(xdgCacheDir, "already-gone-leaf");
-    // Don't create the leaf — first cleanup pass already happened.
-    expect(fs.existsSync(leaf)).toBe(false);
+    const r = runWrapperForceCleanup(workspace);
+    expect(r.exitCode).toBe(1);
 
-    const cleanup = `
-set -u
-VAULT=${JSON.stringify(vault)}
-WORKTREE=${JSON.stringify(leaf)}
-if [ -d "$WORKTREE" ]; then
-  git -C "$VAULT" worktree remove --force "$WORKTREE" 2>/dev/null || true
-fi
-if [ -d "$WORKTREE" ]; then
-  rm -rf "$WORKTREE" 2>/dev/null || true
-fi
-`;
-    const r = spawnSync("bash", ["-c", cleanup], { encoding: "utf-8" });
-    expect(r.status).toBe(0);
-    expect(fs.existsSync(leaf)).toBe(false);
-
-    fs.rmSync(vault, { recursive: true, force: true });
+    // Single-distill setup — rmdir parent succeeded because no
+    // sibling distills survive in the same vault-hash dir.
+    expect(fs.existsSync(parentDir)).toBe(false);
   });
 });
