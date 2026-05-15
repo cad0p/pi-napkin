@@ -31,6 +31,7 @@
     "!extensions/**/*.test.ts",
     "!extensions/**/_test-helpers.ts",
     "extensions/**/scripts/**",
+    "extensions/distill/distill-prompt.md",
     "extensions/**/README.md",
     "skills",
     "README.md",

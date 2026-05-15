@@ -1,0 +1,54 @@
+You are running in an isolated git worktree at {{worktreePath}}. Only modify files within the worktree. Do NOT use absolute paths from the conversation history — those refer to the main vault and bypass isolation, causing the distill to silently merge nothing.
+
+Distill this conversation into the napkin vault, then integrate your changes back into the main vault yourself. The wrapper that invoked you will only validate the result; it will NOT run merge, squash, push, or cleanup on your behalf.
+
+1. `napkin overview` — learn the vault structure and what exists. Read `_about.md` files to understand what each folder is for. These are short folder descriptions (1-2 paragraphs) explaining what kinds of notes belong there — see existing ones for style.
+2. `napkin template list` and `napkin template read` — learn the note formats.
+3. Identify what's worth capturing. The vault structure and templates tell you what kinds of notes belong.
+4. For each note:
+   a. `napkin search` for the topic — if a note already covers it, `napkin append` instead of creating a duplicate
+   b. Create new notes with `napkin create`, following the template format; use the relevant folder path
+   c. Add `[[wikilinks]]` to related notes
+5. Append a brief summary of key activities and decisions to today's daily note in the relevant namespace (e.g. `{namespace}/daily/YYYY-MM-DD.md`). Follow existing patterns. Create it if it doesn't exist.
+6. Frontmatter convention: when you create a note that replaces an older one, add `supersedes: ["path/to/old/note.md"]` to its frontmatter. A future janitor will archive the superseded note. Leave the field empty or omit it for notes that stand alone.
+
+Be selective. Only capture knowledge useful to someone working on this project later. Skip meta-discussion, tool output, and chatter.
+
+7. Integrate with main. From the worktree at {{worktreePath}}, commit your distilled content first if you haven't already (`git add -A && git commit -m "distill: <one-line summary>"`), then run:
+
+       git merge {{defaultBranch}}
+
+   If conflicts arise, you will see files with standard `<<<<<<<`, `=======`, `>>>>>>>` markers. Resolve each by editing the file in place to produce the correct merged content. Use the conversation history above to inform your choices — you have full context on what content you intended to add. Once all markers are gone:
+
+       git add .
+       git commit --no-edit
+
+   If `git merge {{defaultBranch}}` reports "Already up to date" (no merge commit), that's fine — proceed.
+
+8. Squash to main. From the main vault at {{vaultPath}}, switch to the default branch and squash-merge your branch:
+
+       git -C {{vaultPath}} checkout {{defaultBranch}}
+       git -C {{vaultPath}} merge --squash {{branchName}}
+       git -C {{vaultPath}} commit -m "distill: <one-line summary of what you captured>"
+
+   Use `--squash` to keep main's history linear (one commit per distill). If `git merge --squash` produces no staged changes (e.g. your distill content was already on main), skip the commit step — there's nothing new to land.
+
+9. Push if origin exists. Check `git -C {{vaultPath}} remote -v`. If `origin/{{defaultBranch}}` is configured, push your changes:
+
+       git -C {{vaultPath}} push origin {{defaultBranch}}
+
+   If push fails because the remote moved, recover with pull-merge-push (NOT pull-rebase):
+
+       git -C {{vaultPath}} pull origin {{defaultBranch}}
+       git -C {{vaultPath}} push origin {{defaultBranch}}
+
+   NEVER use `--force` or `--force-with-lease`. If push fails for any reason and you cannot recover, stop — do not loop indefinitely. The wrapper will detect local-only state and surface a warning to the user.
+
+10. Cleanup. From the main vault, remove the worktree and the distill branch:
+
+        git -C {{vaultPath}} worktree remove {{worktreePath}}
+        git -C {{vaultPath}} branch -D {{branchName}}
+
+    The wrapper will force-clean any residue you leave behind, but a clean exit is preferred.
+
+Report progress concisely as you go. Stop when steps 1-10 are complete.
