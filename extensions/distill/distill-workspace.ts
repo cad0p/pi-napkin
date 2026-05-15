@@ -711,9 +711,9 @@ export function resolveDistillErrorDir(vault: string): string {
  * Find the wrapper-emitted error log for a specific distill branch, if
  * any. The wrapper writes ‘forensic’ logs to
  * `<errorDir>/<ISO-timestamp>-<pid>-<branch-short>.log` whenever it
- * fails (missing napkin, pi subprocess error, merge driver 3-strike,
- * cd parent_cwd failure, …). Returns the absolute path to the first
- * matching log file, or null when no log exists.
+ * fails (missing napkin, pi subprocess error, agent timeout, post-call
+ * validation failure, cd parent_cwd failure, …). Returns the absolute
+ * path to the first matching log file, or null when no log exists.
  *
  * `branchShort` is the part after `distill/`, e.g. for
  * `distill/abc1234-1715198400` pass `abc1234-1715198400`.

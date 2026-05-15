@@ -996,11 +996,11 @@ export default function (pi: ExtensionAPI) {
       // Wrapper-failure check (R7-SC-3). Mirrors the timeout-surfacing
       // pattern: target disappearance is the success condition, but the
       // wrapper writes a forensic log on any non-success exit (missing
-      // napkin, pi subprocess error, merge-driver 3-strike, etc.). If a
-      // log file matching this distill's branch is present in the
-      // error dir, the run failed even though the worktree is gone.
-      // Surface the failure in the UI so the user can act on it instead
-      // of the run silently disappearing.
+      // napkin, pi subprocess error, agent timeout, post-call validation
+      // failure, etc.). If a log file matching this distill's branch is
+      // present in the error dir, the run failed even though the worktree
+      // is gone. Surface the failure in the UI so the user can act on it
+      // instead of the run silently disappearing.
       let failureLogPath: string | null = null;
       if (checkFailure) {
         try {
@@ -1125,10 +1125,11 @@ export default function (pi: ExtensionAPI) {
   /**
    * Worktree-backed auto-distill path — used by the interval timer and the
    * shutdown handler (Item 8). Concurrency-safe via per-distill git
-   * worktrees: each call spawns a detached wrapper that operates on its
-   * own branch, so overlapping distills (interval + shutdown, or multiple
-   * pi sessions on the same vault) merge serially on main via the LLM
-   * merge driver.
+   * worktrees: each call spawns a detached wrapper that drives the agent
+   * to distill, merge default into its branch, squash to default, and
+   * push — so overlapping distills (interval + shutdown, or multiple pi
+   * sessions on the same vault) integrate serially through the agent's
+   * own merge resolution rather than colliding on main.
    */
   function runAutoDistill(ctx: RunCtx) {
     runDistillWith(ctx, {
@@ -1178,14 +1179,17 @@ export default function (pi: ExtensionAPI) {
 
   /**
    * Worktree spawn strategy. Creates a per-distill git worktree off the
-   * vault's default branch, runs the detached wrapper that merges back
-   * via the LLM merge driver + squash. Concurrency-safe across sessions.
+   * vault's default branch, then runs the detached wrapper that hands a
+   * full distill→merge→squash→push contract to the agent (see
+   * `distill-prompt.md` and design.md "Locked decisions"). Wrapper
+   * post-validates the agent's output (markers, commit count, HEAD) and
+   * salvages the worktree on failure. Concurrency-safe across sessions.
    *
    * Shared by `runDistill` (when git is available) and `runAutoDistill`.
    * A `DistillError` from the workspace layer (branch collision, fork
-   * failure, invalid HEAD, merge driver missing) is caught and rendered
-   * as an error status; the shared runner treats a null return as a
-   * spawn failure and skips the poll loop.
+   * failure, invalid HEAD) is caught and rendered as an error status; the
+   * shared runner treats a null return as a spawn failure and skips the
+   * poll loop.
    */
   function worktreeSpawnFn(args: {
     ctx: RunCtx;

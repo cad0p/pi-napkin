@@ -351,9 +351,9 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
   // hand and never committed leaves HEAD unresolvable. Seed an empty
   // initial commit so `git worktree add ... HEAD` has something to pin to.
   // This also covers the narrow window where `git init` succeeded above
-  // (we set `initialized = true`) but scaffolding wrote zero lines (both
-  // .gitignore and .gitattributes already present with our exact content)
-  // — that would fall into neither branch and leave a commit-less repo.
+  // (we set `initialized = true`) but scaffolding wrote zero lines
+  // (`.gitignore` already present with our exact content) — that would
+  // fall into neither branch and leave a commit-less repo.
   let seededCommit: SetupResult["seededCommit"];
   const headAfter = runGit(vaultPath, ["rev-parse", "--verify", "HEAD"]);
   if (headAfter.status !== 0) {
