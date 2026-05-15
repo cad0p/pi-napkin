@@ -265,14 +265,124 @@ record_dangling_sha() {
   fi
 }
 
-# Write the outcome sidecar (POST-CONV-5). One line, one class string.
+# Write the outcome sidecar (POST-CONV-5). The first line is the
+# outcome class (one-token, machine-readable); subsequent lines
+# (optional) are a human-readable recovery hint.
+#
 # Caller must invoke this immediately before any successful `exit 0`
-# path. Idempotent: a double call would just rewrite the same file.
+# OR `exit 1` path. Idempotent: a double call rewrites the same file.
+#
+# JS-side parser (`findDistillOutcomeForBranch`) reads the first line
+# as the outcome class for severity dispatch and exposes the remaining
+# lines as a `recoveryHint?: string` for inclusion in the failure
+# notification.
+#
+# Recovery hint is OPTIONAL because the happy-path classes
+# (`merged-content`, `merged-local`, `no-content`) need no recovery
+# action — only the `failed:<reason>` classes do.
 write_outcome() {
   local class="$1"
+  local recovery_hint="${2:-}"
   mkdir -p "$ERROR_DIR" 2>/dev/null || true
-  printf '%s\n' "$class" > "$OUTCOME_PATH" 2>/dev/null || true
+  if [ -n "$recovery_hint" ]; then
+    {
+      printf '%s\n' "$class"
+      printf '%s\n' "$recovery_hint"
+    } > "$OUTCOME_PATH" 2>/dev/null || true
+  else
+    printf '%s\n' "$class" > "$OUTCOME_PATH" 2>/dev/null || true
+  fi
 }
+
+# salvage <vault> <worktree_path> <branch_name> <reason>
+#
+# Force-cleans the per-distill worktree and branch, validates the
+# vault is back on its default branch, and writes a `failed:<reason>`
+# outcome sidecar with a recovery hint. Per V3 verification
+# (research/v2-v3-verification.md) the salvage path NEVER touches the
+# main vault's commit history — the agent's mutations on main are
+# trusted, and `git reset --hard $START_SHA` would silently destroy
+# concurrent user commits in the autosave-while-editing scenario.
+#
+# Reason codes (must match the JS-side dispatch table):
+#   markers-after-agent-exit
+#   head-not-on-default
+#   agent-exit-nonzero
+#   agent-timeout
+#
+# Cleanup operations are best-effort: a failed `worktree remove` or
+# `branch -D` does NOT prevent the outcome write — the JS-side
+# UI dispatch on the outcome class is the user-facing signal that
+# matters.
+salvage() {
+  local vault="$1"
+  local worktree="$2"
+  local branch="$3"
+  local reason="$4"
+
+  # cd out of the worktree so `git worktree remove --force` doesn't
+  # refuse on "cwd inside worktree".
+  cd "$vault" 2>/dev/null || cd /
+
+  # Force-remove worktree. Ignore errors (already gone, never created,
+  # other concurrent salvage racing).
+  if [ -d "$worktree" ]; then
+    git -C "$vault" worktree remove --force "$worktree" 2>/dev/null || true
+  fi
+  # Belt-and-braces: gitignored shim survives `worktree remove --force`.
+  # rm -rf the leaf if anything's left (POST-CONV-3 pattern).
+  if [ -d "$worktree" ]; then
+    rm -rf "$worktree" 2>/dev/null || true
+  fi
+  # Prune any stale worktree entry whose dir is gone.
+  git -C "$vault" worktree prune 2>/dev/null || true
+  # Force-delete branch. -D because squash-merge leaves the branch
+  # marked as unmerged.
+  git -C "$vault" branch -D "$branch" 2>/dev/null || true
+  # Best-effort rmdir of the parent vault-hash dir — succeeds when
+  # this was the last distill (POST-CONV-4 pattern).
+  rmdir "$(dirname "$worktree")" 2>/dev/null || true
+
+  # Verify HEAD is on default. Per V3, the salvage path NEVER moves
+  # HEAD on the user's behalf — if the user manually checked out a
+  # different branch mid-distill, that's their state, not ours to
+  # rewrite. Log a critical-error so it surfaces in the failure
+  # notification, but don't `git checkout`.
+  local vault_head
+  vault_head="$(git -C "$vault" symbolic-ref --short HEAD 2>/dev/null || true)"
+  if [ -z "$vault_head" ]; then
+    log_error "salvage: vault HEAD is detached after agent exit; user must checkout '$DEFAULT_BRANCH' manually before next distill"
+  elif [ "$vault_head" != "$DEFAULT_BRANCH" ]; then
+    log_error "salvage: vault HEAD is '$vault_head' after agent exit (expected '$DEFAULT_BRANCH'); not rewriting per never-touch-main lockdown"
+  fi
+
+  # Compose recovery hint per reason. Each hint points the user at the
+  # specific recovery action that fits the failure mode — the design
+  # spec calls out `git revert HEAD --no-edit` and `git reflog` as the
+  # primary recovery levers ("the dangling distill branch is
+  # recoverable from `git reflog` for ~2 weeks").
+  local hint
+  case "$reason" in
+    markers-after-agent-exit)
+      hint="Conflict markers landed in the vault. Inspect '$vault', then 'git -C $vault revert HEAD --no-edit' to undo the corrupt commit. Distill content is recoverable from 'git -C $vault reflog' for ~90 days."
+      ;;
+    head-not-on-default)
+      hint="Vault HEAD is not on '$DEFAULT_BRANCH'. Run 'git -C $vault checkout $DEFAULT_BRANCH' before the next distill. Distill content is recoverable from 'git -C $vault reflog'."
+      ;;
+    agent-exit-nonzero)
+      hint="Agent crashed before completing the distill. See the error log alongside this outcome for stderr. Distill content (if any) is recoverable from 'git -C $vault reflog'."
+      ;;
+    agent-timeout)
+      hint="Agent task exceeded the maxDurationMinutes budget and was killed. Bump 'distill.maxDurationMinutes' in vault config.json if this happens repeatedly. Distill content (if any) is recoverable from 'git -C $vault reflog'."
+      ;;
+    *)
+      hint="Distill failed with an unrecognised reason. See the error log for diagnostics. Distill content (if any) is recoverable from 'git -C $vault reflog'."
+      ;;
+  esac
+
+  write_outcome "failed:$reason" "$hint"
+}
+
 
 # --- Post-agent-exit validation helpers (PR #12 A3) -------------------------
 #
@@ -750,14 +860,14 @@ TIMEOUT_KILL_RC=137
 if [ "$AGENT_RC" -eq "$TIMEOUT_TERM_RC" ] || [ "$AGENT_RC" -eq "$TIMEOUT_KILL_RC" ]; then
   log_error "agent task exceeded ${MAX_DURATION_SECS}s budget; SIGTERM/SIGKILL fired (rc $AGENT_RC)"
   record_dangling_sha
-  write_outcome "failed:agent-timeout"
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "agent-timeout"
   exit 1
 fi
 
 if [ "$AGENT_RC" -ne 0 ]; then
   log_error "agent subprocess exited non-zero (rc $AGENT_RC); see stderr above"
   record_dangling_sha
-  write_outcome "failed:agent-exit-nonzero"
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "agent-exit-nonzero"
   exit 1
 fi
 
@@ -767,13 +877,13 @@ fi
 # dispatch.
 if ! validate_head_on_default "$VAULT" "$DEFAULT_BRANCH"; then
   record_dangling_sha
-  write_outcome "failed:head-not-on-default"
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "head-not-on-default"
   exit 1
 fi
 
 if ! validate_no_markers "$VAULT"; then
   record_dangling_sha
-  write_outcome "failed:markers-after-agent-exit"
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "markers-after-agent-exit"
   exit 1
 fi
 
@@ -781,7 +891,7 @@ VAULT_COMMIT_COUNT="$(validate_commit_count "$VAULT" "$START_SHA" 2>/dev/null ||
 if [ -z "$VAULT_COMMIT_COUNT" ]; then
   log_error "validate_commit_count returned empty; refusing to classify outcome"
   record_dangling_sha
-  write_outcome "failed:agent-exit-nonzero"
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "agent-exit-nonzero"
   exit 1
 fi
 

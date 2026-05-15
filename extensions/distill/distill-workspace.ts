@@ -856,6 +856,13 @@ export function findDistillOutcomeForBranch(
   outcomeClass: string;
   outcomePath: string;
   partialMergeLogPath: string | null;
+  /**
+   * Optional recovery hint emitted by the wrapper's salvage path
+   * (PR #12 A4). Lines 2+ of the outcome sidecar; absent on happy-
+   * path classes (`merged-content`, `merged-local`, `no-content`)
+   * since they need no recovery action.
+   */
+  recoveryHint: string | null;
 } | null {
   if (!fs.existsSync(errorDir)) return null;
   if (branchShort.length === 0) return null;
@@ -869,9 +876,20 @@ export function findDistillOutcomeForBranch(
   const outcomes = entries.filter((f) => f.endsWith(outcomeSuffix)).sort();
   if (outcomes.length === 0) return null;
   const outcomePath = path.join(errorDir, outcomes[outcomes.length - 1]);
+  // PR #12 A4: outcome sidecar format is multi-line
+  //   line 1   = outcome class (machine-readable, drives JS-side dispatch)
+  //   lines 2+ = optional human-readable recovery hint (failed:* only)
+  // Pre-PR-12 sidecars are single-line; the split below handles both
+  // shapes: `lines[0]` is always the class, `lines.slice(1).join('\n')`
+  // is empty for legacy single-line sidecars.
   let outcomeClass = "";
+  let recoveryHint: string | null = null;
   try {
-    outcomeClass = fs.readFileSync(outcomePath, "utf-8").trim();
+    const raw = fs.readFileSync(outcomePath, "utf-8");
+    const lines = raw.split("\n");
+    outcomeClass = (lines[0] ?? "").trim();
+    const restRaw = lines.slice(1).join("\n").trim();
+    recoveryHint = restRaw.length > 0 ? restRaw : null;
   } catch {
     // Treat unreadable outcome as missing — caller will fall through to
     // abnormal-termination handling.
@@ -888,7 +906,7 @@ export function findDistillOutcomeForBranch(
       );
     }
   }
-  return { outcomeClass, outcomePath, partialMergeLogPath };
+  return { outcomeClass, outcomePath, partialMergeLogPath, recoveryHint };
 }
 
 /**

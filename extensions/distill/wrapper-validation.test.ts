@@ -169,7 +169,10 @@ function runWrapper(
   );
 
   // Locate the outcome sidecar. The wrapper names it
-  // `<ts>-<pid>-<branchShort>.outcome`.
+  // `<ts>-<pid>-<branchShort>.outcome`. PR #12 A4 made the file
+  // multi-line for `failed:*` classes (line 1 = class, lines 2+ =
+  // recovery hint); use only line 1 as the canonical class string
+  // — same shape as the JS-side `findDistillOutcomeForBranch`.
   const branchShort = branch.replace(/^distill\//, "");
   const outcomeFiles = fs.existsSync(scaffold.errorDir)
     ? fs
@@ -180,7 +183,8 @@ function runWrapper(
   let outcomePath: string | null = null;
   if (outcomeFiles.length === 1) {
     outcomePath = path.join(scaffold.errorDir, outcomeFiles[0]);
-    outcome = fs.readFileSync(outcomePath, "utf-8").trim();
+    const raw = fs.readFileSync(outcomePath, "utf-8");
+    outcome = (raw.split("\n")[0] ?? "").trim();
   }
 
   return {

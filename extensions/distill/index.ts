@@ -766,6 +766,15 @@ export default function (pi: ExtensionAPI) {
         outcomeClass: string;
         outcomePath: string;
         partialMergeLogPath: string | null;
+        /**
+         * Optional recovery hint emitted by the wrapper's salvage path
+         * (PR #12 A4). Surfaces in the failure notification message so
+         * the user sees the recommended `git revert` / `git reflog`
+         * recovery action without needing to open the error log.
+         * Null on happy-path classes (merged-content, merged-local,
+         * no-content) and on legacy single-line outcome sidecars.
+         */
+        recoveryHint: string | null;
       } | null;
     } | null;
   }
@@ -1052,6 +1061,7 @@ export default function (pi: ExtensionAPI) {
         outcomeClass: string;
         outcomePath: string;
         partialMergeLogPath: string | null;
+        recoveryHint: string | null;
       } | null = null;
       if (checkOutcome) {
         try {
@@ -1216,6 +1226,7 @@ export default function (pi: ExtensionAPI) {
       outcomeClass: string;
       outcomePath: string;
       partialMergeLogPath: string | null;
+      recoveryHint: string | null;
     } | null;
   } | null {
     const { ctx: c, vaultContentPath, sessionFile, config } = args;
@@ -1690,6 +1701,7 @@ export function formatOutcomeNotification(args: {
   outcome: {
     outcomeClass: string;
     partialMergeLogPath: string | null;
+    recoveryHint: string | null;
   } | null;
   elapsedSec: number;
   readPartialMergeLog?: (path: string) => string | null;
@@ -1768,11 +1780,19 @@ export function formatOutcomeNotification(args: {
       // head-not-on-default, agent-exit-nonzero, agent-timeout). Surface
       // as `error` with the reason in the message so the user can
       // diagnose without opening the error log first.
+      //
+      // PR #12 A4: when the wrapper's salvage path emitted a recovery
+      // hint into the outcome sidecar (lines 2+), append it to the
+      // notification message so the user sees the recommended
+      // `git revert` / `git reflog` recovery action inline.
       if (outcome.outcomeClass.startsWith("failed:")) {
         const reason = outcome.outcomeClass.slice("failed:".length);
+        const message = outcome.recoveryHint
+          ? `Distillation failed: ${reason} — ${outcome.recoveryHint}`
+          : `Distillation failed: ${reason}`;
         return {
           level: "error",
-          message: `Distillation failed: ${reason}`,
+          message,
           statusKey: "error",
           statusGlyph: "✗",
           statusText: ` distill: ${reason}`,
