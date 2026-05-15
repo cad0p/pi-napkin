@@ -585,6 +585,21 @@ describe("napkin-distill-merge forensic logging (POST-CONV-6)", () => {
       fs.rmSync(errorDir, { recursive: true, force: true });
     }
   });
+
+  // R12-SC-6: the merge driver's stderr-capture tempfile previously
+  // had a `mktemp || echo /tmp/napkin-merge-stderr.$$` fallback that
+  // produced a predictable path (TOCTOU surface on shared hosts).
+  // Hard-fail without a fallback now. Pin the change at the source
+  // level so a future refactor can't reintroduce the predictable
+  // path. Match only the executable form (mktemp followed by `||`
+  // followed by `echo`); the explanatory comment block referencing
+  // the old `/tmp/napkin-merge-stderr.$$` path stays as documentation.
+  test("merge driver does not fall back to predictable /tmp tempfile (R12-SC-6)", () => {
+    const src = fs.readFileSync(MERGE_DRIVER_SCRIPT, "utf-8");
+    expect(src).not.toMatch(
+      /STDERR_TMP="\$\(mktemp[^\n]*\|\|[^\n]*echo[^\n]*\)"/,
+    );
+  });
 });
 
 /**

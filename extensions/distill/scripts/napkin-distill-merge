@@ -360,7 +360,14 @@ attempt=1
 max_attempts=3
 # Tempfile for capturing pi stderr per attempt. Cleaned up on exit via
 # trap so even on early exit we don't leak under /tmp.
-STDERR_TMP="$(mktemp 2>/dev/null || echo /tmp/napkin-merge-stderr.$$)"
+#
+# Hard-fail when mktemp is unavailable rather than falling back to
+# `/tmp/napkin-merge-stderr.$$`. The fallback was a TOCTOU surface
+# (predictable name; another local user could pre-create the path as
+# a symlink to a sensitive file before the driver opens it for write)
+# and was never necessary — mktemp ships on every supported platform
+# (Linux coreutils, macOS, BSD, Alpine busybox). (R12-SC-6.)
+STDERR_TMP="$(mktemp)" || { log_attempt 0 "internal" "mktemp failed"; exit 1; }
 trap 'rm -f "$STDERR_TMP" 2>/dev/null || true' EXIT
 while [ "$attempt" -le "$max_attempts" ]; do
   : > "$STDERR_TMP"
