@@ -600,6 +600,48 @@ describe("napkin-distill-merge forensic logging (POST-CONV-6)", () => {
       /STDERR_TMP="\$\(mktemp[^\n]*\|\|[^\n]*echo[^\n]*\)"/,
     );
   });
+
+  // R12-CI-1: when NAPKIN_DISTILL_ERROR_DIR, XDG_CACHE_HOME, AND HOME
+  // are all unset (cron / systemd / locked-down container init), the
+  // previous shell expansion `${XDG_CACHE_HOME:-$HOME/.cache}/...`
+  // resolved to a literal `/.cache/napkin-distill/merge-driver-logs`
+  // and mkdir silently failed. The driver now falls through to
+  // `${TMPDIR:-/tmp}` as a final safety net.
+  test("LOG_DIR falls back to TMPDIR when HOME + XDG_CACHE_HOME both unset (R12-CI-1)", () => {
+    const tmpdirOverride = fs.mkdtempSync(
+      path.join(os.tmpdir(), "merge-tmpdir-fallback-"),
+    );
+    try {
+      withFixture(({ base, ours, theirs }) => {
+        const r = runMergeDriverWithEnv(
+          base,
+          ours,
+          theirs,
+          "vault/notes/cron.md",
+          "fail",
+          {
+            NAPKIN_DISTILL_ERROR_DIR: undefined,
+            XDG_CACHE_HOME: undefined,
+            HOME: undefined,
+            TMPDIR: tmpdirOverride,
+          },
+        );
+        expect(r.exitCode).toBe(1);
+        const fallbackDir = path.join(
+          tmpdirOverride,
+          "napkin-distill",
+          "merge-driver-logs",
+        );
+        expect(fs.existsSync(fallbackDir)).toBe(true);
+        const logFiles = fs
+          .readdirSync(fallbackDir)
+          .filter((f) => f.endsWith(".merge-driver.log"));
+        expect(logFiles.length).toBeGreaterThan(0);
+      });
+    } finally {
+      fs.rmSync(tmpdirOverride, { recursive: true, force: true });
+    }
+  });
 });
 
 /**
