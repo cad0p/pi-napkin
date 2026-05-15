@@ -19,6 +19,13 @@ Then install the pi-napkin extension:
 pi install npm:@cad0p/pi-napkin
 ```
 
+### Requirements
+
+- **bash 4+** — the auto-distill wrapper uses bash arrays, `local -n`, and other bash-4 features. macOS ships bash 3.2 by default; install a newer one via `brew install bash` (the wrapper resolves bash via its `#!/usr/bin/env bash` shebang, so it picks up homebrew's bash if `brew` is on `PATH`).
+- **`timeout(1)` from coreutils** — used to bound the agent's wall-clock budget (`distill.maxDurationMinutes`). Linux distros ship it as `timeout`; macOS ships it as `gtimeout` after `brew install coreutils`. The wrapper detects either binary and falls back fast with a helpful error if neither is present.
+- **git 2.20+** — needed for `git worktree`, `merge-base --is-ancestor`, and `symbolic-ref --short HEAD`.
+- **A `pi` configured with at least one model provider** — auto-distill spawns `pi -p` against the model in `distill.model.{provider,id}`. Manual `/distill` reuses the parent session's provider.
+
 <details>
 <summary>Pre-release / dev installs</summary>
 
@@ -206,7 +213,7 @@ Or edit `<vault>/.napkin/config.json` directly:
 
 When enabled, on session start the extension:
 
-1. Runs `ensureVaultReadyForAutoDistill` on the vault (see below) — git-inits if needed and scaffolds `.gitignore` / `.gitattributes`.
+1. Runs `ensureVaultReadyForAutoDistill` on the vault (see below) — git-inits if needed and scaffolds `.gitignore`.
 2. Sweeps stale distill worktrees left by crashed pi instances (`cleanupStaleWorktrees`).
 3. Arms a timer (`intervalMinutes`) that spawns a detached `pi -p` subprocess on tick.
 4. On shutdown (unless `distill.onShutdown` is false or the session file is already captured), spawns one final distill.
@@ -226,7 +233,7 @@ The distill subprocess runs a prompt that asks the model to:
 When you enable `distill.enabled: true` on a vault that isn't a git repo, pi-napkin auto-initializes it on the next session start:
 
 1. Runs `git init`.
-2. Scaffolds `.gitignore` (excludes `.napkin/distill/` — the per-worktree session fork) and `.gitattributes` (routes `*.md` through the LLM merge driver). Distill worktrees themselves live outside the vault (see [Where worktrees live](#where-worktrees-live)), so `.gitignore` doesn't need to exclude them.
+2. Scaffolds `.gitignore` (excludes `.napkin/distill/` — the per-worktree session fork). Distill worktrees themselves live outside the vault (see [Where worktrees live](#where-worktrees-live)), so `.gitignore` doesn't need to exclude them. No `.gitattributes` is written — the agent-driven merge architecture has no driver to register.
 3. Commits everything as `napkin: initial vault commit (auto-distill setup)`.
 4. Notifies you once, with instructions to undo (`rm -rf <vault>/.git`) or opt out (`distill.enabled: false`).
 
@@ -250,23 +257,60 @@ Running multiple pi sessions against the same vault (for example, autonomous age
 
 ### Worktree per distill
 
-Each auto-distill invocation (interval fire or shutdown) creates its own temporary branch and worktree under `$XDG_CACHE_HOME/napkin-distill/<vault-hash>/<branch-suffix>/` (typically `~/.cache/napkin-distill/…`). pi runs at the **parent session's cwd** (not the worktree) so the system prompt's `Current working directory:` line stays byte-identical to the parent's, preserving prompt-cache hits. Vault writes from the agent's bash tool are routed back to the worktree by a per-distill napkin shim at `<worktree>/.napkin/distill/bin/napkin` that injects `--vault <worktree>` into every napkin invocation. The wrapper's own git operations (`git add` / `commit` / `merge --squash`) all run with `git -C <worktree>` against the isolated checkout. See [Where worktrees live](#where-worktrees-live) for why the worktree dir is external to the vault.
+Each auto-distill invocation (interval fire or shutdown) creates its own temporary branch and worktree under `$XDG_CACHE_HOME/napkin-distill/<vault-hash>/<branch-suffix>/` (typically `~/.cache/napkin-distill/…`). pi runs at the **parent session's cwd** (not the worktree) so the system prompt's `Current working directory:` line stays byte-identical to the parent's, preserving prompt-cache hits. Vault writes from the agent's bash tool are routed back to the worktree by a per-distill napkin shim at `<worktree>/.napkin/distill/bin/napkin` that injects `--vault <worktree>` into every napkin invocation. See [Where worktrees live](#where-worktrees-live) for why the worktree dir is external to the vault.
 
-### LLM merge driver
+### How distill resolves conflicts
 
-When the distill commits its changes and merges back to main, conflicts are resolved by a custom git merge driver (`.napkin-distill-merge`) that calls the same model as the distill itself. The driver is registered per-worktree via `git config --local` and routed at the file level by an `*.md merge=napkin-distill-merge` entry in `.gitattributes`.
+The distill agent owns the full lifecycle: produce content → merge default branch into the distill branch → squash to default → push to origin (if configured) → clean up. The wrapper does NOT invoke a per-file merge driver; the model that wrote the content also resolves any conflicts that surface when the worktree is reconciled with main.
 
-The driver makes three attempts per conflict. After three strikes, the driver exits 1 and git leaves conflict markers — handled by the next step.
+Flow:
 
-### Partial-merge salvage
+1. **Wrapper** sets up the worktree, installs the per-distill napkin shim, and spawns one `pi -p $PROMPT` invocation under `timeout ${maxDurationMinutes}m`. The prompt instructs the agent to walk steps 1–10 (distill → merge → squash → push → cleanup).
+2. **Agent** distills content into the worktree, then runs `git -C <worktree> merge --no-edit <default>`. If conflicts surface, it edits each file in place using the conversation history as context.
+3. **Agent** squash-merges into the vault's default branch (`git -C <vault> merge --squash <distill-branch>` then `git commit`).
+4. **Agent** pushes to `origin/<default>` if origin is configured. On non-fast-forward failures it recovers via `git pull --no-rebase origin <default>` then re-pushes. It NEVER uses `--force` or `--force-with-lease`.
+5. **Wrapper** post-validates: no conflict markers in tracked `*.md`, vault HEAD on default branch, push (if attempted) didn't rewrite shared history. Writes an outcome sidecar and force-cleans the worktree + distill branch.
 
-If the LLM merge driver fails on some files, we don't abort the whole merge. Files that merged cleanly keep the distill's content; files that failed fall back to main's version via `git checkout main -- <file>`.
+The full prompt template lives at `extensions/distill/distill-prompt.md`. The wrapper bounds the agent's wall-clock with `timeout(1)`; everything else (retry policy, network handling, conflict-resolution shape) is the agent's call.
 
-Think of it as: "save what you can, log what you lost." A per-failure entry is written to `<vault>/.napkin/distill/errors/` so you can inspect what was discarded, and the dangling distill commit SHA is kept for ~2 weeks of git gc grace in case you want to recover it manually.
+### Outcome classes
+
+Each distill produces a sidecar at `<vault>/.napkin/distill/errors/<timestamp>-<pid>-<branch>.outcome` whose first line is a machine-readable class:
+
+| Class | When | UI severity |
+|---|---|---|
+| `merged-content` | Agent produced content, integrated, squashed, and pushed to origin (or origin not configured). | info ✓ |
+| `merged-local` | Agent integrated + squashed, but origin/`<default>` is configured AND local `<default>` is ahead of `origin/<default>` (push didn't land). | warning ⚠ — "distilled but not pushed" |
+| `no-content` | Agent produced nothing (genuine no-op — selective filter), or committed to the distill branch but skipped squash (default branch never moved). | warning ⚠ |
+| `failed:<reason>` | Wrapper validation rejected the agent's output, or the agent didn't complete. | error ✗ |
+
+Known `failed:<reason>` codes:
+
+| Reason | Meaning | Recovery |
+|---|---|---|
+| `markers-after-agent-exit` | Conflict markers (`<<<<<<<` / `=======` / `>>>>>>>`) found in tracked `*.md` files that the agent did not have at distill start. The agent left an unfinished merge. | The squash commit may already be on `<default>`. Inspect with `git show HEAD`, then `git revert HEAD --no-edit` to undo cleanly. The dangling distill branch is recoverable from `git reflog` for ~2 weeks. |
+| `pre-existing-markers` | Markers were present in the same files BEFORE the agent ran. Validation refuses to misattribute them. | Resolve the pre-existing markers in the vault yourself, then re-run distill. |
+| `head-not-on-default` | Vault HEAD is not on the default branch after the agent exited (detached HEAD or different branch). | Manually `git checkout <default>` after confirming nothing is in flight. The distill branch lives in `git reflog` if you want to recover its content. |
+| `divergent-history` | After the agent's push, `origin/<default>` and local `<default>` diverged in a way that doesn't look like a fast-forward (unexpected; benign third-party push or — defensively — a force-push). | Inspect `origin/<default>` vs local. If a teammate landed a commit during distill, `git pull --no-rebase` to integrate. |
+| `agent-exit-nonzero` | The agent's `pi -p` invocation exited non-zero with no other diagnostic. | See the error log next to the sidecar for the agent's stderr. |
+| `agent-timeout` | `timeout(1)` killed the agent after `distill.maxDurationMinutes` minutes. | Bump `distill.maxDurationMinutes` if your conversations routinely produce long distills, or check the error log for what the agent was doing when it timed out. |
+
+A missing sidecar AND missing error log means the wrapper itself was killed before writing either (SIGKILL, OOM). The JS-side poller surfaces this as "distill terminated abnormally".
+
+### Salvage when validation fails
+
+The salvage path is deliberately narrow: the wrapper janitors the **worktree and distill branch**, never the main vault's commit history. If validation fails:
+
+- Force-remove the worktree (`git worktree remove --force` + path-safety guard, falling back to `rm -rf` only if the worktree path is a descendant of the resolved cache root).
+- Force-delete the distill branch (`git branch -D`).
+- Write a `failed:<reason>` sidecar with a recovery hint that points at the corrupt squash commit if one landed on `<default>`.
+- Exit 1.
+
+The wrapper deliberately does NOT `git reset --hard` or otherwise rewrite the vault's commit history. If the agent's squash landed corrupt content, the user's `git revert HEAD --no-edit` (forward-only) is preferred over a destructive reset that could clobber concurrent edits the user made between distill spawn and validation. The recovery hint in the failed sidecar names the exact command.
 
 ### Linear history
 
-Successful distill lifecycles produce exactly one squash commit on `main`, with an LLM-generated summary message. This keeps history clean and makes it easy to revert a bad distill with `git revert <sha>`.
+Successful distill lifecycles produce exactly one squash commit on `main`, with a one-line summary the agent generates from the distill content. This keeps history clean and makes it easy to revert a bad distill with `git revert <sha>`.
 
 ## Agent visibility
 
@@ -308,7 +352,7 @@ If you want auto-distill on an existing Obsidian vault:
 2. Start a pi session in the vault.
 3. On session start, pi-napkin prompts to auto-init git if the vault isn't already one.
 
-If your vault IS already a git repo (common for "vault as project"), pi-napkin just adds the `.gitignore` / `.gitattributes` scaffolds and moves on.
+If your vault IS already a git repo (common for "vault as project"), pi-napkin just adds the `.gitignore` scaffold and moves on.
 
 ## Troubleshooting
 
@@ -331,15 +375,18 @@ rm -rf ~/.cache/napkin-distill/
 
 Safe — anything valuable is either already committed to main or was never going to commit.
 
-### Merge driver fails repeatedly
+### Distill keeps failing (`failed:<reason>`)
 
-Error log: `<vault>/.napkin/distill/errors/<ISO-timestamp>-<pid>-<branch-hash>.log`.
+Outcome sidecar: `<vault>/.napkin/distill/errors/<ISO-timestamp>-<pid>-<branch-hash>.outcome`. First line is the class string (`failed:<reason>`); remaining lines are a human-readable recovery hint.
 
-Each log has the conflicted files, the last LLM response, and an optional one-liner describing the failure. Common causes:
+Companion error log (if produced): `<ISO-timestamp>-<pid>-<branch-hash>.log` — wrapper diagnostics + the agent's stderr.
 
-- Model is rate-limited → retry later.
-- LLM returned empty / tiny / huge output → driver sanity-check rejects it. Usually a transient provider issue.
-- Conflicted content is genuinely unmergeable (same line added with different content) → the partial-merge salvage falls back to main's version; the distill commit SHA is kept in reflog for ~2 weeks if you want to recover it.
+See the [Outcome classes](#outcome-classes) table for what each `<reason>` means and the recommended recovery action. Common patterns:
+
+- `agent-timeout` recurring → bump `distill.maxDurationMinutes` (default 10) or investigate what's taking the agent so long. Log shows the last tool calls before SIGTERM.
+- `markers-after-agent-exit` → the agent's squash commit may already be on `<default>` with literal `<<<<<<<` markers in tracked files. The recovery hint in the sidecar names the exact `git revert HEAD --no-edit` command.
+- `agent-exit-nonzero` → check the model provider (rate limits, auth refresh, network). The agent's stderr is in the `.log` file.
+- `divergent-history` → a teammate likely landed a commit on `origin/<default>` while the agent's distill ran. `git pull --no-rebase` to integrate.
 
 ### "vault not a git repo" / "legacy embedded layout"
 
@@ -356,15 +403,41 @@ The distill wrapper (`extensions/distill/scripts/distill-wrapper.sh`) reads seve
 
 | Variable | Purpose |
 |---|---|
-| `NAPKIN_DISTILL_PI_BIN` | Override the `pi` binary path. Tests point this at `/usr/bin/true` (exits 0 quickly) or a stub script so the wrapper completes its lifecycle without contacting a real LLM. |
-| `NAPKIN_DISTILL_MERGE_MOCK` | Forwarded to `napkin-distill-merge` (the LLM driver). Set to `fail` to force every conflict to 3-strike, or `ok-after-N` to succeed after N attempts. Used to exercise the partial-merge salvage path. |
-| `NAPKIN_DISTILL_SKIP_PI=1` | Skip BOTH the napkin shim install AND the `pi` invocation. Used by tests that pre-stage file changes manually and only want to exercise the wrapper's git lifecycle (commit/merge/squash). |
+| `NAPKIN_DISTILL_PI_BIN` | Override the `pi` binary path. Integration tests under `extensions/distill/test-fixtures/agent-stubs/` point this at a bash stub that simulates a specific agent behavior class (clean-distill, conflict-resolve-clean, agent-timeout, etc.) so the wrapper completes its lifecycle without contacting a real LLM. |
+| `NAPKIN_DISTILL_SKIP_PI=1` | Skip BOTH the napkin shim install AND the `pi` invocation. Used by tests that pre-stage file changes manually and only want to exercise the wrapper's lifecycle (validation, salvage, sidecar emission). |
+| `NAPKIN_DISTILL_NO_RECURSE=1` | Exported by the wrapper into the agent's environment so a nested `pi` won't auto-distill recursively. Tests sometimes set it directly to suppress recursion when invoking the wrapper from inside another distill. |
 | `NAPKIN_DISTILL_HALT_AFTER_META=1` | Halt right after rewriting `meta.json`'s pid to the wrapper's pid. Lets tests inspect the updated meta without the cleanup trap wiping the worktree. Clears the `EXIT` trap so cleanup is skipped — caller is responsible for tearing down the worktree afterwards. |
 | `NAPKIN_DISTILL_HALT_AFTER_SHIM=1` | Halt right after the per-distill napkin shim is installed at `<worktree>/.napkin/distill/bin/napkin`. Lets tests inspect the shim contents and PATH injection without the cleanup trap firing. |
-| `NAPKIN_DISTILL_FORCE_MERGE_HEAD=1` | Force `MERGE_HEAD` to exist right before the escape-hatch check. Lets tests cover the belt-and-braces "merge did not complete" bail-out path, which isn't reliably triggerable via real driver output (git clears `MERGE_HEAD` on driver exit 0). |
-| `NAPKIN_DISTILL_FORCE_MERGE_RC=<n>` | Override the captured merge exit code. Lets tests cover the unexpected-exit-code branch (128 etc.) without contriving a real git failure of that shape. |
+| `NAPKIN_DISTILL_FORCE_CLEANUP=1` | Force the salvage / cleanup path to run unconditionally (even on success). Used to test salvage idempotency. |
+| `NAPKIN_DISTILL_TIMEOUT_KILL_GRACE_SECS=<n>` | Override the `timeout(1) -k` grace window (default 30s) — the delay between SIGTERM and SIGKILL when the agent exceeds `distill.maxDurationMinutes`. Used to keep timeout tests fast. |
 
 Production never sets any of these. If you find one in your environment by accident, `unset` it and re-run — the wrapper falls back to its normal behaviour automatically.
+
+## Migration from PR #11
+
+pi-napkin v0.1.x shipped an LLM-backed git merge driver (`.napkin-distill-merge`). PR #12 (v0.2.x) deleted the driver entirely; the agent now resolves its own conflicts as part of the distill task. New vaults set up by v0.2+ never see the driver. Existing v0.1.x vaults retain inert fragments that are safe to leave in place but cleaner to remove:
+
+```bash
+# In each existing vault that ran v0.1.x distill:
+git config --local --remove-section merge.napkin-distill-merge 2>/dev/null || true
+
+# Edit <vault>/.gitattributes and remove this line if present:
+#   *.md merge=napkin-distill-merge
+```
+
+Why manual: PR #12's design (see `features/pi-napkin-distill/pr-12-agent-driven-merge/design.md`) deliberately avoids automatic migration. The orphaned `.gitattributes` rule falls back to git's built-in merge driver once the script is gone (the rule becomes inert, not harmful), so the cost of automating cleanup outweighs the benefit for a project with a small user base. New vaults aren't affected.
+
+## Maintenance
+
+### Verifying the agent prompt against a real LLM
+
+CI uses bash-stub fixtures (`extensions/distill/test-fixtures/agent-stubs/`) to cover the agent-behavior space without burning tokens. For ad-hoc re-validation that a real model still walks the prompt cleanly — for instance after editing `extensions/distill/distill-prompt.md` — run:
+
+```bash
+bun run verify:agent-prompt
+```
+
+The script (`scripts/verify-agent-prompt.sh`) creates a tmpdir vault, builds the distill prompt with synthetic paths, invokes `pi -p` against the model named in `~/.config/napkin/config.json` (or whatever your global napkin config points at), and asserts post-conditions: no skipped procedural steps, no conflict markers, HEAD on default branch, distill branch removed. Exits 0 on PASS, 1 on FAIL. Manual-only — not in CI.
 
 ## Future: builder-deleter
 
