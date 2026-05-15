@@ -162,9 +162,63 @@ describe("distill-prompt.md — content invariants", () => {
     expect(template).toMatch(/do not loop indefinitely/i);
   });
 
-  test("template contains the worktree-isolation prefix from POST-R6-CACHE", () => {
+  test("template contains the worktree-isolation cwd contract from POST-R6-CACHE", () => {
     // Per design.md "Open questions" → "Worktree-isolation prompt prefix
-    // from POST-R6-CACHE: keep". Signature phrase from PR #11.
-    expect(template).toMatch(/isolated git worktree/);
+    // from POST-R6-CACHE: keep". The opening lines must spell out the
+    // cwd contract: agent's shell cwd is PARENT_CWD, NOT the worktree,
+    // so git ops must use `git -C {{worktreePath}}`. Replaces the
+    // pre-fix "You are running in an isolated git worktree at..."
+    // wording (CLEAN-A-2 / CLEAN-A-3) which falsely claimed cwd was
+    // the worktree.
+    expect(template).toMatch(/git -C \{\{worktreePath\}\}/);
+    expect(template).toMatch(/your shell cwd is NOT the worktree/i);
+  });
+
+  test("step 7 uses `git -C {{worktreePath}}` for all git operations (CLEAN-A-2)", () => {
+    // Step 7 commits + merges from inside the worktree. Bare
+    // `git merge` / `git add -A` / `git commit -m` would run against
+    // PARENT_CWD (the agent's actual shell cwd) and either corrupt the
+    // parent project repo or fail. Every git invocation in step 7
+    // must be qualified with `-C {{worktreePath}}`.
+    const lines = template.split("\n");
+    const start = lines.findIndex((l) => /^7\. /.test(l));
+    expect(start).toBeGreaterThan(-1);
+    // Step 7 ends where step 8 begins.
+    const end = lines.findIndex((l, i) => i > start && /^8\. /.test(l));
+    expect(end).toBeGreaterThan(start);
+    const step7 = lines.slice(start, end).join("\n");
+
+    // Each git operation in step 7 must use `git -C {{worktreePath}}`.
+    expect(step7).toMatch(/git -C \{\{worktreePath\}\} add -A/);
+    expect(step7).toMatch(/git -C \{\{worktreePath\}\} commit -m/);
+    expect(step7).toMatch(
+      /git -C \{\{worktreePath\}\} merge \{\{defaultBranch\}\}/,
+    );
+    expect(step7).toMatch(/git -C \{\{worktreePath\}\} add \./);
+    expect(step7).toMatch(/git -C \{\{worktreePath\}\} commit --no-edit/);
+
+    // No bare git invocations on a line by themselves (after stripping
+    // leading whitespace). The conflict-marker prose contains the
+    // word "git" inside backticks, which is fine; what we forbid is a
+    // command line like `       git merge {{defaultBranch}}`.
+    const codeLines = step7.split("\n").filter((l) => /^\s{4,}git\b/.test(l));
+    for (const codeLine of codeLines) {
+      expect(codeLine).toMatch(/git -C \{\{worktreePath\}\}/);
+    }
+  });
+
+  test("step 9 pull recovery uses --no-rebase (SEC-A-6)", () => {
+    // The agent's pull recovery must override any global
+    // `pull.rebase=true` config the user may have set. Without
+    // `--no-rebase`, a rebase silently rewrites the recovery commit
+    // shape and breaks the design's "linear forensic record" promise.
+    expect(template).toMatch(
+      /git -C \{\{vaultPath\}\} pull --no-rebase origin \{\{defaultBranch\}\}/,
+    );
+    // No bare `git pull origin` (without --no-rebase) anywhere in the
+    // template, so the agent can't be tempted to copy a flagless variant.
+    expect(template).not.toMatch(
+      /git -C \{\{vaultPath\}\} pull origin \{\{defaultBranch\}\}(?!.*--no-rebase)/m,
+    );
   });
 });

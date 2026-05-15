@@ -1,4 +1,4 @@
-You are running in an isolated git worktree at {{worktreePath}}. Only modify files within the worktree. Do NOT use absolute paths from the conversation history — those refer to the main vault and bypass isolation, causing the distill to silently merge nothing.
+Your distill content lives in the git worktree at {{worktreePath}}. Use `git -C {{worktreePath}}` for all git operations there — your shell cwd is NOT the worktree. Edit files in the worktree by absolute path under `{{worktreePath}}/...` (or `cd {{worktreePath}}` first if your tool supports it). Do NOT mix worktree files with the main vault path {{vaultPath}} — they are different working trees of the same repo, and writing to {{vaultPath}} bypasses isolation, causing the distill to silently merge nothing.
 
 Distill this conversation into the napkin vault, then integrate your changes back into the main vault yourself. The wrapper that invoked you will only validate the result; it will NOT run merge, squash, push, or cleanup on your behalf.
 
@@ -14,16 +14,21 @@ Distill this conversation into the napkin vault, then integrate your changes bac
 
 Be selective. Only capture knowledge useful to someone working on this project later. Skip meta-discussion, tool output, and chatter.
 
-7. Integrate with main. From the worktree at {{worktreePath}}, commit your distilled content first if you haven't already (`git add -A && git commit -m "distill: <one-line summary>"`), then run:
+7. Integrate with main. From the worktree at {{worktreePath}}, commit your distilled content first if you haven't already:
 
-       git merge {{defaultBranch}}
+       git -C {{worktreePath}} add -A
+       git -C {{worktreePath}} commit -m "distill: <one-line summary>"
+
+   Then merge {{defaultBranch}} into your distill branch:
+
+       git -C {{worktreePath}} merge {{defaultBranch}}
 
    If conflicts arise, you will see files with standard `<<<<<<<`, `=======`, `>>>>>>>` markers. Resolve each by editing the file in place to produce the correct merged content. Use the conversation history above to inform your choices — you have full context on what content you intended to add. Once all markers are gone:
 
-       git add .
-       git commit --no-edit
+       git -C {{worktreePath}} add .
+       git -C {{worktreePath}} commit --no-edit
 
-   If `git merge {{defaultBranch}}` reports "Already up to date" (no merge commit), that's fine — proceed.
+   If `git -C {{worktreePath}} merge {{defaultBranch}}` reports "Already up to date" (no merge commit), that's fine — proceed.
 
 8. Squash to main. From the main vault at {{vaultPath}}, switch to the default branch and squash-merge your branch:
 
@@ -39,8 +44,10 @@ Be selective. Only capture knowledge useful to someone working on this project l
 
    If push fails because the remote moved, recover with pull-merge-push (NOT pull-rebase):
 
-       git -C {{vaultPath}} pull origin {{defaultBranch}}
+       git -C {{vaultPath}} pull --no-rebase origin {{defaultBranch}}
        git -C {{vaultPath}} push origin {{defaultBranch}}
+
+   `--no-rebase` forces merge semantics regardless of any global `pull.rebase` config the user may have set.
 
    NEVER use `--force` or `--force-with-lease`. If push fails for any reason and you cannot recover, stop — do not loop indefinitely. The wrapper will detect local-only state and surface a warning to the user.
 

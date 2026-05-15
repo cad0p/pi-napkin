@@ -230,12 +230,14 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     expect(call.args[4]).toBe(result.workspace.sessionForkPath);
     // Prompt is now built internally via buildDistillPrompt against the
     // shipped distill-prompt.md template. It must contain the worktree-
-    // isolation prefix (POST-R6-CACHE) AND the agent-driven step markers
-    // for steps 7–10 (merge / squash / push / cleanup) with the four
-    // template placeholders substituted to real values.
+    // isolation cwd contract (POST-R6-CACHE; CLEAN-A-2/CLEAN-A-3 prompt
+    // rewrite) AND the agent-driven step markers for steps 7–10
+    // (merge / squash / push / cleanup) with the four template
+    // placeholders substituted to real values.
     expect(call.args[5]).toContain(
-      `isolated git worktree at ${result.workspace.worktreePath}`,
+      `git worktree at ${result.workspace.worktreePath}`,
     );
+    expect(call.args[5]).toContain(`git -C ${result.workspace.worktreePath}`);
     expect(call.args[5]).toContain(result.workspace.branchName);
     expect(call.args[5]).toContain(vault);
     // Steps 1–10 markers (line-start `<n>.`).
