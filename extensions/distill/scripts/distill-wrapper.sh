@@ -249,6 +249,17 @@ if [ -f "$META_PATH" ]; then
   fi
 fi
 
+# Extract startSha from meta.json — used for the post-pi diff that
+# detects whether pi produced any content (committed by pi itself or
+# staged-but-uncommitted). createDistillWorkspace populates this field
+# with the vault HEAD captured pre-spawn; same JSON.stringify(obj,
+# null, 2) shape as `pid`. Empty string is the safe fallback (no diff
+# possible → legacy --cached path applies later).
+START_SHA=""
+if [ -f "$META_PATH" ]; then
+  START_SHA=$(sed -nE 's/.*"startSha":[[:space:]]*"([0-9a-f]+)".*/\1/p' "$META_PATH" | head -n 1)
+fi
+
 # Testing hook: halt right after the meta-pid rewrite so integration tests
 # can inspect the updated meta.json before the cleanup trap removes the
 # worktree. Clears the EXIT trap so cleanup is skipped.
@@ -401,17 +412,38 @@ fi
 # so there are no sibling worktree paths to exclude.
 
 git -C "$WORKTREE" add -A
-# `git commit` exits non-zero if nothing is staged, which is legitimate: pi
-# may have concluded there was nothing worth distilling. Detect and continue.
-if git -C "$WORKTREE" diff --cached --quiet; then
-  # Nothing to commit — distill was a no-op. Skip straight to cleanup.
-  exit 0
+# Detect whether pi produced any content. `git diff --quiet $START_SHA`
+# compares the worktree's full state (committed by pi itself + staged)
+# against the branch's starting commit, so it correctly handles BOTH
+# cases: (a) pi staged but did not commit (legacy expected behaviour),
+# and (b) pi's bash tool ran `git commit` itself (the worktree is
+# clean post-`add -A` because pi already advanced HEAD). The previous
+# `git diff --cached --quiet` reported false-no-op for case (b),
+# silently dropping the distill commit when the cleanup trap force-
+# deleted the branch (POST-CONV-1; real failure: dropped commit
+# `a13e8b1`). When startSha is unavailable (legacy meta), fall back
+# to the staged-only check.
+if [ -n "$START_SHA" ]; then
+  if git -C "$WORKTREE" diff --quiet "$START_SHA"; then
+    # Genuinely no-op — pi explicitly produced nothing. Skip straight
+    # to cleanup. (Outcome sidecar wiring lands in POST-CONV-5.)
+    exit 0
+  fi
+else
+  if git -C "$WORKTREE" diff --cached --quiet; then
+    exit 0
+  fi
 fi
 
-if ! git_retry git -C "$WORKTREE" commit -m "distill: auto-distill content" > /dev/null 2>&1; then
-  log_error "git commit failed on distill branch"
-  record_dangling_sha
-  exit 1
+# Commit any staged changes. If pi already committed itself, there's
+# nothing left staged — skip the commit step and let the squash phase
+# pick up pi's existing commit(s).
+if ! git -C "$WORKTREE" diff --cached --quiet; then
+  if ! git_retry git -C "$WORKTREE" commit -m "distill: auto-distill content" > /dev/null 2>&1; then
+    log_error "git commit failed on distill branch"
+    record_dangling_sha
+    exit 1
+  fi
 fi
 
 # --- Step 3: merge main into distill. LLM driver handles *.md conflicts. ---

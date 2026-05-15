@@ -430,6 +430,71 @@ describe("distill-wrapper.sh (integration)", () => {
     expect(logAfter).toBe(logBefore);
   });
 
+  test("POST-CONV-1: pi-self-committed content squashes to main (no silent drop)", () => {
+    // Regression for the dropped-distill-commit `a13e8b1` failure mode:
+    // pi's bash tool ran `git commit` itself, leaving the worktree clean
+    // post-`add -A` because pi already advanced HEAD. The legacy
+    // `git diff --cached --quiet` check reported false-no-op and the
+    // wrapper exited 0 before the squash phase, then the cleanup trap
+    // force-deleted the branch. The new `git diff --quiet $START_SHA`
+    // check catches both the staged-only and pi-committed cases.
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
+    const branch = workspace.branchName;
+
+    // Simulate pi self-committing inside the worktree.
+    const stagedFile = path.join(workspace.worktreePath, "selfcommit.md");
+    fs.writeFileSync(
+      stagedFile,
+      "---\ntitle: self\n---\n# pi self-committed this\n",
+    );
+    const stage = spawnSync(
+      "git",
+      ["-C", workspace.worktreePath, "add", "-A"],
+      { encoding: "utf-8" },
+    );
+    expect(stage.status).toBe(0);
+    const commit = spawnSync(
+      "git",
+      [
+        "-C",
+        workspace.worktreePath,
+        "-c",
+        "user.name=pi",
+        "-c",
+        "user.email=pi@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-m",
+        "pi self-commit",
+      ],
+      { encoding: "utf-8" },
+    );
+    expect(commit.status).toBe(0);
+
+    const r = runWrapper(workspace);
+    expect(r.exitCode).toBe(0);
+
+    // Worktree and branch cleaned up.
+    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
+    const branches = spawnSync("git", ["-C", vault, "branch"], {
+      encoding: "utf-8",
+    }).stdout;
+    expect(branches).not.toContain(branch);
+
+    // main has the squash commit + pi's file content.
+    const log = spawnSync("git", ["-C", vault, "log", "--oneline", "-n", "5"], {
+      encoding: "utf-8",
+    }).stdout;
+    expect(log).toContain("distill: merge");
+    const mainFile = path.join(vault, "selfcommit.md");
+    expect(fs.existsSync(mainFile)).toBe(true);
+    expect(fs.readFileSync(mainFile, "utf-8")).toContain(
+      "# pi self-committed this",
+    );
+  });
+
   test("concurrent worktrees don't interfere (both complete)", () => {
     // Two workspaces with disjoint content — both should land on main.
     const a = createWorkspaceWithChanges("a.md", "---\ntitle: a\n---\n# a\n");
