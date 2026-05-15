@@ -217,6 +217,13 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
   // squashes back to default. From the vault's perspective this is
   // indistinguishable from `no-distill` (both leave default at startSha),
   // but the fixture documents the distinction for forensic clarity.
+  //
+  // Spec/impl alignment (CORR-3, Phase C R1 → Phase D D3): design.md
+  // "Mocked-pi behaviors" #5 originally said `failed`, but the
+  // implementation produces `no-content` (validate_commit_count == 0).
+  // The impl is logically sound: from main's perspective no new
+  // commits = no content. The orchestrator updates design.md post-
+  // merge; this test pins the impl-side contract.
   // -------------------------------------------------------------------------
 
   test("squash-skipped fixture \u2192 no-content (default branch never moved)", () => {
