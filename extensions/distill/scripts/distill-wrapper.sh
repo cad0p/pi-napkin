@@ -505,6 +505,7 @@ safe_rm_worktree() {
 # Reason codes (must match the JS-side dispatch table):
 #   markers-after-agent-exit
 #   pre-existing-markers
+#   internal-validator-error
 #   head-not-on-default
 #   agent-exit-nonzero
 #   agent-timeout
@@ -573,6 +574,9 @@ salvage() {
       ;;
     pre-existing-markers)
       hint="Conflict markers were already present in the vault before this distill ran (likely from a prior failed merge or a hand-edit). The agent did NOT introduce them, so this distill was rejected to avoid compounding the corruption. Inspect '$vault' (the error log lists the affected files) and resolve manually — delete the marker lines, keep the desired content, and commit. Once clean, re-run distill."
+      ;;
+    internal-validator-error)
+      hint="The post-distill conflict-marker validator could NOT run (mktemp failed to allocate a tempfile — likely a full disk or locked-down TMPDIR). The vault was NOT scanned for markers after the agent exited, so the wrapper cannot say whether the squash commit introduced corruption. Inspect '$vault' manually for unresolved '<<<<<<< / ======= / >>>>>>>' markers; if clean, the squash is keepable, otherwise 'git -C $vault revert HEAD --no-edit'. Distill content is recoverable from 'git -C $vault reflog' for ~90 days."
       ;;
     head-not-on-default)
       hint="Vault HEAD is not on '$DEFAULT_BRANCH'. Run 'git -C $vault checkout $DEFAULT_BRANCH' before the next distill. Distill content is recoverable from 'git -C $vault reflog'."
@@ -683,6 +687,13 @@ list_marker_files() {
 #                                    code with a recovery hint that
 #                                    points the user at fixing the
 #                                    listed files manually)
+#   rc 3 → internal-validator-error (validator could NOT run because
+#                                    its post-distill mktemp failed;
+#                                    surfaced as its own reason so the
+#                                    user is NOT told markers were
+#                                    found post-agent-exit when the
+#                                    validator never observed the
+#                                    vault state — CORR-1 R3 / SEC-1 R3)
 #
 # CORR-1: pre-existing markers (from a prior failed run, user error,
 # leftover state from a botched manual merge) used to classify as
@@ -715,8 +726,17 @@ validate_no_markers() {
   local post_file
   post_file="$(mktemp -t napkin-distill-post-marker.XXXXXX 2>/dev/null || true)"
   if [ -z "$post_file" ]; then
-    log_error "validate_no_markers: mktemp failed; cannot write post-distill marker snapshot"
-    return 1
+    # CORR-1 R3 / SEC-1 R3: post-distill mktemp failure (full disk,
+    # locked-down TMPDIR, etc.) USED to return 1 — which the caller
+    # mapped to `failed:markers-after-agent-exit`. That misled the
+    # user into reverting a possibly-correct squash commit on the
+    # claim that markers had landed in the vault, even though the
+    # validator never actually scanned the vault. Return a distinct
+    # rc 3 so the caller routes to `failed:internal-validator-error`
+    # whose recovery hint truthfully tells the user the validator
+    # couldn't run — inspect the vault before relying on the squash.
+    log_error "validate_no_markers: mktemp failed for post-distill snapshot — cannot scan vault for conflict markers; routing to internal-validator-error (NOT markers-after-agent-exit) to avoid misattributing unobserved state to the agent"
+    return 3
   fi
   list_marker_files "$vault" "$post_file"
 
@@ -1238,7 +1258,10 @@ fi
 # A3 wires:
 #   - validate_no_markers       (markers-after-agent-exit when NEW markers
 #                                 post-agent; pre-existing-markers when
-#                                 only pre-existing markers — CORR-1)
+#                                 only pre-existing markers — CORR-1;
+#                                 internal-validator-error when post-
+#                                 distill mktemp fails — CORR-1 R3 /
+#                                 SEC-1 R3)
 #   - validate_head_on_default  (head-not-on-default on fail)
 #   - validate_commit_count     (no-content when 0 commits since startSha)
 #   - detect_local_only         (merged-local when origin diverges)
@@ -1255,6 +1278,12 @@ fi
 #   pre-existing-markers       — V1 fail, ONLY pre-existing markers in
 #                                 vault *.md (present before agent ran;
 #                                 not the agent's fault — CORR-1)
+#   internal-validator-error   — V1 fail, post-distill mktemp failed so
+#                                 the marker validator could NOT scan
+#                                 the vault. Distinct from
+#                                 markers-after-agent-exit so the user
+#                                 isn't blamed-via-agent for state
+#                                 nobody observed (CORR-1 R3 / SEC-1 R3)
 #   head-not-on-default        — V2 fail, vault HEAD not on default branch
 #   agent-exit-nonzero         — pi exited non-zero with no other diagnostic
 #   agent-timeout              — timeout(1) killed the agent (rc 124 or 137)
@@ -1303,11 +1332,16 @@ if ! validate_head_on_default "$VAULT" "$DEFAULT_BRANCH"; then
   exit 1
 fi
 
-# Marker validation (CORR-A-1, SEC-A-7, CORR-1). Three rc paths:
+# Marker validation (CORR-A-1, SEC-A-7, CORR-1, CORR-1 R3 / SEC-1 R3).
+# Four rc paths:
 #   0 → no markers post-distill, pass
 #   1 → NEW marker-bearing files (agent-induced) → markers-after-agent-exit
 #   2 → only pre-existing marker files → pre-existing-markers (NOT
 #       agent-induced; user must fix manually before next distill)
+#   3 → post-distill mktemp failed; validator could not scan →
+#       internal-validator-error (graceful degradation; do NOT
+#       blame the agent for state nobody observed — CORR-1 R3 /
+#       SEC-1 R3)
 #
 # Pass the pre-distill snapshot file so validate_no_markers can do the
 # diff. Empty `PRE_DISTILL_MARKER_FILES_FILE` (mktemp failed) collapses
@@ -1323,6 +1357,11 @@ fi
 if [ "$MARKER_RC" -eq 2 ]; then
   record_dangling_sha
   salvage "$VAULT" "$WORKTREE" "$BRANCH" "pre-existing-markers"
+  exit 1
+fi
+if [ "$MARKER_RC" -eq 3 ]; then
+  record_dangling_sha
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "internal-validator-error"
   exit 1
 fi
 

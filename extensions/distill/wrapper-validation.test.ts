@@ -508,6 +508,92 @@ git -C "${s.vault}" commit -m "distill: with markers" >/dev/null
     }
   });
 
+  test("validate_no_markers FAIL (CORR-1 R3 / SEC-1 R3): post-distill mktemp failure → failed:internal-validator-error (NOT markers-after-agent-exit)", () => {
+    // CORR-1 R3 / SEC-1 R3 cross-reviewer consensus: when the
+    // post-distill snapshot's mktemp call fails (full disk,
+    // locked-down TMPDIR, etc.), the wrapper used to return rc 1 from
+    // validate_no_markers → caller dispatched to
+    // failed:markers-after-agent-exit. That misled the user into
+    // believing the validator had observed markers in the vault when
+    // it had never actually scanned. Fix: distinct rc 3 →
+    // failed:internal-validator-error whose recovery hint truthfully
+    // says "validator could not run" instead of "markers landed in
+    // the vault."
+    //
+    // Simulating mktemp failure cleanly: a TMPDIR override would
+    // also break the agent stub (which itself calls mktemp). Instead
+    // we shim mktemp via PATH — a fake mktemp that fails for the
+    // post-distill template and delegates to the real mktemp for
+    // every other template (including pre-distill, the agent stub's
+    // own usage, and the npm/bun toolchain).
+    const s = makeScaffold();
+    try {
+      // Build a shim dir with a fake mktemp.
+      const shimDir = path.join(s.root, "shim-bin");
+      fs.mkdirSync(shimDir, { recursive: true });
+      const realMktemp =
+        spawnSync("command", ["-v", "mktemp"], {
+          encoding: "utf-8",
+          shell: true,
+        }).stdout.trim() ||
+        // Fallback to the canonical path if `command -v` returns
+        // nothing under bun's restricted PATH (rare).
+        "/usr/bin/mktemp";
+      const fakeMktemp = path.join(shimDir, "mktemp");
+      fs.writeFileSync(
+        fakeMktemp,
+        `#!/usr/bin/env bash
+# Fail iff the template is the post-distill marker snapshot.
+# Pre-distill marker snapshot uses napkin-distill-pre-marker; agent
+# stub and toolchain use unrelated templates — those delegate to
+# the real mktemp.
+for arg in "$@"; do
+  case "$arg" in
+    *napkin-distill-post-marker*)
+      echo "mktemp: simulated post-distill failure" >&2
+      exit 1
+      ;;
+  esac
+done
+exec ${JSON.stringify(realMktemp)} "$@"
+`,
+        { mode: 0o755 },
+      );
+      writeStubPi(
+        s,
+        `
+git -C "${s.vault}" config user.email test@example.com
+git -C "${s.vault}" config user.name test
+echo "# clean note" > "${s.vault}/note.md"
+git -C "${s.vault}" add note.md
+git -C "${s.vault}" commit -m "distill: clean note" >/dev/null
+`,
+      );
+      const r = runWrapper(s, {
+        extraEnv: {
+          PATH: `${shimDir}:${process.env.PATH ?? ""}`,
+        },
+      });
+      expect(r.exitCode).toBe(1);
+      expect(r.outcome).toBe("failed:internal-validator-error");
+      // Recovery hint surfaces in the outcome sidecar (lines 2+).
+      // It must explicitly say the validator could NOT run — the
+      // whole point of the new reason code is to avoid the
+      // "markers landed in the vault" misclassification.
+      expect(r.outcomePath).not.toBeNull();
+      const raw = fs.readFileSync(r.outcomePath as string, "utf-8");
+      expect(raw).toContain("could NOT run");
+      // Anti-regression: the previous (wrong) hint pointed the user
+      // at reverting the squash on the claim that markers had
+      // landed. Pin that the new hint does NOT make that false
+      // claim outright — it offers revert as a CONDITIONAL recovery
+      // step, gated on manual inspection.
+      expect(raw).toContain("manually for unresolved");
+    } finally {
+      fs.rmSync(s.root, { recursive: true, force: true });
+    }
+  });
+
   // -------------------------------------------------------------------------
   // validate_commit_count
   // -------------------------------------------------------------------------
