@@ -168,8 +168,8 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
       spawnFn,
     );
     if (tmpDir) tmpDirs.push(tmpDir);
-    // args[6] is the DISTILL_PROMPT positional that the wrapper passes
-    // to `pi -p`. Worktree-isolation prefix's signature phrase from
+    // args[6] is the LEGACY_DISTILL_PROMPT positional that the wrapper
+    // passes to `pi -p`. Worktree-isolation prefix's signature phrase from
     // `buildWorktreeDistillPrompt` is "isolated git worktree at".
     expect(calls[0].args[6]).not.toContain("isolated git worktree at");
   });

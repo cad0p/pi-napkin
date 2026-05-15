@@ -167,7 +167,23 @@ export function loadVaultConfig(vaultPath: string): VaultConfig {
   }
 }
 
-const DISTILL_PROMPT = `Distill this conversation into the napkin vault.
+/**
+ * LEGACY_DISTILL_PROMPT: used only by the legacy `spawnDistill` path
+ * (argv-based, pre-PR-12). The canonical agent-driven prompt lives in
+ * `distill-prompt.md` (loaded via `buildDistillPrompt` from
+ * `distill-prompt.ts`) and is the source of truth for steps 1–10 of
+ * the worktree distill.
+ *
+ * This constant duplicates roughly steps 1–5 of the canonical prompt
+ * (overview → templates → identify → search/append/create → daily
+ * note + supersedes frontmatter). Do NOT add new steps here without
+ * cross-checking distill-prompt.md — the legacy path is intentionally
+ * retained for git-less / disabled / legacy-embedded vaults that
+ * can't take the worktree spawn path, so drift between the two
+ * prompts is a hazard. Phase D / a future cleanup pass may factor
+ * the shared content into a single source.
+ */
+const LEGACY_DISTILL_PROMPT = `Distill this conversation into the napkin vault.
 
 1. \`napkin overview\` — learn the vault structure and what exists. Read \`_about.md\` files to understand what each folder is for. These are short folder descriptions (1-2 paragraphs) explaining what kinds of notes belong there — see existing ones for style.
 2. \`napkin template list\` and \`napkin template read\` — learn the note formats.
@@ -244,7 +260,7 @@ export function spawnDistill(
         piBin,
         forkedFile,
         tmpDir,
-        DISTILL_PROMPT,
+        LEGACY_DISTILL_PROMPT,
         modelStr,
       ],
       {

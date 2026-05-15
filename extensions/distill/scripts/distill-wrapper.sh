@@ -109,8 +109,6 @@
 #
 # Environment:
 #   NAPKIN_DISTILL_NO_RECURSE=1  exported so the nested `pi` won't auto-distill
-#   NAPKIN_GIT_RETRY_MAX         forwarded to git_retry (cleanup paths only)
-#   NAPKIN_GIT_RETRY_DELAY       forwarded to git_retry (cleanup paths only)
 #
 # Testing hooks:
 #   NAPKIN_DISTILL_PI_BIN        path to a stub `pi` binary (integration tests).
