@@ -104,10 +104,15 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
   let vault: string;
   let sessionDir: string;
   let sessionFile: string;
+  let xdgCacheDir: string;
+  let _savedXdgCache: string | undefined;
   const workspaces: Pick<DistillWorkspace, "worktreePath" | "branchName">[] =
     [];
 
   beforeEach(() => {
+    _savedXdgCache = process.env.XDG_CACHE_HOME;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-unit-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     vault = createGitVault();
     sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-unit-src-"));
     sessionFile = createSeededSessionFile(sessionDir, sessionDir);
@@ -118,6 +123,9 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     workspaces.length = 0;
     fs.rmSync(sessionDir, { recursive: true, force: true });
     fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   /**
@@ -303,8 +311,13 @@ describe("distill-wrapper.sh (integration)", () => {
   let vault: string;
   let sessionDir: string;
   let sessionFile: string;
+  let xdgCacheDir: string;
+  let _savedXdgCache: string | undefined;
 
   beforeEach(() => {
+    _savedXdgCache = process.env.XDG_CACHE_HOME;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-integ-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     vault = createGitVault();
     sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-integ-src-"));
     sessionFile = createSeededSessionFile(sessionDir, sessionDir);
@@ -313,6 +326,9 @@ describe("distill-wrapper.sh (integration)", () => {
   afterEach(() => {
     fs.rmSync(sessionDir, { recursive: true, force: true });
     fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   /**
@@ -897,8 +913,13 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
   let vault: string;
   let sessionDir: string;
   let sessionFile: string;
+  let xdgCacheDir: string;
+  let _savedXdgCache: string | undefined;
 
   beforeEach(() => {
+    _savedXdgCache = process.env.XDG_CACHE_HOME;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-salvage-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     vault = createGitVault();
     sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-salvage-src-"));
     sessionFile = createSeededSessionFile(sessionDir, sessionDir);
@@ -907,6 +928,9 @@ describe("distill-wrapper.sh (partial-merge salvage)", () => {
   afterEach(() => {
     fs.rmSync(sessionDir, { recursive: true, force: true });
     fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   /**
@@ -1144,8 +1168,13 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
   let vault: string;
   let sessionDir: string;
   let sessionFile: string;
+  let xdgCacheDir: string;
+  let _savedXdgCache: string | undefined;
 
   beforeEach(() => {
+    _savedXdgCache = process.env.XDG_CACHE_HOME;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-mh-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     vault = createGitVault();
     sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-mh-src-"));
     sessionFile = createSeededSessionFile(sessionDir, sessionDir);
@@ -1154,6 +1183,9 @@ describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
   afterEach(() => {
     fs.rmSync(sessionDir, { recursive: true, force: true });
     fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   function runGitOrThrow(dir: string, args: string[]): string {
@@ -1337,8 +1369,13 @@ describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
   let vault: string;
   let sessionDir: string;
   let sessionFile: string;
+  let xdgCacheDir: string;
+  let _savedXdgCache: string | undefined;
 
   beforeEach(() => {
+    _savedXdgCache = process.env.XDG_CACHE_HOME;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-e2e-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     vault = createGitVault();
     sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-e2e-src-"));
     sessionFile = createSeededSessionFile(sessionDir, sessionDir);
@@ -1347,6 +1384,9 @@ describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
   afterEach(() => {
     fs.rmSync(sessionDir, { recursive: true, force: true });
     fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   function runGitOrThrow(dir: string, args: string[]): string {
@@ -1572,7 +1612,13 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
     return dir;
   }
 
+  let xdgCacheDir: string;
+  let _savedXdgCache: string | undefined;
+
   beforeEach(() => {
+    _savedXdgCache = process.env.XDG_CACHE_HOME;
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-master-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
     vault = createMasterDefaultVault();
     sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-master-src-"));
     sessionFile = createSeededSessionFile(sessionDir, sessionDir);
@@ -1581,6 +1627,9 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
   afterEach(() => {
     fs.rmSync(sessionDir, { recursive: true, force: true });
     fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
   test("detectDefaultBranch returns 'master' for a master-default vault", () => {
