@@ -163,12 +163,13 @@ PARTIAL_MERGE_LOG="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.partial-merge.log"
 # Outcome sidecar (POST-CONV-5) — one-line classification of why the
 # wrapper exited 0. The detached wrapper's exit status is unobservable
 # to the parent (`stdio:ignore` + `unref()`); the filesystem is the
-# only signal channel. JS-side `runDistillWith` poller dispatches
-# UI severity per class:
-#   merged-content  → info  "distill: completed"
-#   no-content      → warn  "distill ran but saved no content"
-#   partial-merge   → warn  "distill: N files reverted to main"
-# Missing sidecar AND missing error log → warn (abnormal termination).
+# only signal channel.
+#
+# JS-side runDistillWith poller dispatches UI severity per outcome class.
+# See formatOutcomeNotification in extensions/distill/index.ts for the
+# canonical mapping. Per the locked notification severity contract:
+# merged-content → info; no-content → warning; partial-merge → warning
+# with log path; missing-sidecar AND missing-error-log → warning (abnormal).
 OUTCOME_PATH="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.outcome"
 
 # Lazy-create error log on first write. Empty file is the "no error" signal.
@@ -257,9 +258,11 @@ cleanup() {
   if [ -d "$WORKTREE" ]; then
     git -C "$VAULT" worktree remove --force "$WORKTREE" 2>/dev/null || true
   fi
-  # `git worktree remove --force` can leave the leaf dir behind when
-  # gitignored content is present (e.g. .napkin/distill/). Mirror the
-  # JS-side contract at distill-workspace.ts:572 with an rm -rf fallback.
+  # In production this fires on every exit because the gitignored
+  # .napkin/distill/ shim survives `git worktree remove --force`. The
+  # `[ -d ]` guard is defensive against future scenarios where the shim
+  # is removed before this point. Mirrors cleanupDistillWorkspace's
+  # contract at distill-workspace.ts:572.
   if [ -d "$WORKTREE" ]; then
     rm -rf "$WORKTREE" 2>/dev/null || true
   fi

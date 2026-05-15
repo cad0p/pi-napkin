@@ -417,18 +417,13 @@ export function removeDistillWorktree(
 
   // Best-effort rmdir of the parent vault-hash dir. rmdir is non-recursive
   // and only succeeds when the parent is empty (i.e. this was the last
-  // distill for this vault). ENOTEMPTY (other concurrent distills exist)
-  // and ENOENT (race with another remove, or never created) are both
-  // expected and benign.
+  // distill for this vault).
   try {
     fs.rmdirSync(path.dirname(worktreePath));
-  } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    if (code !== "ENOTEMPTY" && code !== "ENOENT") {
-      // Unexpected I/O error — swallow per this function's idempotent
-      // shutdown-context contract; matches the silent-swallow pattern used
-      // by the git steps above.
-    }
+  } catch {
+    // ENOTEMPTY (other concurrent distills exist for this vault) and
+    // ENOENT (race) are expected and benign. Other I/O errors swallowed
+    // per this function's idempotent shutdown-context contract.
   }
 }
 
