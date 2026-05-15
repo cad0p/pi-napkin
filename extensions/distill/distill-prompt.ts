@@ -65,6 +65,70 @@ const REQUIRED_PLACEHOLDERS = [
 ] as const;
 
 /**
+ * Validate a single substitution input. Used for every field of
+ * {@link DistillPromptInputs}. Hard rejects:
+ *
+ *   1. Non-string / empty string — silent prompt corruption (e.g.
+ *      `git merge ` with empty branch name) is worse than a loud
+ *      validation throw.
+ *   2. ASCII control characters (NUL, BEL, BS, TAB, LF, CR, ESC, DEL,
+ *      …; the `\x00–\x1F` and `\x7F` ranges). A `\n` in
+ *      `worktreePath` would inject a newline into the agent's prompt,
+ *      letting an attacker who controls a single field break out of
+ *      one prompt-step and inject prose into another (prompt-
+ *      injection class). NUL bytes truncate strings on most C-side
+ *      consumers (the wrapper's `printf`, `git`'s argv parsing). TAB
+ *      isn't strictly malicious but its inclusion in agent prompts
+ *      breaks the `git -C "<tab>worktree"` quoting we rely on.
+ *   3. Mustache-style `{{` or `}}` runs — collide with the
+ *      placeholder syntax this loader uses. A vault path that
+ *      contained `{{worktreePath}}` would silently re-substitute
+ *      itself on a second pass; even though we don't multi-pass
+ *      today, defending the input shape lets future refactors of
+ *      the substitution loop stay safe.
+ *
+ * Defense-in-depth (SEC-A-5): the JS-side caller already controls
+ * three of the four inputs (`worktreePath`, `branchName`,
+ * `defaultBranch` come from `createDistillWorkspace` /
+ * `detectDefaultBranch` which produce well-formed strings).
+ * `vaultPath` originates from the user's config but is
+ * `path.resolve`d before reaching here. So the realistic threat
+ * surface is narrow — but the validator is cheap, the failure mode
+ * is "throw with a clear message", and a future caller that bypasses
+ * the helpers (or a malformed config) would otherwise let bad input
+ * reach the agent prompt.
+ *
+ * Slashes (`/`), spaces, hyphens, dots, and underscores are all
+ * allowed: `feat/foo` branch names and `~/My Vault/notes` paths must
+ * pass.
+ */
+function validateInput(name: string, value: unknown): asserts value is string {
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(
+      `buildDistillPrompt: input '${name}' must be a non-empty string (got ${JSON.stringify(value)})`,
+    );
+  }
+  // Reject ASCII control chars (\x00–\x1F and \x7F). A literal `\n`
+  // in any input would break out of the prompt step it's embedded
+  // in — classic prompt-injection. JSON.stringify the value in the
+  // error so the offending char is visible (escaped) in the message.
+  // biome-ignore lint/suspicious/noControlCharactersInRegex: rejecting control chars IS the validator's job
+  if (/[\x00-\x1F\x7F]/.test(value)) {
+    throw new Error(
+      `buildDistillPrompt: input '${name}' contains control characters; reject (got ${JSON.stringify(value)})`,
+    );
+  }
+  // Reject placeholder-syntax collisions. A vault path that contained
+  // `{{worktreePath}}` would silently re-substitute on a second pass
+  // — defense-in-depth for future refactors of the substitution loop.
+  if (value.includes("{{") || value.includes("}}")) {
+    throw new Error(
+      `buildDistillPrompt: input '${name}' contains placeholder-syntax characters '{{' or '}}' (got ${JSON.stringify(value)})`,
+    );
+  }
+}
+
+/**
  * Read the distill prompt markdown and substitute placeholders.
  *
  * @throws Error if the .md file is missing, empty, or omits any required
@@ -78,11 +142,7 @@ const REQUIRED_PLACEHOLDERS = [
  */
 export function buildDistillPrompt(inputs: DistillPromptInputs): string {
   for (const [key, value] of Object.entries(inputs)) {
-    if (typeof value !== "string" || value.length === 0) {
-      throw new Error(
-        `buildDistillPrompt: input '${key}' must be a non-empty string (got ${JSON.stringify(value)})`,
-      );
-    }
+    validateInput(key, value);
   }
 
   let template: string;

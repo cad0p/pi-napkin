@@ -66,6 +66,79 @@ describe("buildDistillPrompt — input validation", () => {
       );
     });
   }
+
+  // SEC-A-5: control characters in any input would inject prose into
+  // the agent's prompt (newline = step boundary breakout). The validator
+  // rejects the full \x00–\x1F + \x7F range; we sample the most
+  // dangerous representatives plus a few less obvious ones to catch a
+  // regex regression that narrowed the range.
+  for (const key of [
+    "worktreePath",
+    "vaultPath",
+    "branchName",
+    "defaultBranch",
+  ] as const) {
+    for (const [label, ch] of [
+      ["NUL (\\x00)", "\x00"],
+      ["newline (\\n)", "\n"],
+      ["CR (\\r)", "\r"],
+      ["tab (\\t)", "\t"],
+      ["BEL (\\x07)", "\x07"],
+      ["ESC (\\x1b)", "\x1b"],
+      ["DEL (\\x7f)", "\x7f"],
+    ] as const) {
+      test(`throws when '${key}' contains ${label}`, () => {
+        const bad = { ...SAMPLE_INPUTS, [key]: `prefix${ch}suffix` };
+        expect(() => buildDistillPrompt(bad)).toThrow(
+          new RegExp(`'${key}' contains control characters`),
+        );
+      });
+    }
+  }
+
+  // SEC-A-5: placeholder-syntax collisions. A vault path containing
+  // `{{worktreePath}}` would silently re-substitute on a second pass.
+  for (const key of [
+    "worktreePath",
+    "vaultPath",
+    "branchName",
+    "defaultBranch",
+  ] as const) {
+    for (const collide of ["{{worktreePath}}", "prefix{{", "suffix}}"]) {
+      test(`throws when '${key}' contains placeholder syntax (${JSON.stringify(collide)})`, () => {
+        const bad = { ...SAMPLE_INPUTS, [key]: collide };
+        expect(() => buildDistillPrompt(bad)).toThrow(
+          new RegExp(`'${key}' contains placeholder-syntax characters`),
+        );
+      });
+    }
+  }
+
+  // SEC-A-5 (regression guard): realistic, valid inputs must still pass.
+  // Spaces in paths, slashes in branch names, hyphens / dots / tildes
+  // are all common shapes the validator MUST NOT reject.
+  test("accepts realistic paths with spaces, hyphens, dots", () => {
+    const inputs = {
+      worktreePath: "/Users/alice/My Vault/.cache/napkin-distill/abc/dist",
+      vaultPath: "/Users/alice/My Vault/notes",
+      branchName: "distill/abc-123-1700000000000",
+      defaultBranch: "main",
+    };
+    expect(() => buildDistillPrompt(inputs)).not.toThrow();
+  });
+
+  test("accepts branch names with slashes (e.g. feat/foo)", () => {
+    // Distill branches are always `distill/<hex>-<epoch>` but the
+    // validator must also pass a hypothetical default-branch name like
+    // `release/2026-q1`. Slashes are not control chars and not
+    // mustache delimiters; the regex must not regress to forbid them.
+    const inputs = {
+      ...SAMPLE_INPUTS,
+      defaultBranch: "release/2026-q1",
+      branchName: "distill/feat-foo-1700000000000",
+    };
+    expect(() => buildDistillPrompt(inputs)).not.toThrow();
+  });
 });
 
 describe("buildDistillPrompt — template error paths", () => {
