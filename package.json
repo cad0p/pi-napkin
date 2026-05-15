@@ -51,7 +51,8 @@
     "lint": "bunx biome check extensions/",
     "lint:fix": "bunx biome check --write extensions/",
     "typecheck": "bunx tsc --noEmit",
-    "test": "bun test"
+    "test": "bun test",
+    "verify:agent-prompt": "bun run scripts/verify-agent-prompt.ts"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
