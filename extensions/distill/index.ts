@@ -1064,13 +1064,6 @@ export default function (pi: ExtensionAPI) {
           const dispatch = formatOutcomeNotification({
             outcome,
             elapsedSec: elapsed,
-            readPartialMergeLog: (p) => {
-              try {
-                return fs.readFileSync(p, "utf-8");
-              } catch {
-                return null;
-              }
-            },
           });
           level = dispatch.level;
           message = dispatch.message;
@@ -1654,19 +1647,16 @@ export function formatOverlapNotice(overlapFiles: string[]): string {
  * dispatches to `ctx.ui.notify` / `ctx.ui.setStatus`.
  *
  * Inputs:
- *   - `outcome`: the parsed sidecar (`{ outcomeClass, partialMergeLogPath }`)
+ *   - `outcome`: the parsed sidecar (`{ outcomeClass, recoveryHint }`)
  *               or null when no sidecar exists at all (abnormal termination).
  *   - `elapsedSec`: wall-clock seconds since spawn, used in the
  *                  default success message (`merged-content`).
- *   - `readPartialMergeLog`: optional reader injected for testability.
- *                            Returns the log content as a string, or
- *                            null on read failure. Production passes
- *                            an `fs.readFileSync` wrapper.
  *
  * Outputs `{ level, message, statusKey, statusText }` per class:
  *   merged-content   → info  / "Distillation complete (Ns)"
+ *   merged-local     → warn  / "Distillation complete locally; not pushed to origin"
  *   no-content       → warn  / "Distillation ran but saved no content"
- *   partial-merge    → warn  / "Distillation: partial merge — N file(s) reverted to main; see <log>"
+ *   failed:<reason>  → error / "Distillation failed: <reason> [— <hint>]"
  *   <unknown>        → warn  / defensive class string
  *   missing sidecar  → warn  / "Distillation terminated abnormally — no outcome record"
  *
@@ -1676,12 +1666,8 @@ export function formatOverlapNotice(overlapFiles: string[]): string {
  * Exported for unit tests; production wiring lives in `runDistillWith`.
  */
 export function formatOutcomeNotification(args: {
-  outcome: Pick<
-    DistillOutcome,
-    "outcomeClass" | "partialMergeLogPath" | "recoveryHint"
-  > | null;
+  outcome: Pick<DistillOutcome, "outcomeClass" | "recoveryHint"> | null;
   elapsedSec: number;
-  readPartialMergeLog?: (path: string) => string | null;
 }): {
   level: "info" | "warning" | "error";
   message: string;
@@ -1689,7 +1675,7 @@ export function formatOutcomeNotification(args: {
   statusGlyph: string;
   statusText: string;
 } {
-  const { outcome, elapsedSec, readPartialMergeLog } = args;
+  const { outcome, elapsedSec } = args;
   if (!outcome) {
     return {
       level: "warning",
@@ -1730,27 +1716,6 @@ export function formatOutcomeNotification(args: {
         statusGlyph: "⚠",
         statusText: " distill: no content",
       };
-    case "partial-merge": {
-      let revertedCount = 0;
-      if (outcome.partialMergeLogPath && readPartialMergeLog) {
-        const content = readPartialMergeLog(outcome.partialMergeLogPath);
-        if (content) {
-          revertedCount = content
-            .split("\n")
-            .filter((line) => /\breverted '/.test(line)).length;
-        }
-      }
-      const message = outcome.partialMergeLogPath
-        ? `Distillation: partial merge — ${revertedCount} file${revertedCount === 1 ? "" : "s"} reverted to main; see ${outcome.partialMergeLogPath}`
-        : "Distillation: partial merge — some files reverted to main";
-      return {
-        level: "warning",
-        message,
-        statusKey: "warning",
-        statusGlyph: "⚠",
-        statusText: " distill: partial",
-      };
-    }
     default: {
       // PR #12: `failed:<reason>` carries a reason code identifying
       // which validator tripped (markers-after-agent-exit,

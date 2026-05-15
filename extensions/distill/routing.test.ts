@@ -829,8 +829,9 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
 // severity contract:
 //
 //   merged-content   → info
+//   merged-local     → warning  (local-only success)
 //   no-content       → warning
-//   partial-merge    → warning + log path
+//   failed:<reason>  → error
 //   no sidecar       → warning  ("abnormal termination")
 //
 // Drives the wrapper through the worktree path with `pi` stubbed out via

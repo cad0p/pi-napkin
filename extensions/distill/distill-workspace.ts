@@ -747,25 +747,20 @@ export function findDistillErrorLogForBranch(
 
 /**
  * Find the most recent outcome sidecar for a distill branch. Returns
- * `{ class, outcomePath, partialMergeLogPath }` when a `*.outcome` file
- * exists for `branchShort`, else null.
+ * `{ class, outcomePath }` when a `*.outcome` file exists for
+ * `branchShort`, else null.
  *
  * The outcome sidecar (POST-CONV-5) is written by the wrapper as the
  * LAST action before any successful exit-0 path. One-line content is
- * the class string: `merged-content` / `no-content` / `partial-merge`.
- * Used by the JS-side `runDistillWith` poller to dispatch the right UI
- * severity (info vs warn) since multiple `exit 0` wrapper paths
- * previously produced the same notification.
+ * the class string: `merged-content` / `merged-local` / `no-content` /
+ * `failed:<reason>`. Used by the JS-side `runDistillWith` poller to
+ * dispatch the right UI severity (info vs warn vs error) since multiple
+ * `exit 0` wrapper paths previously produced the same notification.
  *
  * Missing outcome AND missing fatal error log = abnormal termination
  * (SIGKILL / `set -e` / disk full / race) — caller must surface this
  * as a warn since the wrapper is detached and we have no other signal
  * channel.
- *
- * `partialMergeLogPath` is populated when the class is `partial-merge`
- * AND a matching `.partial-merge.log` (R8-CC-1) exists in the same
- * directory; null otherwise. Caller can read the log to count
- * reverted files for the user-facing message.
  */
 /**
  * Parsed outcome sidecar shape (POST-CONV-5 / PR #12 A4).
@@ -781,18 +776,11 @@ export function findDistillErrorLogForBranch(
  *   - `outcomeClass`: machine-readable class string (line 1 of the
  *     sidecar). Drives UI severity in `formatOutcomeNotification` per
  *     the locked notification severity contract
- *     (`merged-content`/`merged-local`/`no-content`/`partial-merge`/
- *     `failed:<reason>`).
+ *     (`merged-content`/`merged-local`/`no-content`/`failed:<reason>`).
  *   - `outcomePath`: absolute path to the sidecar file on disk. Used
  *     by tests (and ad-hoc forensic tooling) that need to inspect the
  *     raw bytes; consumers that only want the class/hint can ignore
- *     it. Phase B may trim this when the JS-side parser stops needing
  *     it.
- *   - `partialMergeLogPath`: absolute path to the matching
- *     `.partial-merge.log` (R8-CC-1) when the class is `partial-merge`,
- *     `null` otherwise. Phase B will retire `partial-merge` entirely
- *     (the agent-driven design has no merge driver to 3-strike); the
- *     field stays here until then for the JS-side dispatch arm.
  *   - `recoveryHint`: lines 2+ of the sidecar concatenated, or `null`
  *     when the wrapper wrote no hint (happy-path classes don't need
  *     one; legacy single-line sidecars have none either). Surfaced
@@ -802,7 +790,6 @@ export function findDistillErrorLogForBranch(
 export interface DistillOutcome {
   outcomeClass: string;
   outcomePath: string;
-  partialMergeLogPath: string | null;
   recoveryHint: string | null;
 }
 
@@ -841,18 +828,7 @@ export function findDistillOutcomeForBranch(
     // abnormal-termination handling.
     return null;
   }
-  let partialMergeLogPath: string | null = null;
-  if (outcomeClass === "partial-merge") {
-    const pmSuffix = `-${branchShort}.partial-merge.log`;
-    const pmMatches = entries.filter((f) => f.endsWith(pmSuffix)).sort();
-    if (pmMatches.length > 0) {
-      partialMergeLogPath = path.join(
-        errorDir,
-        pmMatches[pmMatches.length - 1],
-      );
-    }
-  }
-  return { outcomeClass, outcomePath, partialMergeLogPath, recoveryHint };
+  return { outcomeClass, outcomePath, recoveryHint };
 }
 
 /**

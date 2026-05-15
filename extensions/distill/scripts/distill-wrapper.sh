@@ -152,14 +152,6 @@
 
 set -uo pipefail
 
-# Resolve our own script dir so we can source git_retry.sh regardless of cwd.
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# git_retry.sh is sourced for backward-compat with any out-of-tree
-# caller; PR #12's wrapper does not use it directly (the agent owns
-# all merge/squash/push retries). Phase B will drop the source line.
-# shellcheck source=./git_retry.sh
-source "$HERE/git_retry.sh"
-
 # coreutils timeout(1) is required for the agent task's hard wall-clock
 # budget. macOS without `brew install coreutils` doesn't ship `timeout`
 # at all; Homebrew installs it as `gtimeout` by default. Detect both
@@ -280,10 +272,10 @@ export GIT_EDITOR=true
 # (already unique per invocation — hex nonce + epoch).
 BRANCH_SHORT="${BRANCH#distill/}"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-# Single fatal-error log per branch. PR #12 removes the partial-merge
-# log entirely (no driver to 3-strike). The presence of *.log is the
-# JS-side signal that the wrapper failed (R7-SC-3 + R8-CC-1). Lazily
-# created on first `log_error` call.
+# Single fatal-error log per branch. The agent owns merge resolution
+# end-to-end so there's no per-attempt 3-strike forensic to capture.
+# The presence of *.log is the JS-side signal that the wrapper failed
+# (R7-SC-3 + R8-CC-1). Lazily created on first `log_error` call.
 ERROR_LOG="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.log"
 # Outcome sidecar (POST-CONV-5) — one-line classification of why the
 # wrapper exited 0. The detached wrapper's exit status is unobservable

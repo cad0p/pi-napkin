@@ -164,7 +164,7 @@ describe("findDistillOutcomeForBranch (POST-CONV-5)", () => {
     expect(findDistillOutcomeForBranch(errorDir, "")).toBeNull();
   });
 
-  test("matching outcome: returns class + path, no partial-merge log", () => {
+  test("matching outcome: returns class + path", () => {
     const branchShort = "abc123-1";
     const fname = `2026-05-14T10:00:00Z-12345-${branchShort}.outcome`;
     const full = path.join(errorDir, fname);
@@ -173,10 +173,9 @@ describe("findDistillOutcomeForBranch (POST-CONV-5)", () => {
     expect(r).not.toBeNull();
     expect(r?.outcomeClass).toBe("merged-content");
     expect(r?.outcomePath).toBe(full);
-    expect(r?.partialMergeLogPath).toBeNull();
   });
 
-  test("no-content class: returns class + path, no partial-merge log", () => {
+  test("no-content class: returns class + path", () => {
     const branchShort = "abc-2";
     fs.writeFileSync(
       path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
@@ -184,34 +183,6 @@ describe("findDistillOutcomeForBranch (POST-CONV-5)", () => {
     );
     const r = findDistillOutcomeForBranch(errorDir, branchShort);
     expect(r?.outcomeClass).toBe("no-content");
-    expect(r?.partialMergeLogPath).toBeNull();
-  });
-
-  test("partial-merge class with matching .partial-merge.log: returns log path", () => {
-    const branchShort = "def-3";
-    fs.writeFileSync(
-      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
-      "partial-merge\n",
-    );
-    const pmLog = path.join(
-      errorDir,
-      `2026-05-14T10:00:00Z-1-${branchShort}.partial-merge.log`,
-    );
-    fs.writeFileSync(pmLog, "# log\nreverted 'foo.md' to main\n");
-    const r = findDistillOutcomeForBranch(errorDir, branchShort);
-    expect(r?.outcomeClass).toBe("partial-merge");
-    expect(r?.partialMergeLogPath).toBe(pmLog);
-  });
-
-  test("partial-merge class without .partial-merge.log: log path is null", () => {
-    const branchShort = "def-4";
-    fs.writeFileSync(
-      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
-      "partial-merge\n",
-    );
-    const r = findDistillOutcomeForBranch(errorDir, branchShort);
-    expect(r?.outcomeClass).toBe("partial-merge");
-    expect(r?.partialMergeLogPath).toBeNull();
   });
 
   test("non-matching outcome (different branch): returns null", () => {
