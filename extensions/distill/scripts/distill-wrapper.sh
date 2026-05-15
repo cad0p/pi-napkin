@@ -318,18 +318,36 @@ record_dangling_sha() {
 # Recovery hint is OPTIONAL because the happy-path classes
 # (`merged-content`, `merged-local`, `no-content`) need no recovery
 # action — only the `failed:<reason>` classes do.
+#
+# Atomicity (SEC-A-4): write to `<sidecar>.tmp` then `mv` to the final
+# path. POSIX `rename(2)` is atomic on the same filesystem, so the
+# JS-side poller (`findDistillOutcomeForBranch`) either sees the file
+# absent or sees the complete contents — never a partial write where
+# line 1 is present but line 2 (recovery hint) hasn't landed yet.
+# Without this guard, the multi-line write path (two `printf`s into
+# the same redirect) could race a poller that opens between the
+# kernel's write of line 1 and line 2 and misclassify a failed
+# distill as having no recovery hint.
 write_outcome() {
   local class="$1"
   local recovery_hint="${2:-}"
   mkdir -p "$ERROR_DIR" 2>/dev/null || true
+  local tmp="$OUTCOME_PATH.tmp"
   if [ -n "$recovery_hint" ]; then
-    {
-      printf '%s\n' "$class"
-      printf '%s\n' "$recovery_hint"
-    } > "$OUTCOME_PATH" 2>/dev/null || true
+    printf '%s\n%s\n' "$class" "$recovery_hint" > "$tmp" 2>/dev/null || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 0
+    }
   else
-    printf '%s\n' "$class" > "$OUTCOME_PATH" 2>/dev/null || true
+    printf '%s\n' "$class" > "$tmp" 2>/dev/null || {
+      rm -f "$tmp" 2>/dev/null || true
+      return 0
+    }
   fi
+  mv "$tmp" "$OUTCOME_PATH" 2>/dev/null || {
+    rm -f "$tmp" 2>/dev/null || true
+    return 0
+  }
 }
 
 # safe_rm_worktree <worktree_path>

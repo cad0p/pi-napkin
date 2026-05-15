@@ -565,3 +565,157 @@ touch ${JSON.stringify(stubMarker)}
     }
   }, 30_000);
 });
+
+describe("distill-wrapper.sh write_outcome atomicity (PR #12 SEC-A-4)", () => {
+  // SEC-A-4 regression: the outcome sidecar must be written atomically
+  // via a temp-and-rename pattern, not as two `printf`s into the same
+  // redirect. Without atomicity the JS-side poller
+  // (`findDistillOutcomeForBranch`) could open the file between the
+  // kernel's write of line 1 and line 2, see only the outcome class,
+  // and misclassify a `failed:*` distill as having no recovery hint.
+  //
+  // We extract the function from the wrapper file and source it in a
+  // tiny bash harness, then assert post-conditions: (a) the final
+  // sidecar contents match the expected bytes exactly (no extra
+  // whitespace, line 1 = class, line 2 = hint), and (b) no `.tmp`
+  // straggler is left behind in the error dir after a successful
+  // `write_outcome`.
+  //
+  // Function extraction: same pattern as safe_rm_worktree above.
+  // `write_outcome() {` to the next bare `}` at column 0.
+  function extractWriteOutcome(): string {
+    const wrapper = fs.readFileSync(DISTILL_WRAPPER_SCRIPT, "utf-8");
+    const lines = wrapper.split("\n");
+    const start = lines.findIndex((l) => /^write_outcome\(\) \{/.test(l));
+    if (start === -1) {
+      throw new Error("write_outcome() not found in wrapper script");
+    }
+    const end = lines.findIndex((l, i) => i > start && /^\}$/.test(l));
+    if (end === -1) {
+      throw new Error("write_outcome() body terminator not found");
+    }
+    return lines.slice(start, end + 1).join("\n");
+  }
+
+  /**
+   * Run a bash harness that sources only the write_outcome function
+   * and calls it with the given (class, hint) tuple. Returns the
+   * exit code, the final sidecar contents (or null if missing), and
+   * the list of files left in the dir afterward (so the caller can
+   * detect `.tmp` stragglers).
+   */
+  function callWriteOutcome(
+    outcomeDir: string,
+    klass: string,
+    hint?: string,
+  ): { rc: number; contents: string | null; files: string[] } {
+    const fn = extractWriteOutcome();
+    const sidecar = path.join(outcomeDir, "test.outcome");
+    const args =
+      hint === undefined
+        ? `${JSON.stringify(klass)}`
+        : `${JSON.stringify(klass)} ${JSON.stringify(hint)}`;
+    const harness = `
+set -uo pipefail
+ERROR_DIR=${JSON.stringify(outcomeDir)}
+OUTCOME_PATH=${JSON.stringify(sidecar)}
+log_error() { printf '%s\n' "$*" >&2; }
+${fn}
+write_outcome ${args}
+exit $?
+`;
+    const r = spawnSync("bash", ["-c", harness], { encoding: "utf-8" });
+    const contents = fs.existsSync(sidecar)
+      ? fs.readFileSync(sidecar, "utf-8")
+      : null;
+    const files = fs.existsSync(outcomeDir) ? fs.readdirSync(outcomeDir) : [];
+    return { rc: r.status ?? -1, contents, files };
+  }
+
+  test("single-line outcome: writes class only, no .tmp straggler", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "sec-a-4-single-"));
+    try {
+      const r = callWriteOutcome(root, "merged-content");
+      expect(r.rc).toBe(0);
+      expect(r.contents).toBe("merged-content\n");
+      // No .tmp file left behind — the rename consumed it.
+      expect(r.files.some((f) => f.endsWith(".tmp"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("multi-line outcome: line 1 = class, line 2 = hint, no .tmp straggler", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "sec-a-4-multi-"));
+    try {
+      const r = callWriteOutcome(
+        root,
+        "failed:agent-timeout",
+        "Agent task exceeded budget; bump distill.maxDurationMinutes.",
+      );
+      expect(r.rc).toBe(0);
+      // Exact bytes: line 1 = class \n, line 2 = hint \n. No extra
+      // whitespace, no trailing data, no truncation.
+      expect(r.contents).toBe(
+        "failed:agent-timeout\nAgent task exceeded budget; bump distill.maxDurationMinutes.\n",
+      );
+      expect(r.files.some((f) => f.endsWith(".tmp"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("idempotent rewrite: a second call replaces the file atomically with no .tmp straggler", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "sec-a-4-rewrite-"));
+    try {
+      callWriteOutcome(root, "merged-content");
+      const second = callWriteOutcome(
+        root,
+        "failed:markers-after-agent-exit",
+        "Inspect vault and revert.",
+      );
+      expect(second.rc).toBe(0);
+      expect(second.contents).toBe(
+        "failed:markers-after-agent-exit\nInspect vault and revert.\n",
+      );
+      expect(second.files.some((f) => f.endsWith(".tmp"))).toBe(false);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("end-to-end: real wrapper run leaves no .tmp straggler in error dir", () => {
+    // Defense-in-depth E2E: spawn the actual wrapper and assert the
+    // post-run error dir contains no `*.outcome.tmp` file. The
+    // refactored write_outcome's mv leaves only the canonical
+    // `<ts>-<pid>-<branchShort>.outcome` behind. A regression that
+    // dropped the mv (or used `cp` instead) would leak the .tmp.
+    const s = makeScaffold();
+    try {
+      writeStubPi(
+        s,
+        `
+git -C "${s.vault}" config user.email test@example.com
+git -C "${s.vault}" config user.name test
+echo "x" > "${s.vault}/new.md"
+git -C "${s.vault}" add .
+git -C "${s.vault}" commit -m "distill: x" >/dev/null
+`,
+      );
+      const pathHandle = withNapkinOnPath();
+      try {
+        const r = runWrapper(s);
+        expect(r.exitCode).toBe(0);
+        expect(r.outcome).toBe("merged-content");
+        const stragglers = fs
+          .readdirSync(s.errorDir)
+          .filter((f) => f.endsWith(".tmp"));
+        expect(stragglers).toEqual([]);
+      } finally {
+        pathHandle.restore();
+      }
+    } finally {
+      fs.rmSync(s.root, { recursive: true, force: true });
+    }
+  });
+});
