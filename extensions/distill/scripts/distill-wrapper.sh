@@ -297,11 +297,30 @@ fi
 # detects whether pi produced any content (committed by pi itself or
 # staged-but-uncommitted). createDistillWorkspace populates this field
 # with the vault HEAD captured pre-spawn; same JSON.stringify(obj,
-# null, 2) shape as `pid`. Empty string is the safe fallback (no diff
-# possible → legacy --cached path applies later).
+# null, 2) shape as `pid`.
+#
+# Use node for parsing instead of sed: a regex on JSON is fragile
+# against future shape changes (multi-line values, embedded commas,
+# nested objects) and would silently degrade to an empty extraction
+# on shape drift. Node is on PATH inside the wrapper because pi-bun
+# spawned us; the same JSON parser the JS side wrote with is the most
+# robust reader.
 START_SHA=""
 if [ -f "$META_PATH" ]; then
-  START_SHA=$(sed -nE 's/.*"startSha":[[:space:]]*"([0-9a-f]+)".*/\1/p' "$META_PATH" | head -n 1)
+  START_SHA="$(node -e 'try { const d = require(process.argv[1]); process.stdout.write(d.startSha || ""); } catch { /* swallow — empty START_SHA triggers the hard-fail below */ }' "$META_PATH" 2>/dev/null || true)"
+fi
+
+# Hard-fail when startSha can't be recovered. The pre-POST-CONV-1
+# wrapper used a `git diff --cached --quiet` no-op check that silently
+# dropped pi-self-committed content (real failure: dropped commit
+# `a13e8b1`). A silent fallback to that path on extraction failure
+# would re-introduce the bug undetectably. createDistillWorkspace has
+# always populated startSha and cleanupStaleWorktrees evicts pre-
+# c5e6fea worktrees within 60min, so reaching here without startSha
+# means an out-of-tree caller or a meta.json contract violation.
+if [ -z "$START_SHA" ]; then
+  log_error "meta.json missing startSha; refusing to proceed (worktree from incompatible pi-napkin version?)"
+  exit 1
 fi
 
 # Testing hook: halt right after the meta-pid rewrite so integration tests
@@ -465,20 +484,13 @@ git -C "$WORKTREE" add -A
 # `git diff --cached --quiet` reported false-no-op for case (b),
 # silently dropping the distill commit when the cleanup trap force-
 # deleted the branch (POST-CONV-1; real failure: dropped commit
-# `a13e8b1`). When startSha is unavailable (legacy meta), fall back
-# to the staged-only check.
-if [ -n "$START_SHA" ]; then
-  if git -C "$WORKTREE" diff --quiet "$START_SHA"; then
-    # Genuinely no-op — pi explicitly produced nothing. Skip straight
-    # to cleanup and signal `no-content` to the JS-side poller.
-    write_outcome "no-content"
-    exit 0
-  fi
-else
-  if git -C "$WORKTREE" diff --cached --quiet; then
-    write_outcome "no-content"
-    exit 0
-  fi
+# `a13e8b1`). startSha is now load-bearing — the legacy --cached
+# fallback was deleted to prevent silent regression.
+if git -C "$WORKTREE" diff --quiet "$START_SHA"; then
+  # Genuinely no-op — pi explicitly produced nothing. Skip straight
+  # to cleanup and signal `no-content` to the JS-side poller.
+  write_outcome "no-content"
+  exit 0
 fi
 
 # Commit any staged changes. If pi already committed itself, there's

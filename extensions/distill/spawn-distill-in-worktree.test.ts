@@ -16,6 +16,20 @@ import {
 } from "./distill-workspace";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
 
+// Tests that need a deliberately-stripped PATH (e.g. to verify
+// napkin-missing diagnostics) still have to keep node reachable since
+// the wrapper invokes `node -e` for startSha extraction (R12-CC-3 +
+// R12-SC-5). On dev boxes / CI runners using mise, nvm, or asdf, node
+// lives outside /usr/bin. Prepend the test runner's own node bindir
+// (mirrors the wrapper's runtime expectation — pi-bun spawns the
+// wrapper with node on PATH).
+const NODE_BIN_DIR = path.dirname(
+  spawnSync("sh", ["-c", "command -v node"], {
+    encoding: "utf-8",
+  }).stdout.trim() || "/usr/bin",
+);
+const NAPKIN_STRIPPED_PATH = `${NODE_BIN_DIR}:/usr/bin:/bin`;
+
 /**
  * Tests for `spawnDistillInWorktree` split into two groups:
  *   - unit: mock the `spawn` function, verify we pass the right args to the
@@ -799,7 +813,7 @@ describe("distill-wrapper.sh (integration)", () => {
         encoding: "utf-8",
         env: {
           ...process.env,
-          PATH: "/usr/bin:/bin",
+          PATH: NAPKIN_STRIPPED_PATH,
           GIT_AUTHOR_NAME: "test",
           GIT_AUTHOR_EMAIL: "test@example.com",
           GIT_COMMITTER_NAME: "test",
@@ -823,7 +837,7 @@ describe("distill-wrapper.sh (integration)", () => {
       "utf-8",
     );
     expect(errorContent).toContain("napkin binary not found on wrapper PATH");
-    expect(errorContent).toContain("PATH=/usr/bin:/bin");
+    expect(errorContent).toContain(`PATH=${NAPKIN_STRIPPED_PATH}`);
   });
 
   test("POST-R6-CACHE: SKIP_PI=1 skips shim install (R7-SC-15)", () => {
@@ -862,9 +876,10 @@ describe("distill-wrapper.sh (integration)", () => {
         encoding: "utf-8",
         env: {
           ...process.env,
-          // PATH=/usr/bin:/bin so even if napkin happened to be on the
-          // dev box's PATH, the SKIP_PI gate is what we're testing.
-          PATH: "/usr/bin:/bin",
+          // PATH stripped of napkin (testing SKIP_PI gate); node
+          // preserved because the wrapper needs it for startSha
+          // extraction (R12-CC-3).
+          PATH: NAPKIN_STRIPPED_PATH,
           NAPKIN_DISTILL_NO_RECURSE: "1",
           NAPKIN_DISTILL_SKIP_PI: "1",
           NAPKIN_DISTILL_HALT_AFTER_SHIM: "1",
@@ -892,6 +907,73 @@ describe("distill-wrapper.sh (integration)", () => {
     spawnSync("git", ["-C", vault, "branch", "-D", workspace.branchName], {
       encoding: "utf-8",
     });
+  });
+
+  // R12-CC-3 + R12-SC-5: meta.json missing startSha must hard-fail
+  // rather than silently degrading to the legacy --cached path that
+  // dropped pi-self-committed content (POST-CONV-1; real failure:
+  // dropped commit a13e8b1).
+  test("meta.json without startSha hard-fails with diagnostic (R12-CC-3, R12-SC-5)", () => {
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace: DistillWorkspace = createDistillWorkspace(
+      vault,
+      sessionFile,
+      sessionDir,
+    );
+    const metaPath = path.join(
+      workspace.worktreePath,
+      ".napkin",
+      "distill",
+      "meta.json",
+    );
+
+    // Strip startSha from meta.json to simulate an out-of-tree caller
+    // or a contract violation. createDistillWorkspace always populates
+    // it; we mutate after-the-fact to exercise the wrapper's defence.
+    const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+    delete meta.startSha;
+    fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
+
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "bash",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+        "main",
+        vault,
+      ],
+      {
+        cwd: workspace.worktreePath,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_SKIP_PI: "1",
+          NAPKIN_GIT_RETRY_MAX: "2",
+          NAPKIN_GIT_RETRY_DELAY: "0",
+        },
+      },
+    );
+    expect(r.status).toBe(1);
+
+    // Diagnostic landed in the error log file (not just stderr).
+    const errorEntries = fs
+      .readdirSync(errorDir)
+      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+    expect(errorEntries.length).toBeGreaterThan(0);
+    const combined = errorEntries
+      .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
+      .join("\n");
+    expect(combined).toContain("meta.json missing startSha");
+    expect(combined).toContain("refusing to proceed");
   });
 });
 
