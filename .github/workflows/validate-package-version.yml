@@ -1,0 +1,14 @@
+name: Validate Package Version
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: cad0p/semver-calver-release/validate-package-version@v1

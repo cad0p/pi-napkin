@@ -7,13 +7,17 @@ on:
     branches: [main]
 
 jobs:
-  lint:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: oven-sh/setup-bun@v2
         with:
-          node-version: 20
-      - run: npm install
+          bun-version: latest
+      - run: bun install
       - name: Lint
-        run: npx @biomejs/biome check extensions/
+        run: bunx biome check extensions/
+      - name: Type check
+        run: bunx tsc --noEmit
+      - name: Run tests
+        run: bun test

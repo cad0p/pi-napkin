@@ -1,0 +1,288 @@
+/**
+ * Unit tests for the wrapper-failure surfacing helpers (R7-SC-3).
+ *
+ * The wrapper writes forensic logs to
+ * `<vault.configPath>/distill/errors/<ISO>-<pid>-<branch-short>.log`
+ * on any non-success exit. After a worktree disappears (target gone),
+ * `runDistillWith`'s success path checks for a matching log and surfaces
+ * the failure to the UI instead of silently calling it a success.
+ *
+ * Tests focus on `findDistillErrorLogForBranch` (the file-system probe)
+ * and `resolveDistillErrorDir` (the layout-aware path resolver). The
+ * wiring inside `runDistillWith` is exercised via the existing
+ * pollhandle-timeout / shutdown-handler tests when the wrapper's
+ * lifecycle is end-to-end.
+ */
+
+import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
+
+import {
+  findDistillErrorLogForBranch,
+  findDistillOutcomeForBranch,
+  resolveDistillErrorDir,
+} from "./distill-workspace";
+
+describe("findDistillErrorLogForBranch (R7-SC-3)", () => {
+  let errorDir: string;
+  beforeEach(() => {
+    errorDir = fs.mkdtempSync(path.join(os.tmpdir(), "find-errlog-"));
+  });
+  afterEach(() => {
+    fs.rmSync(errorDir, { recursive: true, force: true });
+  });
+
+  test("error dir doesn't exist: returns null", () => {
+    const r = findDistillErrorLogForBranch(
+      path.join(errorDir, "no-such-subdir"),
+      "abc123-1715198400",
+    );
+    expect(r).toBeNull();
+  });
+
+  test("error dir empty: returns null", () => {
+    const r = findDistillErrorLogForBranch(errorDir, "abc123-1715198400");
+    expect(r).toBeNull();
+  });
+
+  test("empty branchShort: returns null (defensive guard)", () => {
+    fs.writeFileSync(path.join(errorDir, "anything.log"), "x");
+    const r = findDistillErrorLogForBranch(errorDir, "");
+    expect(r).toBeNull();
+  });
+
+  test("matching log present: returns absolute path", () => {
+    const branchShort = "abc123-1715198400";
+    const filename = `2026-05-14T10:00:00Z-12345-${branchShort}.log`;
+    const fullPath = path.join(errorDir, filename);
+    fs.writeFileSync(fullPath, "# error content");
+    const r = findDistillErrorLogForBranch(errorDir, branchShort);
+    expect(r).toBe(fullPath);
+  });
+
+  test("non-matching log present: returns null (different branch)", () => {
+    fs.writeFileSync(
+      path.join(errorDir, "2026-05-14T10:00:00Z-12345-other-1715198000.log"),
+      "x",
+    );
+    const r = findDistillErrorLogForBranch(errorDir, "abc123-1715198400");
+    expect(r).toBeNull();
+  });
+
+  test("multiple matching logs: returns the most recent (lexicographic)", () => {
+    const branchShort = "abc123-1715198400";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.log`),
+      "earlier",
+    );
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:30:00Z-2-${branchShort}.log`),
+      "later",
+    );
+    const r = findDistillErrorLogForBranch(errorDir, branchShort);
+    expect(r).not.toBeNull();
+    // biome-ignore lint/style/noNonNullAssertion: asserted above
+    expect(fs.readFileSync(r!, "utf-8")).toBe("later");
+  });
+
+  test("partial branchShort match in middle of filename: not a match", () => {
+    // Suffix matching: the file must END with `-<branchShort>.log`.
+    // A branchShort that appears as a substring elsewhere shouldn't hit.
+    fs.writeFileSync(
+      path.join(errorDir, "abc123-1715198400-something-other.log"),
+      "x",
+    );
+    const r = findDistillErrorLogForBranch(errorDir, "abc123-1715198400");
+    expect(r).toBeNull();
+  });
+
+  test("partial-merge salvage log files are NOT picked up as failures (R8-CC-1)", () => {
+    // R8-CC-1: the wrapper's salvage path writes forensic info to a
+    // `.partial-merge.log` file (distinct from `.log` which is the
+    // fatal-error log). The JS-side failure-surfacing must NOT pick up
+    // these salvage logs — a successful run with partial salvage
+    // should not be reported as a failed distillation.
+    const branchShort = "abc123-1715198400";
+    const partialMergeLog = `2026-05-14T10:00:00Z-12345-${branchShort}.partial-merge.log`;
+    fs.writeFileSync(
+      path.join(errorDir, partialMergeLog),
+      "# napkin distill partial-merge salvage log\nreverted 'foo.md' ...\n",
+    );
+    const r = findDistillErrorLogForBranch(errorDir, branchShort);
+    // Salvage log present, but no fatal log → returns null.
+    expect(r).toBeNull();
+  });
+
+  test("fatal log alongside partial-merge log: returns the fatal log only (R8-CC-1)", () => {
+    // The two log types can coexist: a wrapper run that did partial
+    // salvage AND then hit a fatal error during the salvage commit. In
+    // that case, both files exist; the failure-surfacing path should
+    // pick up the fatal `.log` and surface it as a failure (without
+    // confusing the user with the salvage `.partial-merge.log` path).
+    const branchShort = "def456-1715198500";
+    const partialMergeLog = `2026-05-14T11:00:00Z-12346-${branchShort}.partial-merge.log`;
+    const fatalLog = `2026-05-14T11:00:00Z-12346-${branchShort}.log`;
+    fs.writeFileSync(
+      path.join(errorDir, partialMergeLog),
+      "# napkin distill partial-merge salvage log\n",
+    );
+    fs.writeFileSync(
+      path.join(errorDir, fatalLog),
+      "# napkin distill error log\nfailed to complete partial-merge commit\n",
+    );
+    const r = findDistillErrorLogForBranch(errorDir, branchShort);
+    // Fatal log wins.
+    expect(r).toBe(path.join(errorDir, fatalLog));
+  });
+});
+
+describe("findDistillOutcomeForBranch (POST-CONV-5)", () => {
+  let errorDir: string;
+  beforeEach(() => {
+    errorDir = fs.mkdtempSync(path.join(os.tmpdir(), "find-outcome-"));
+  });
+  afterEach(() => {
+    fs.rmSync(errorDir, { recursive: true, force: true });
+  });
+
+  test("missing dir: returns null", () => {
+    const r = findDistillOutcomeForBranch(
+      path.join(errorDir, "no-such"),
+      "abc-1",
+    );
+    expect(r).toBeNull();
+  });
+
+  test("empty dir: returns null", () => {
+    expect(findDistillOutcomeForBranch(errorDir, "abc-1")).toBeNull();
+  });
+
+  test("empty branchShort: returns null (defensive guard)", () => {
+    fs.writeFileSync(path.join(errorDir, "x.outcome"), "merged-content\n");
+    expect(findDistillOutcomeForBranch(errorDir, "")).toBeNull();
+  });
+
+  test("matching outcome: returns class + path, no partial-merge log", () => {
+    const branchShort = "abc123-1";
+    const fname = `2026-05-14T10:00:00Z-12345-${branchShort}.outcome`;
+    const full = path.join(errorDir, fname);
+    fs.writeFileSync(full, "merged-content\n");
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r).not.toBeNull();
+    expect(r?.outcomeClass).toBe("merged-content");
+    expect(r?.outcomePath).toBe(full);
+    expect(r?.partialMergeLogPath).toBeNull();
+  });
+
+  test("no-content class: returns class + path, no partial-merge log", () => {
+    const branchShort = "abc-2";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
+      "no-content\n",
+    );
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r?.outcomeClass).toBe("no-content");
+    expect(r?.partialMergeLogPath).toBeNull();
+  });
+
+  test("partial-merge class with matching .partial-merge.log: returns log path", () => {
+    const branchShort = "def-3";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
+      "partial-merge\n",
+    );
+    const pmLog = path.join(
+      errorDir,
+      `2026-05-14T10:00:00Z-1-${branchShort}.partial-merge.log`,
+    );
+    fs.writeFileSync(pmLog, "# log\nreverted 'foo.md' to main\n");
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r?.outcomeClass).toBe("partial-merge");
+    expect(r?.partialMergeLogPath).toBe(pmLog);
+  });
+
+  test("partial-merge class without .partial-merge.log: log path is null", () => {
+    const branchShort = "def-4";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
+      "partial-merge\n",
+    );
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r?.outcomeClass).toBe("partial-merge");
+    expect(r?.partialMergeLogPath).toBeNull();
+  });
+
+  test("non-matching outcome (different branch): returns null", () => {
+    fs.writeFileSync(
+      path.join(errorDir, "2026-05-14T10:00:00Z-1-other-99.outcome"),
+      "merged-content\n",
+    );
+    expect(findDistillOutcomeForBranch(errorDir, "abc-1")).toBeNull();
+  });
+
+  test("multiple outcomes for same branch: returns the most recent", () => {
+    const branchShort = "abc-5";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
+      "no-content\n",
+    );
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:30:00Z-2-${branchShort}.outcome`),
+      "merged-content\n",
+    );
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r?.outcomeClass).toBe("merged-content");
+  });
+
+  test("trims trailing newline + whitespace from class string", () => {
+    const branchShort = "abc-6";
+    fs.writeFileSync(
+      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
+      "  merged-content  \n\n",
+    );
+    const r = findDistillOutcomeForBranch(errorDir, branchShort);
+    expect(r?.outcomeClass).toBe("merged-content");
+  });
+});
+
+describe("resolveDistillErrorDir", () => {
+  let vault: string;
+  let xdgConfigHome: string;
+  let savedXdgConfigHome: string | undefined;
+  let savedHome: string | undefined;
+  beforeEach(() => {
+    vault = fs.mkdtempSync(path.join(os.tmpdir(), "resolve-errdir-"));
+    // Isolate from the user's real vault: napkin's `findVault` falls
+    // back to `$XDG_CONFIG_HOME/napkin/config.json` (or `$HOME/.config`)
+    // when no `.napkin/` exists in the cwd's ancestors. Point both at
+    // empty temp dirs so the helper hits its own catch fallback.
+    xdgConfigHome = fs.mkdtempSync(path.join(os.tmpdir(), "resolve-xdg-"));
+    savedXdgConfigHome = process.env.XDG_CONFIG_HOME;
+    savedHome = process.env.HOME;
+    process.env.XDG_CONFIG_HOME = xdgConfigHome;
+    process.env.HOME = xdgConfigHome;
+  });
+  afterEach(() => {
+    fs.rmSync(vault, { recursive: true, force: true });
+    fs.rmSync(xdgConfigHome, { recursive: true, force: true });
+    if (savedXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = savedXdgConfigHome;
+    if (savedHome === undefined) delete process.env.HOME;
+    else process.env.HOME = savedHome;
+  });
+
+  test("vault that doesn't resolve via napkin: falls back to <vault>/.napkin/distill/errors", () => {
+    // No napkin config in the dir, no global vault — `new Napkin(vault)`
+    // throws. Helper should fall back to the vault-local path.
+    const r = resolveDistillErrorDir(vault);
+    const expected = path.join(vault, ".napkin", "distill", "errors");
+    expect(r).toBe(expected);
+  });
+
+  test("returned path is absolute", () => {
+    const r = resolveDistillErrorDir(vault);
+    expect(path.isAbsolute(r)).toBe(true);
+  });
+});

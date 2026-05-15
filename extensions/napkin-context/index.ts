@@ -5,10 +5,11 @@ import {
   type AgentToolResult,
   type ExtensionAPI,
   keyHint,
+  type SessionManager,
   type Theme,
   type ToolRenderResultOptions,
-} from "@mariozechner/pi-coding-agent";
-import { Markdown, Text } from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-coding-agent";
+import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 
 function loadShowStatus(vaultPath: string): boolean {
@@ -81,8 +82,21 @@ export default function (pi: ExtensionAPI) {
         const hint = theme.fg("dim", " — Ctrl+O to expand");
         return new Text(label + hint, 1, 0);
       }
+      // pi typed message.content as `string | (TextContent | ImageContent)[]`;
+      // we only ever set string content via appendCustomMessageEntry so just
+      // narrow here. Fallback to empty string if an image-bearing custom
+      // message sneaks in — the Markdown renderer can't represent images.
+      const body =
+        typeof message.content === "string"
+          ? message.content
+          : message.content
+              .filter(
+                (c): c is { type: "text"; text: string } => c.type === "text",
+              )
+              .map((c) => c.text)
+              .join("");
       return new Markdown(
-        message.content,
+        body,
         1,
         0,
         {
@@ -128,15 +142,39 @@ export default function (pi: ExtensionAPI) {
         );
 
       if (!alreadyInjected) {
-        ctx.sessionManager.appendCustomMessageEntry(
-          "napkin-context",
-          "## Napkin vault context\n" +
-            "You have access to a napkin vault (Obsidian-compatible knowledge base). " +
-            "Here is the vault overview. Use the kb_search tool to find specific content, " +
-            "and the kb_read tool to read files.\n\n" +
-            overview,
-          true,
-        );
+        // pi's ExtensionContext narrows sessionManager to
+        // ReadonlySessionManager, which omits mutation methods. At runtime
+        // it's always the full SessionManager, but if pi ever wraps the
+        // instance in a genuine readonly proxy the mutation method will
+        // either be absent or throw. Guard both the duck-type and the
+        // call so the worst-case is a degraded (no context injection)
+        // session, not a fatal extension error. (R2-2)
+        const sm = ctx.sessionManager as Partial<SessionManager>;
+        if (typeof sm.appendCustomMessageEntry === "function") {
+          try {
+            sm.appendCustomMessageEntry(
+              "napkin-context",
+              "## Napkin vault context\n" +
+                "You have access to a napkin vault (Obsidian-compatible knowledge base). " +
+                "Here is the vault overview. Use the kb_search tool to find specific content, " +
+                "and the kb_read tool to read files.\n\n" +
+                overview,
+              true,
+            );
+          } catch (err) {
+            // Graceful degradation: pi may have tightened the readonly
+            // contract at runtime. Surface once, then proceed without
+            // context injection.
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                `napkin-context: could not inject vault overview (${
+                  err instanceof Error ? err.message : String(err)
+                })`,
+                "warning",
+              );
+            }
+          }
+        }
       }
     }
 
