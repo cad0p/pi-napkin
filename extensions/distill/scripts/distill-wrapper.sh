@@ -312,12 +312,32 @@ fi
 # Use node for parsing instead of sed: a regex on JSON is fragile
 # against future shape changes (multi-line values, embedded commas,
 # nested objects) and would silently degrade to an empty extraction
-# on shape drift. Node is on PATH inside the wrapper because pi-bun
-# spawned us; the same JSON parser the JS side wrote with is the most
-# robust reader.
+# on shape drift. Node is normally on PATH inside the wrapper because
+# pi-bun spawned us; the same JSON parser the JS side wrote with is
+# the most robust reader.
+#
+# Hard-fail with a clear diagnostic if node is missing or unrunnable
+# rather than letting the meta-missing-startSha hard-fail downstream
+# mislead the user (R13-CI-1 / R13-CC-3). Cron / systemd / launchd /
+# container-init-launched pi may all have stripped PATHs without
+# node's bindir (mise / nvm / asdf install node outside /usr/bin).
+# Mirrors the napkin --version smoke-test pattern below for shape
+# consistency.
+REAL_NODE="$(command -v node || true)"
+if [ -z "$REAL_NODE" ]; then
+  log_error "node binary not found on wrapper PATH; required for startSha extraction. Set PATH to include node before launching pi."
+  log_error "  PATH=$PATH"
+  exit 1
+fi
+if ! "$REAL_NODE" --version >/dev/null 2>&1; then
+  log_error "node binary not runnable on wrapper PATH (resolved to '$REAL_NODE'); shebang or binary issue."
+  log_error "  PATH=$PATH"
+  exit 1
+fi
+
 START_SHA=""
 if [ -f "$META_PATH" ]; then
-  START_SHA="$(node -e 'try { const d = require(process.argv[1]); process.stdout.write(d.startSha || ""); } catch { /* swallow — empty START_SHA triggers the hard-fail below */ }' "$META_PATH" 2>/dev/null || true)"
+  START_SHA="$("$REAL_NODE" -e 'try { const d = require(process.argv[1]); process.stdout.write(d.startSha || ""); } catch { /* swallow — empty START_SHA triggers the hard-fail below */ }' "$META_PATH" 2>/dev/null || true)"
 fi
 
 # Hard-fail when startSha can't be recovered. The pre-POST-CONV-1

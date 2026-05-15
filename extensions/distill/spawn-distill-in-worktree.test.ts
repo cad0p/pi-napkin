@@ -30,6 +30,30 @@ const NODE_BIN_DIR = path.dirname(
 );
 const NAPKIN_STRIPPED_PATH = `${NODE_BIN_DIR}:/usr/bin:/bin`;
 
+// Path that has napkin reachable (via repo-local node_modules/.bin)
+// but deliberately strips the node bindir, exercising the
+// node-not-on-PATH guard (R13-CI-1 / R13-CC-3). Mirrors the cron /
+// systemd / launchd / container-init scenarios where pi inherits a
+// minimal PATH that lacks node's mise/nvm/asdf install dir.
+const NAPKIN_LOCAL_BIN = path.resolve(
+  __dirname,
+  "..",
+  "..",
+  "node_modules",
+  ".bin",
+);
+const NAPKIN_NODE_STRIPPED_PATH = `${NAPKIN_LOCAL_BIN}:/usr/bin:/bin`;
+// Probe whether the test runner's `/usr/bin:/bin` happens to also
+// contain node (e.g. some Linux distros ship it there). When that is
+// the case the node-missing test cannot be exercised on this host;
+// the test self-skips with a diagnostic rather than producing a
+// false-positive.
+const NODE_REACHABLE_VIA_STRIPPED_PATH =
+  spawnSync("sh", ["-c", "command -v node"], {
+    encoding: "utf-8",
+    env: { PATH: NAPKIN_NODE_STRIPPED_PATH },
+  }).stdout.trim() !== "";
+
 /**
  * Tests for `spawnDistillInWorktree` split into two groups:
  *   - unit: mock the `spawn` function, verify we pass the right args to the
@@ -838,6 +862,84 @@ describe("distill-wrapper.sh (integration)", () => {
     );
     expect(errorContent).toContain("napkin binary not found on wrapper PATH");
     expect(errorContent).toContain(`PATH=${NAPKIN_STRIPPED_PATH}`);
+  });
+
+  test("missing node on PATH — wrapper fails with node-specific diagnostic, not the misleading meta.json one (R13-CI-1, R13-CC-3)", () => {
+    // R13-CI-1 / R13-CC-3: round-12's `0a03b8e` switched startSha
+    // extraction from sed to `node -e` for JSON-shape robustness, but
+    // made `node` on PATH a hard precondition. When node is missing
+    // (cron / systemd / launchd / container-init / mise-or-nvm dev
+    // boxes whose runtime PATH lacks the node bindir), the previous
+    // build let `node -e` produce empty stdout, which fell through to
+    // the meta.json-missing-startSha hard-fail at line 332 — a
+    // misleading diagnostic since the user's meta.json is fine, only
+    // node is missing. The fix-now guard probes node before the
+    // extraction and emits a node-specific error. Pin the diagnostic
+    // shape here so a future revert to the silent-empty-startSha
+    // shape regresses loudly.
+    if (NODE_REACHABLE_VIA_STRIPPED_PATH) {
+      // /usr/bin or /bin contains a node binary on this host — the
+      // test cannot exercise the missing-node path. Skip with a
+      // diagnostic rather than asserting on the wrong code path.
+      console.warn(
+        "[skip] node is reachable via /usr/bin or /bin on this host; " +
+          "the missing-node guard cannot be exercised here.",
+      );
+      return;
+    }
+    const { createDistillWorkspace } = require("./distill-workspace");
+    const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+
+    const r = spawnSync(
+      "bash",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        workspace.worktreePath,
+        workspace.branchName,
+        workspace.sessionForkPath,
+        "test prompt",
+        errorDir,
+        "",
+        "main",
+        sessionDir,
+      ],
+      {
+        cwd: sessionDir,
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          // PATH has napkin (via node_modules/.bin) reachable but
+          // deliberately strips NODE_BIN_DIR. SKIP_PI=1 to keep the
+          // shim install block out of the picture — the node guard
+          // sits BEFORE the shim install, so this isolates the guard.
+          PATH: NAPKIN_NODE_STRIPPED_PATH,
+          GIT_AUTHOR_NAME: "test",
+          GIT_AUTHOR_EMAIL: "test@example.com",
+          GIT_COMMITTER_NAME: "test",
+          GIT_COMMITTER_EMAIL: "test@example.com",
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_SKIP_PI: "1",
+        },
+      },
+    );
+    expect(r.status).toBe(1);
+
+    const errors = fs
+      .readdirSync(errorDir)
+      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+    expect(errors.length).toBeGreaterThan(0);
+    const errorContent = errors
+      .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
+      .join("\n");
+    // The new node-specific diagnostic fires.
+    expect(errorContent).toContain("node binary not found on wrapper PATH");
+    expect(errorContent).toContain(`PATH=${NAPKIN_NODE_STRIPPED_PATH}`);
+    // Crucially, NOT the misleading downstream meta.json hard-fail
+    // (the previous behaviour before the guard).
+    expect(errorContent).not.toContain("meta.json missing startSha");
   });
 
   test("POST-R6-CACHE: SKIP_PI=1 skips shim install (R7-SC-15)", () => {
