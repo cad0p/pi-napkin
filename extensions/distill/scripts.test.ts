@@ -268,6 +268,288 @@ describe("napkin-distill-merge", () => {
 });
 
 /**
+ * POST-CONV-6: per-attempt + 3-strike forensic logging.
+ *
+ * Pre-POST-CONV-6 the merge driver had zero observability. A 3-strike
+ * give-up wrote nothing and exited 1, leaving %A as "ours" — silent
+ * data loss when invoked outside the wrapper (e.g. manual cherry-pick).
+ * These tests pin the new logging surface: per-attempt log lines, the
+ * 3-strike forensic record, and the byte-exact base/ours/theirs
+ * snapshots.
+ */
+describe("napkin-distill-merge forensic logging (POST-CONV-6)", () => {
+  /**
+   * Like {@link runMergeDriver} but with explicit env overrides so each
+   * test can pin its log destination via either `NAPKIN_DISTILL_ERROR_DIR`
+   * (wrapper-style) or `XDG_CACHE_HOME` (manual-cherry-pick style).
+   * Inherits `process.env` so coreutils stay resolvable.
+   */
+  function runMergeDriverWithEnv(
+    base: string,
+    ours: string,
+    theirs: string,
+    filename: string,
+    mockMode: string,
+    extraEnv: Record<string, string | undefined>,
+  ): { exitCode: number } {
+    const env: Record<string, string> = {
+      ...(process.env as Record<string, string>),
+      NAPKIN_DISTILL_MERGE_MOCK: mockMode,
+      NAPKIN_DISTILL_NO_RECURSE: "1",
+    };
+    for (const [k, v] of Object.entries(extraEnv)) {
+      if (v === undefined) {
+        delete env[k];
+      } else {
+        env[k] = v;
+      }
+    }
+    const r = spawnSync(MERGE_DRIVER_SCRIPT, [base, ours, theirs, filename], {
+      encoding: "utf-8",
+      env,
+    });
+    return { exitCode: r.status ?? -1 };
+  }
+
+  /** Set up base/ours/theirs in a fresh tmp dir; clean up on completion. */
+  function withFixture(
+    runner: (paths: { base: string; ours: string; theirs: string }) => void,
+  ): void {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "merge-fxn-"));
+    try {
+      const base = path.join(dir, "base.md");
+      const ours = path.join(dir, "ours.md");
+      const theirs = path.join(dir, "theirs.md");
+      // Same writeMd helper from above — valid YAML frontmatter so the
+      // sanity check exercises only what each test's mock exposes.
+      fs.writeFileSync(base, "---\ntitle: test\n---\n# base\n");
+      fs.writeFileSync(ours, "---\ntitle: test\n---\n# ours\n");
+      fs.writeFileSync(theirs, "---\ntitle: test\n---\n# theirs\n");
+      runner({ base, ours, theirs });
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  test("3-strike with NAPKIN_DISTILL_ERROR_DIR set: log + per-attempt + forensic record + snapshots", () => {
+    const errorDir = fs.mkdtempSync(path.join(os.tmpdir(), "merge-errordir-"));
+    try {
+      withFixture(({ base, ours, theirs }) => {
+        const r = runMergeDriverWithEnv(
+          base,
+          ours,
+          theirs,
+          "vault/notes/topic.md",
+          "fail",
+          { NAPKIN_DISTILL_ERROR_DIR: errorDir },
+        );
+        expect(r.exitCode).toBe(1);
+
+        // One log file in errorDir.
+        const logFiles = fs
+          .readdirSync(errorDir)
+          .filter((f) => f.endsWith(".merge-driver.log"));
+        expect(logFiles).toHaveLength(1);
+        const logPath = path.join(errorDir, logFiles[0]);
+        const log = fs.readFileSync(logPath, "utf-8");
+
+        // Header.
+        expect(log).toContain("# napkin distill merge driver log");
+        expect(log).toContain("file: vault/notes/topic.md");
+
+        // Three per-attempt lines, all classed as pi-exit-nonzero (mock=fail returns 1).
+        const attemptLines = log
+          .split("\n")
+          .filter((l) => /^\[.*\] attempt \d+:/.test(l));
+        expect(attemptLines).toHaveLength(3);
+        for (const l of attemptLines) {
+          expect(l).toContain("pi-exit-nonzero");
+        }
+
+        // 3-strike forensic record present.
+        expect(log).toContain("=== 3-STRIKE FORENSIC RECORD ===");
+        expect(log).toContain("file: vault/notes/topic.md");
+        expect(log).toContain(`base (%O path): ${base}`);
+        expect(log).toContain(`ours (%A path): ${ours}`);
+        expect(log).toContain(`theirs (%B path): ${theirs}`);
+        expect(log).toContain("recovery: see");
+        expect(log).toContain("git log --reflog");
+        expect(log).toContain("git diff <SHA1>..<SHA2>");
+
+        // Snapshot files exist with byte-exact original content.
+        for (const suffix of ["base", "ours", "theirs"] as const) {
+          const snapshotPath = `${logPath}.${suffix}`;
+          expect(fs.existsSync(snapshotPath)).toBe(true);
+          const snapshot = fs.readFileSync(snapshotPath, "utf-8");
+          // Pin byte-exact: snapshot must equal the original input file.
+          const originalPath = { base, ours, theirs }[suffix];
+          expect(snapshot).toBe(fs.readFileSync(originalPath, "utf-8"));
+        }
+      });
+    } finally {
+      fs.rmSync(errorDir, { recursive: true, force: true });
+    }
+  });
+
+  test("3-strike without NAPKIN_DISTILL_ERROR_DIR: log lands under XDG_CACHE_HOME", () => {
+    const xdgCache = fs.mkdtempSync(path.join(os.tmpdir(), "merge-xdg-"));
+    try {
+      withFixture(({ base, ours, theirs }) => {
+        const r = runMergeDriverWithEnv(
+          base,
+          ours,
+          theirs,
+          "some/file.md",
+          "fail",
+          {
+            NAPKIN_DISTILL_ERROR_DIR: undefined,
+            XDG_CACHE_HOME: xdgCache,
+          },
+        );
+        expect(r.exitCode).toBe(1);
+
+        const expectedDir = path.join(
+          xdgCache,
+          "napkin-distill",
+          "merge-driver-logs",
+        );
+        expect(fs.existsSync(expectedDir)).toBe(true);
+        const logFiles = fs
+          .readdirSync(expectedDir)
+          .filter((f) => f.endsWith(".merge-driver.log"));
+        expect(logFiles).toHaveLength(1);
+        const log = fs.readFileSync(
+          path.join(expectedDir, logFiles[0]),
+          "utf-8",
+        );
+        expect(log).toContain("=== 3-STRIKE FORENSIC RECORD ===");
+      });
+    } finally {
+      fs.rmSync(xdgCache, { recursive: true, force: true });
+    }
+  });
+
+  test("successful merge (mock=ok): no log file produced", () => {
+    // Lazy-create policy: log file is only touched on the first failure
+    // log call. A successful first attempt leaves errorDir empty.
+    const errorDir = fs.mkdtempSync(path.join(os.tmpdir(), "merge-ok-"));
+    try {
+      withFixture(({ base, ours, theirs }) => {
+        const r = runMergeDriverWithEnv(
+          base,
+          ours,
+          theirs,
+          "clean/merge.md",
+          "ok",
+          { NAPKIN_DISTILL_ERROR_DIR: errorDir },
+        );
+        expect(r.exitCode).toBe(0);
+        const logFiles = fs
+          .readdirSync(errorDir)
+          .filter((f) => f.endsWith(".merge-driver.log"));
+        expect(logFiles).toHaveLength(0);
+      });
+    } finally {
+      fs.rmSync(errorDir, { recursive: true, force: true });
+    }
+  });
+
+  test("ok-after-2 (succeeds on attempt 3): logs the two failed attempts but no 3-strike record", () => {
+    // Verifies per-attempt logging fires for partial failures even when
+    // the eventual outcome is success. Useful diagnostic when retries
+    // happened but the user got a working merge.
+    const errorDir = fs.mkdtempSync(path.join(os.tmpdir(), "merge-retry-"));
+    try {
+      withFixture(({ base, ours, theirs }) => {
+        const r = runMergeDriverWithEnv(
+          base,
+          ours,
+          theirs,
+          "retry/merge.md",
+          "ok-after-2",
+          { NAPKIN_DISTILL_ERROR_DIR: errorDir },
+        );
+        expect(r.exitCode).toBe(0);
+        const logFiles = fs
+          .readdirSync(errorDir)
+          .filter((f) => f.endsWith(".merge-driver.log"));
+        expect(logFiles).toHaveLength(1);
+        const log = fs.readFileSync(path.join(errorDir, logFiles[0]), "utf-8");
+        const attemptLines = log
+          .split("\n")
+          .filter((l) => /^\[.*\] attempt \d+:/.test(l));
+        expect(attemptLines).toHaveLength(2);
+        expect(log).not.toContain("=== 3-STRIKE FORENSIC RECORD ===");
+        // No snapshot files on success.
+        const logPath = path.join(errorDir, logFiles[0]);
+        for (const suffix of ["base", "ours", "theirs"]) {
+          expect(fs.existsSync(`${logPath}.${suffix}`)).toBe(false);
+        }
+      });
+    } finally {
+      fs.rmSync(errorDir, { recursive: true, force: true });
+    }
+  });
+
+  test("per-attempt class strings: tiny / huge / no-fm / empty surface their own classes", () => {
+    // Each mock mode should be classified differently in the per-attempt
+    // log so an operator can tell at a glance why retries are happening.
+    const cases: { mock: string; expectedClass: string; note: string }[] = [
+      { mock: "empty", expectedClass: "pi-output-empty", note: "empty" },
+      { mock: "huge", expectedClass: "output-too-long", note: "huge" },
+      { mock: "no-fm", expectedClass: "no-frontmatter", note: "no-fm" },
+    ];
+    for (const c of cases) {
+      const errorDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), `merge-${c.note}-`),
+      );
+      try {
+        withFixture(({ base, ours, theirs }) => {
+          // 'huge' and 'no-fm' need inputs longer than the trivial 30-char
+          // bodies above; rewrite them inline so the mock paths exercise
+          // the right sanity branch (huge: out_len > 3*max_input_len;
+          // no-fm: all-inputs-have-fm flag must be 1, so inputs already
+          // start with `---`, which they do).
+          if (c.mock === "huge") {
+            const big = `---\ntitle: test\n---\n${"x".repeat(200)}\n`;
+            fs.writeFileSync(base, big);
+            fs.writeFileSync(ours, big);
+            fs.writeFileSync(theirs, big);
+          }
+          const r = runMergeDriverWithEnv(
+            base,
+            ours,
+            theirs,
+            `pin/${c.note}.md`,
+            c.mock,
+            { NAPKIN_DISTILL_ERROR_DIR: errorDir },
+          );
+          expect(r.exitCode).toBe(1);
+          const logFiles = fs
+            .readdirSync(errorDir)
+            .filter((f) => f.endsWith(".merge-driver.log"));
+          expect(logFiles).toHaveLength(1);
+          const log = fs.readFileSync(
+            path.join(errorDir, logFiles[0]),
+            "utf-8",
+          );
+          // Each attempt line must contain the expected class.
+          const attemptLines = log
+            .split("\n")
+            .filter((l) => /^\[.*\] attempt \d+:/.test(l));
+          expect(attemptLines).toHaveLength(3);
+          for (const l of attemptLines) {
+            expect(l).toContain(c.expectedClass);
+          }
+        });
+      } finally {
+        fs.rmSync(errorDir, { recursive: true, force: true });
+      }
+    }
+  });
+});
+
+/**
  * Tests for the git_retry wrapper. We use a tiny throwaway git repo whose
  * index.lock we hold to force retries.
  */

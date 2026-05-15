@@ -70,6 +70,19 @@ set -uo pipefail
 LLM_OUTPUT_MIN_RATIO=0.3
 LLM_OUTPUT_MAX_RATIO=3.0
 
+# Log filename truncation: SHA256 of the file path (`%P`) keeps log
+# filenames bounded across vaults with deeply nested paths. 16 hex chars
+# = 64 bits — collision-free for thousands of files within the same
+# UTC-second timestamp bucket.
+SHA256_FILE_HASH_LEN=16
+
+# Stderr capture cap for diagnostic logging. The merge driver records
+# the first N bytes of pi's stderr per failed attempt so an operator
+# can tell at a glance whether the failure was a config error, network
+# stall, or model rejection. 200 bytes is enough for the first error
+# line in practice without bloating the log when pi spews a backtrace.
+MERGE_DRIVER_STDERR_LOG_BYTES=200
+
 BASE="${1:-}"
 OURS="${2:-}"
 THEIRS="${3:-}"
@@ -79,6 +92,90 @@ if [ -z "$OURS" ] || [ ! -f "$OURS" ]; then
   echo "napkin-distill-merge: missing or invalid 'ours' argument" >&2
   exit 1
 fi
+
+# ---------------------------------------------------------------------------
+# Forensic logging (POST-CONV-6).
+#
+# Pre-POST-CONV-6 the driver had zero per-attempt observability: a
+# 3-strike give-up wrote nothing and exited 1, leaving %A as "ours"
+# (intentional — wrapper's partial-merge salvage path picks up). When
+# the driver was invoked OUTSIDE the wrapper (e.g. a manual
+# cherry-pick), the silent give-up dropped content with no trace.
+#
+# This block sets up:
+#   LOG_FILE        — append-only timestamped log; lazy-created on first
+#                     write so successful first attempts leave nothing
+#                     on disk.
+#   log_attempt     — one line per failed retry: class + detail.
+#   write_3strike_forensic — appended at the end of all-3-failed branch,
+#                     before `exit 1`. Snapshots base/ours/theirs to
+#                     `$LOG_FILE.{base,ours,theirs}` for byte-exact
+#                     manual recovery.
+#
+# Log destination logic:
+#   NAPKIN_DISTILL_ERROR_DIR   set when invoked from the wrapper —
+#                              co-locates merge logs with wrapper logs.
+#   else $XDG_CACHE_HOME/napkin-distill/merge-driver-logs (fallback for
+#                              direct/manual invocations).
+# ---------------------------------------------------------------------------
+if [ -n "${NAPKIN_DISTILL_ERROR_DIR:-}" ]; then
+  LOG_DIR="$NAPKIN_DISTILL_ERROR_DIR"
+else
+  LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/napkin-distill/merge-driver-logs"
+fi
+mkdir -p "$LOG_DIR" 2>/dev/null || true
+LOG_TIMESTAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+LOG_FILE_HASH="$(printf '%s' "$FILENAME" | sha256sum 2>/dev/null | head -c "$SHA256_FILE_HASH_LEN")"
+if [ -z "$LOG_FILE_HASH" ]; then
+  # sha256sum unavailable (BSD edge case) — fall back to a basename so
+  # the log path is still bounded.
+  LOG_FILE_HASH="$(basename "$FILENAME" | tr -c 'A-Za-z0-9' '_' | head -c "$SHA256_FILE_HASH_LEN")"
+fi
+LOG_FILE="$LOG_DIR/${LOG_TIMESTAMP}-${LOG_FILE_HASH}.merge-driver.log"
+LOG_FILE_TOUCHED=0
+
+log_init_if_needed() {
+  if [ "$LOG_FILE_TOUCHED" -eq 0 ]; then
+    {
+      printf '# napkin distill merge driver log\n'
+      printf 'file: %s\n' "$FILENAME"
+      printf 'started: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'pid: %d\n' "$$"
+      printf '\n'
+    } >> "$LOG_FILE" 2>/dev/null || true
+    LOG_FILE_TOUCHED=1
+  fi
+}
+
+log_attempt() {
+  local attempt_num="$1"
+  local class="$2"
+  local detail="$3"
+  log_init_if_needed
+  printf '[%s] attempt %d: %s — %s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$attempt_num" "$class" "$detail" \
+    >> "$LOG_FILE" 2>/dev/null || true
+}
+
+write_3strike_forensic() {
+  log_init_if_needed
+  {
+    printf '\n=== 3-STRIKE FORENSIC RECORD ===\n'
+    printf 'file: %s\n' "$FILENAME"
+    printf 'base (%%O path): %s\n' "$BASE"
+    printf 'ours (%%A path): %s\n' "$OURS"
+    printf 'theirs (%%B path): %s\n' "$THEIRS"
+  } >> "$LOG_FILE" 2>/dev/null || true
+  cp "$BASE" "$LOG_FILE.base" 2>/dev/null || true
+  cp "$OURS" "$LOG_FILE.ours" 2>/dev/null || true
+  cp "$THEIRS" "$LOG_FILE.theirs" 2>/dev/null || true
+  {
+    printf 'snapshot: %s.{base,ours,theirs}\n' "$LOG_FILE"
+    printf 'recovery: see %s.{base,ours,theirs} for byte-exact inputs\n' "$LOG_FILE"
+    printf 'recovery: `git log --reflog | grep <commit-message-fragment>` to find dangling commits\n'
+    printf 'recovery: `git diff <SHA1>..<SHA2> -- "%s"` to inspect the diff that needs manual merging\n' "$FILENAME"
+  } >> "$LOG_FILE" 2>/dev/null || true
+}
 
 # `base` and `theirs` are typically always provided, but defensively read them
 # through cat so missing files yield empty strings rather than killing us.
@@ -261,40 +358,67 @@ theirs content line
 
 attempt=1
 max_attempts=3
+# Tempfile for capturing pi stderr per attempt. Cleaned up on exit via
+# trap so even on early exit we don't leak under /tmp.
+STDERR_TMP="$(mktemp 2>/dev/null || echo /tmp/napkin-merge-stderr.$$)"
+trap 'rm -f "$STDERR_TMP" 2>/dev/null || true' EXIT
 while [ "$attempt" -le "$max_attempts" ]; do
-  output=$(call_pi_or_mock "$attempt" 2>/dev/null)
+  : > "$STDERR_TMP"
+  output=$(call_pi_or_mock "$attempt" 2>"$STDERR_TMP")
   rc=$?
-  if [ "$rc" -eq 0 ] && [ -n "$output" ]; then
-    out_len=${#output}
-    # Sanity: length within [0.3, 3.0] * max_input_len. Empty base/ours/theirs
-    # yields max_input_len=0; in that edge case any non-empty output passes.
-    if [ "$max_input_len" -gt 0 ]; then
-      lower=$(awk -v m="$max_input_len" -v r="$LLM_OUTPUT_MIN_RATIO" 'BEGIN{printf "%d", m*r}')
-      upper=$(awk -v m="$max_input_len" -v r="$LLM_OUTPUT_MAX_RATIO" 'BEGIN{printf "%d", m*r}')
-      if [ "$out_len" -lt "$lower" ] || [ "$out_len" -gt "$upper" ]; then
+  if [ "$rc" -ne 0 ]; then
+    stderr_excerpt="$(head -c "$MERGE_DRIVER_STDERR_LOG_BYTES" "$STDERR_TMP" 2>/dev/null | tr '\n' ' ')"
+    log_attempt "$attempt" "pi-exit-nonzero" \
+      "rc=$rc stderr='${stderr_excerpt}'"
+    attempt=$((attempt + 1))
+    continue
+  fi
+  if [ -z "$output" ]; then
+    stderr_excerpt="$(head -c "$MERGE_DRIVER_STDERR_LOG_BYTES" "$STDERR_TMP" 2>/dev/null | tr '\n' ' ')"
+    log_attempt "$attempt" "pi-output-empty" \
+      "rc=0 but stdout empty; stderr='${stderr_excerpt}'"
+    attempt=$((attempt + 1))
+    continue
+  fi
+  out_len=${#output}
+  # Sanity: length within [0.3, 3.0] * max_input_len. Empty base/ours/theirs
+  # yields max_input_len=0; in that edge case any non-empty output passes.
+  if [ "$max_input_len" -gt 0 ]; then
+    lower=$(awk -v m="$max_input_len" -v r="$LLM_OUTPUT_MIN_RATIO" 'BEGIN{printf "%d", m*r}')
+    upper=$(awk -v m="$max_input_len" -v r="$LLM_OUTPUT_MAX_RATIO" 'BEGIN{printf "%d", m*r}')
+    if [ "$out_len" -lt "$lower" ]; then
+      log_attempt "$attempt" "output-too-short" \
+        "len=$out_len < min=$lower (${LLM_OUTPUT_MIN_RATIO}*max_input_len=$max_input_len)"
+      attempt=$((attempt + 1))
+      continue
+    fi
+    if [ "$out_len" -gt "$upper" ]; then
+      log_attempt "$attempt" "output-too-long" \
+        "len=$out_len > max=$upper (${LLM_OUTPUT_MAX_RATIO}*max_input_len=$max_input_len)"
+      attempt=$((attempt + 1))
+      continue
+    fi
+  fi
+  # Frontmatter sanity check.
+  if [ "$all_inputs_have_fm" -eq 1 ]; then
+    case "$output" in
+      "---"$'\n'*) ;;
+      "---"$'\r\n'*) ;;
+      *)
+        log_attempt "$attempt" "no-frontmatter" \
+          "all inputs had frontmatter; output starts with: $(printf '%s' "$output" | head -c 32 | tr '\n' ' ')"
         attempt=$((attempt + 1))
         continue
-      fi
-    fi
-    # Frontmatter sanity check.
-    if [ "$all_inputs_have_fm" -eq 1 ]; then
-      case "$output" in
-        "---"$'\n'*) ;;
-        "---"$'\r\n'*) ;;
-        *)
-          attempt=$((attempt + 1))
-          continue
-          ;;
-      esac
-    fi
-    # All checks passed \u2014 write and exit.
-    printf '%s' "$output" > "$OURS"
-    exit 0
+        ;;
+    esac
   fi
-  attempt=$((attempt + 1))
+  # All checks passed \u2014 write and exit.
+  printf '%s' "$output" > "$OURS"
+  exit 0
 done
 
 # 3 strikes: fall through without modifying %A. Git sees our exit 1 and leaves
 # any conflict markers in place so the wrapper script's partial-merge salvage
 # can find this file via `git diff --name-only --diff-filter=U`.
+write_3strike_forensic
 exit 1
