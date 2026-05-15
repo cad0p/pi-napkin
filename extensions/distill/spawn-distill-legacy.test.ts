@@ -152,14 +152,14 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
   });
 
   test("prompt does NOT contain the worktree-isolation prefix (R7-CC-11)", () => {
-    // POST-R6-CACHE prepends a worktree-isolation prefix to the
-    // distill prompt only via `worktreeSpawnFn`'s `buildWorktreeDistillPrompt`.
-    // The legacy spawn path (this one) is for git-less / disabled /
+    // POST-R6-CACHE moved the worktree-isolation framing into
+    // `distill-prompt.md`, used only by the worktree spawn path. The
+    // legacy spawn path (this one) is for git-less / disabled /
     // legacy-embedded vaults where there's no worktree to isolate —
-    // the prefix would be a confusing lie. Pin that the prompt the
-    // legacy path sends to the wrapper does NOT contain the prefix's
+    // the framing would be a confusing lie. Pin that the prompt the
+    // legacy path sends to the wrapper does NOT contain the framing's
     // signature phrase, so a future refactor that accidentally folds
-    // the prefix into a shared helper surfaces the regression here.
+    // the framing into a shared helper surfaces the regression here.
     const { spawnFn, calls } = makeMockSpawn();
     const tmpDir = spawnDistill(
       sessionFile,
@@ -169,9 +169,9 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
     );
     if (tmpDir) tmpDirs.push(tmpDir);
     // args[6] is the LEGACY_DISTILL_PROMPT positional that the wrapper
-    // passes to `pi -p`. Worktree-isolation prefix's signature phrase from
-    // `buildWorktreeDistillPrompt` is "isolated git worktree at".
-    expect(calls[0].args[6]).not.toContain("isolated git worktree at");
+    // passes to `pi -p`. Worktree-isolation framing's signature phrase
+    // from `distill-prompt.md` is "lives in the git worktree at".
+    expect(calls[0].args[6]).not.toContain("lives in the git worktree at");
   });
 
   test("passes detached + stdio:ignore + NAPKIN_DISTILL_NO_RECURSE", () => {

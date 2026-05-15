@@ -938,31 +938,6 @@ export function findDistillOutcomeForBranch(
 }
 
 /**
- * Prefix prepended to the distill prompt only when running through the
- * worktree spawn path. Tells the agent its writes must stay inside the
- * per-distill worktree — critical because the agent inherits the parent
- * session's full message history (which contains absolute paths to the
- * MAIN vault) and would otherwise route writes there via `edit`/`write`
- * with absolute paths, silently bypassing worktree isolation.
- *
- * The prefix is added inside `spawnDistillInWorktree` (not at call sites)
- * so every worktree-mode caller gets it automatically. Legacy spawn
- * (manual /distill on git-less or disabled vaults) does NOT prepend
- * this — there's no isolation to preserve there.
- *
- * Exported for tests; production callers should rely on the implicit
- * application inside `spawnDistillInWorktree`.
- *
- * See POST-R6-CACHE in features/pi-napkin-distill/deferred.md for context.
- */
-export function buildWorktreeDistillPrompt(
-  worktreePath: string,
-  basePrompt: string,
-): string {
-  return `You are running in an isolated git worktree at ${worktreePath}. Only modify files within the worktree. Do NOT use absolute paths from the conversation history — those refer to the main vault and bypass isolation, causing the distill to silently merge nothing.\n\n${basePrompt}`;
-}
-
-/**
  * Arguments to `spawnDistillInWorktree`. Separated as an interface so callers
  * don't have to remember positional arg order — and so tests can supply the
  * `spawn` override without pulling in the full function signature.

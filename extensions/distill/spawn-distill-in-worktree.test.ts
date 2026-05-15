@@ -9,7 +9,6 @@ import * as path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { withNapkinOnPath } from "./_test-helpers";
 import {
-  buildWorktreeDistillPrompt,
   cleanupDistillWorkspace,
   type DistillWorkspace,
   spawnDistillInWorktree,
@@ -333,30 +332,6 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     expect(result.workspace.branchName).toMatch(/^distill\/[0-9a-f]{6}-\d+$/);
     expect(result.pid).toBe(12345);
     expect(fs.existsSync(result.workspace.worktreePath)).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// buildWorktreeDistillPrompt — POST-R6-CACHE worktree-isolation prefix.
-// ---------------------------------------------------------------------------
-
-describe("buildWorktreeDistillPrompt (POST-R6-CACHE)", () => {
-  test("prepends a worktree-isolation prefix that names the worktree path", () => {
-    const wt = "/tmp/example-worktree-abc/123";
-    const out = buildWorktreeDistillPrompt(wt, "BASE PROMPT");
-    expect(out).toContain(`isolated git worktree at ${wt}`);
-    expect(out).toContain(
-      "Do NOT use absolute paths from the conversation history",
-    );
-    // Base prompt is preserved verbatim at the end.
-    expect(out.endsWith("BASE PROMPT")).toBe(true);
-  });
-
-  test("prefix is non-trivial in length so the agent can't miss it", () => {
-    const out = buildWorktreeDistillPrompt("/tmp/wt", "x");
-    // Base prompt is 1 char; everything else is the prefix. Length floor
-    // catches accidental degeneration of the prefix to a one-liner.
-    expect(out.length).toBeGreaterThan(200);
   });
 });
 
