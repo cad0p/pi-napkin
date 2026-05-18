@@ -540,6 +540,17 @@ safe_rm_worktree() {
 # `branch -D` does NOT prevent the outcome write — the JS-side
 # UI dispatch on the outcome class is the user-facing signal that
 # matters.
+#
+# INVARIANT: write_outcome ALWAYS runs before any worktree-removal
+# step in this function, mirroring the EXIT trap's ordering. The
+# JS-side poller in runDistillWith watches the worktree path and
+# calls findDistillOutcomeForBranch as soon as fs.existsSync returns
+# false. If any worktree-removal step ran before write_outcome, the
+# JS dispatch would surface a spurious 'terminated abnormally
+# — no outcome record' warning instead of the correct
+# 'failed:<reason>' notification. wrapper-invariant.test.ts pins
+# this invariant for both the happy path (EXIT trap) and the
+# salvage path (this function).
 salvage() {
   local vault="$1"
   local worktree="$2"
@@ -549,43 +560,6 @@ salvage() {
   # cd out of the worktree so `git worktree remove --force` doesn't
   # refuse on "cwd inside worktree".
   cd "$vault" 2>/dev/null || cd /
-
-  # Force-remove worktree. Ignore errors (already gone, never created,
-  # other concurrent salvage racing).
-  if [ -d "$worktree" ]; then
-    git -C "$vault" worktree remove --force "$worktree" 2>/dev/null || true
-  fi
-  # Belt-and-braces: gitignored shim survives `worktree remove --force`.
-  # rm -rf the leaf if anything's left (POST-CONV-3 pattern). Routed
-  # through safe_rm_worktree so an upstream bug that passed a non-
-  # napkin-distill path can't escalate to `rm -rf /etc`-class damage
-  # via this code path (SEC-A-2 defense-in-depth). Pass
-  # EXPECTED_CACHE_ROOT so safe_rm_worktree's strict-mode descendant
-  # check fires (SEC-2 / CORR-3) instead of the legacy glob fallback.
-  if [ -d "$worktree" ]; then
-    safe_rm_worktree "$worktree" "$EXPECTED_CACHE_ROOT" || true
-  fi
-  # Prune any stale worktree entry whose dir is gone.
-  git -C "$vault" worktree prune 2>/dev/null || true
-  # Force-delete branch. -D because squash-merge leaves the branch
-  # marked as unmerged.
-  git -C "$vault" branch -D "$branch" 2>/dev/null || true
-  # Best-effort rmdir of the parent vault-hash dir — succeeds when
-  # this was the last distill (POST-CONV-4 pattern).
-  rmdir "$(dirname "$worktree")" 2>/dev/null || true
-
-  # Verify HEAD is on default. Per V3, the salvage path NEVER moves
-  # HEAD on the user's behalf — if the user manually checked out a
-  # different branch mid-distill, that's their state, not ours to
-  # rewrite. Log a critical-error so it surfaces in the failure
-  # notification, but don't `git checkout`.
-  local vault_head
-  vault_head="$(git -C "$vault" symbolic-ref --short HEAD 2>/dev/null || true)"
-  if [ -z "$vault_head" ]; then
-    log_error "salvage: vault HEAD is detached after agent exit; user must checkout '$DEFAULT_BRANCH' manually before next distill"
-  elif [ "$vault_head" != "$DEFAULT_BRANCH" ]; then
-    log_error "salvage: vault HEAD is '$vault_head' after agent exit (expected '$DEFAULT_BRANCH'); not rewriting per never-touch-main lockdown"
-  fi
 
   # Compose recovery hint per reason. Each hint points the user at the
   # specific recovery action that fits the failure mode — the design
@@ -620,7 +594,46 @@ salvage() {
       ;;
   esac
 
+  # Write the outcome BEFORE any worktree-removal step. Pins the
+  # function-level invariant noted above.
   write_outcome "failed:$reason" "$hint"
+
+  # Verify HEAD is on default. Per V3, the salvage path NEVER moves
+  # HEAD on the user's behalf — if the user manually checked out a
+  # different branch mid-distill, that's their state, not ours to
+  # rewrite. Log a critical-error so it surfaces in the failure
+  # notification, but don't `git checkout`.
+  local vault_head
+  vault_head="$(git -C "$vault" symbolic-ref --short HEAD 2>/dev/null || true)"
+  if [ -z "$vault_head" ]; then
+    log_error "salvage: vault HEAD is detached after agent exit; user must checkout '$DEFAULT_BRANCH' manually before next distill"
+  elif [ "$vault_head" != "$DEFAULT_BRANCH" ]; then
+    log_error "salvage: vault HEAD is '$vault_head' after agent exit (expected '$DEFAULT_BRANCH'); not rewriting per never-touch-main lockdown"
+  fi
+
+  # Force-remove worktree. Ignore errors (already gone, never created,
+  # other concurrent salvage racing).
+  if [ -d "$worktree" ]; then
+    git -C "$vault" worktree remove --force "$worktree" 2>/dev/null || true
+  fi
+  # Belt-and-braces: gitignored shim survives `worktree remove --force`.
+  # rm -rf the leaf if anything's left (POST-CONV-3 pattern). Routed
+  # through safe_rm_worktree so an upstream bug that passed a non-
+  # napkin-distill path can't escalate to `rm -rf /etc`-class damage
+  # via this code path (SEC-A-2 defense-in-depth). Pass
+  # EXPECTED_CACHE_ROOT so safe_rm_worktree's strict-mode descendant
+  # check fires (SEC-2 / CORR-3) instead of the legacy glob fallback.
+  if [ -d "$worktree" ]; then
+    safe_rm_worktree "$worktree" "$EXPECTED_CACHE_ROOT" || true
+  fi
+  # Prune any stale worktree entry whose dir is gone.
+  git -C "$vault" worktree prune 2>/dev/null || true
+  # Force-delete branch. -D because squash-merge leaves the branch
+  # marked as unmerged.
+  git -C "$vault" branch -D "$branch" 2>/dev/null || true
+  # Best-effort rmdir of the parent vault-hash dir — succeeds when
+  # this was the last distill (POST-CONV-4 pattern).
+  rmdir "$(dirname "$worktree")" 2>/dev/null || true
 }
 
 
