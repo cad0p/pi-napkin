@@ -969,7 +969,7 @@ cleanup() {
   # .napkin/distill/ shim survives `git worktree remove --force`. The
   # `[ -d ]` guard is defensive against future scenarios where the shim
   # is removed before this point. Mirrors cleanupDistillWorkspace's
-  # contract at distill-workspace.ts:572. Routed through
+  # contract in distill-workspace.ts. Routed through
   # safe_rm_worktree so an upstream bug that passed a non-napkin-distill
   # path can't escalate to `rm -rf /etc`-class damage via this code
   # path (SEC-A-2 defense-in-depth). Pass EXPECTED_CACHE_ROOT so

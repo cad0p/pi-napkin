@@ -2,8 +2,10 @@
 
 This directory holds executable bash scripts that simulate the behavior of
 `pi --session ... -p ...` (the distill agent) for integration tests in
-`agent-driven-merge.test.ts`. Each fixture covers one behavior class from
-the design's "Mocked-pi behaviors" testing plan (10 scripts).
+`agent-driven-merge.test.ts` and `wrapper-invariant.test.ts`. Each fixture
+covers either one behavior class from the design's "Mocked-pi behaviors"
+testing plan (11 scripts) or scaffolding for race-window invariants
+(2 scripts). 13 scripts total.
 
 ## Why bash stubs?
 
@@ -44,6 +46,8 @@ reads them with bash defaults (`${NAPKIN_STUB_FOO:-default}`).
 
 ## Fixture index
 
+### Behavior classes
+
 | Fixture                          | Behavior                                                                    | Expected outcome                  |
 |----------------------------------|-----------------------------------------------------------------------------|-----------------------------------|
 | `clean-distill.sh`               | commits 1 file directly on default branch                                   | `merged-content`                  |
@@ -57,6 +61,17 @@ reads them with bash defaults (`${NAPKIN_STUB_FOO:-default}`).
 | `push-fail-pull-merge-success.sh`| first push fails (origin advanced); agent recovers via pull --no-rebase     | `merged-content`                  |
 | `agent-timeout.sh`               | sleeps past `maxDurationSecs` (test passes a low budget)                    | `failed:agent-timeout`            |
 | `agent-crashes.sh`               | exits non-zero with diagnostic stderr                                       | `failed:agent-exit-nonzero`       |
+
+### Race-window scaffolding
+
+Used by `wrapper-invariant.test.ts` to widen the
+`[agent-exit, worktree-removed]` gap deterministically so the test can
+snapshot the outcome sidecar at the moment the worktree disappears.
+
+| Fixture            | Behavior                                                                  | Expected outcome                  |
+|--------------------|---------------------------------------------------------------------------|-----------------------------------|
+| `step10-race.sh`   | happy-path commit + squash, then `sleep 0.5` to widen the cleanup window  | `merged-content`                  |
+| `salvage-race.sh`  | commits with conflict markers in vault `*.md`, then `sleep 0.5`           | `failed:markers-after-agent-exit` |
 
 ## Adding a fixture
 
