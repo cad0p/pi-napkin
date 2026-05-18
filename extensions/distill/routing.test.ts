@@ -8,6 +8,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   makeFakeUI,
   makeMockExtensionAPI,
+  TIMEOUT_BIN_DIR,
   withNapkinOnPath,
 } from "./_test-helpers";
 import { resolveCacheRoot, resolveDistillErrorDir } from "./distill-workspace";
@@ -629,7 +630,11 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
     // returns empty and the missing-napkin guard fires — producing a
     // real fatal-error log we can verify the JS-side surfacing on.
     // /usr/bin:/bin doesn't contain napkin (verified during test setup).
-    process.env.PATH = "/usr/bin:/bin";
+    // Keep `TIMEOUT_BIN_DIR` so the wrapper's coreutils-timeout(1)
+    // startup check passes on macOS (where `gtimeout` lives outside
+    // /usr/bin); without it the wrapper exits 2 before reaching the
+    // missing-napkin guard this test pins (CI-A-1 startup check).
+    process.env.PATH = `${TIMEOUT_BIN_DIR}:/usr/bin:/bin`;
     vault = createEnabledGitVault(60);
     sm = createSeededSession(vault);
 

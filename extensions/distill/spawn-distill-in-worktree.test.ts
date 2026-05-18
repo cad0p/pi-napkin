@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { withNapkinOnPath } from "./_test-helpers";
+import { TIMEOUT_BIN_DIR, withNapkinOnPath } from "./_test-helpers";
 import {
   cleanupDistillWorkspace,
   type DistillWorkspace,
@@ -22,12 +22,18 @@ import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
 // lives outside /usr/bin. Prepend the test runner's own node bindir
 // (mirrors the wrapper's runtime expectation — pi-bun spawns the
 // wrapper with node on PATH).
+//
+// Also include `TIMEOUT_BIN_DIR` so the wrapper's coreutils-timeout(1)
+// startup check passes on macOS, where `gtimeout` lives in Homebrew's
+// bin dir (not /usr/bin). Without it, the wrapper exits 2 at the
+// timeout check before reaching the guards these tests intend to
+// exercise.
 const NODE_BIN_DIR = path.dirname(
   spawnSync("sh", ["-c", "command -v node"], {
     encoding: "utf-8",
   }).stdout.trim() || "/usr/bin",
 );
-const NAPKIN_STRIPPED_PATH = `${NODE_BIN_DIR}:/usr/bin:/bin`;
+const NAPKIN_STRIPPED_PATH = `${NODE_BIN_DIR}:${TIMEOUT_BIN_DIR}:/usr/bin:/bin`;
 
 // Path that has napkin reachable (via repo-local node_modules/.bin)
 // but deliberately strips the node bindir, exercising the
@@ -41,7 +47,7 @@ const NAPKIN_LOCAL_BIN = path.resolve(
   "node_modules",
   ".bin",
 );
-const NAPKIN_NODE_STRIPPED_PATH = `${NAPKIN_LOCAL_BIN}:/usr/bin:/bin`;
+const NAPKIN_NODE_STRIPPED_PATH = `${NAPKIN_LOCAL_BIN}:${TIMEOUT_BIN_DIR}:/usr/bin:/bin`;
 // Probe whether the test runner's `/usr/bin:/bin` happens to also
 // contain node (e.g. some Linux distros ship it there). When that is
 // the case the node-missing test cannot be exercised on this host;

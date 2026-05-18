@@ -17,6 +17,30 @@ import { createDistillWorkspace } from "./distill-workspace";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
 
 /**
+ * Absolute path of the directory holding `timeout(1)` (or `gtimeout`
+ * on macOS-with-Homebrew-coreutils). The wrapper hard-fails at
+ * startup if neither is reachable (CI-A-1 / CLEAN-A-1 / SEC-A-3),
+ * which means tests that deliberately strip PATH must still preserve
+ * this dir to exercise downstream guards (missing-node, missing-napkin,
+ * etc.) instead of bailing at the timeout check.
+ *
+ * On Linux, `timeout` lives in `/usr/bin` (GNU coreutils). On macOS,
+ * Homebrew installs `gtimeout` in `/opt/homebrew/bin` (Apple Silicon)
+ * or `/usr/local/bin` (Intel) — neither of which is in the typical
+ * `/usr/bin:/bin` stripped PATH. Resolving via `command -v` at module
+ * load mirrors how the wrapper itself locates the binary.
+ *
+ * Falls back to `/usr/bin` if neither is on PATH; in that case any
+ * timeout-dependent test will (correctly) fail and surface the
+ * missing-coreutils issue at its assertion rather than silently here.
+ */
+const TIMEOUT_PATH =
+  spawnSync("sh", ["-c", "command -v timeout || command -v gtimeout"], {
+    encoding: "utf-8",
+  }).stdout.trim() || "/usr/bin/timeout";
+export const TIMEOUT_BIN_DIR = path.dirname(TIMEOUT_PATH);
+
+/**
  * Augment `process.env.PATH` so the spawned wrapper can resolve `napkin`
  * via `command -v` (R7-CI-1 — the wrapper's `--version` smoke test
  * needs the binary on PATH from `node_modules/.bin/`).
