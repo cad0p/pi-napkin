@@ -23,6 +23,7 @@ import {
   cleanupDistillWorkspace,
   cleanupStaleWorktrees,
   DistillError,
+  type DistillOutcome,
   findDistillErrorLogForBranch,
   findDistillOutcomeForBranch,
   getDistillState,
@@ -84,6 +85,26 @@ export function getMaxDistillDurationMs(config?: DistillConfig): number {
   }
   return DEFAULT_MAX_DISTILL_DURATION_MS;
 }
+
+/**
+ * Repaint cadence for the human-visible idle-status countdown rendered
+ * by `renderIdleStatus`. One status repaint per second keeps the
+ * countdown smooth ("distill in 04:32" → "04:31" → "04:30") without
+ * redundant work; pi's status-bar dedupes identical strings, so a tick
+ * that produces an unchanged status is near-zero cost. Tighter cadences
+ * waste cycles on dedupes; coarser cadences make the countdown jumpy.
+ */
+const IDLE_STATUS_REPAINT_INTERVAL_MS = 1000;
+
+/**
+ * Poll cadence for `runDistillWith`'s completion watcher. Balances UI
+ * responsiveness (sub-3-second status updates when a distill finishes)
+ * against wakeup cost in idle sessions where no distill is in flight.
+ * Race-window tests use a much tighter 50 ms tick (see
+ * `wrapper-invariant.test.ts`) where they need to snapshot mid-cleanup
+ * state; production's coarser rate is intentional.
+ */
+const DISTILL_POLL_TICK_MS = 2000;
 
 /**
  * Custom entry type used to persist `/distill-auto-this-session` state into the
@@ -166,7 +187,23 @@ export function loadVaultConfig(vaultPath: string): VaultConfig {
   }
 }
 
-const DISTILL_PROMPT = `Distill this conversation into the napkin vault.
+/**
+ * LEGACY_DISTILL_PROMPT: used only by the legacy `spawnDistill` path
+ * (argv-based, pre-PR-12). The canonical agent-driven prompt lives in
+ * `distill-prompt.md` (loaded via `buildDistillPrompt` from
+ * `distill-prompt.ts`) and is the source of truth for steps 1–10 of
+ * the worktree distill.
+ *
+ * This constant duplicates roughly steps 1–5 of the canonical prompt
+ * (overview → templates → identify → search/append/create → daily
+ * note + supersedes frontmatter). Do NOT add new steps here without
+ * cross-checking distill-prompt.md — the legacy path is intentionally
+ * retained for git-less / disabled / legacy-embedded vaults that
+ * can't take the worktree spawn path, so drift between the two
+ * prompts is a hazard. Phase D / a future cleanup pass may factor
+ * the shared content into a single source.
+ */
+const LEGACY_DISTILL_PROMPT = `Distill this conversation into the napkin vault.
 
 1. \`napkin overview\` — learn the vault structure and what exists. Read \`_about.md\` files to understand what each folder is for. These are short folder descriptions (1-2 paragraphs) explaining what kinds of notes belong there — see existing ones for style.
 2. \`napkin template list\` and \`napkin template read\` — learn the note formats.
@@ -243,7 +280,7 @@ export function spawnDistill(
         piBin,
         forkedFile,
         tmpDir,
-        DISTILL_PROMPT,
+        LEGACY_DISTILL_PROMPT,
         modelStr,
       ],
       {
@@ -423,22 +460,6 @@ export default function (pi: ExtensionAPI) {
               "Auto-distill requires the subdir vault layout. See README for migration, or set distill.enabled: false in vault config.json.",
               "error",
             );
-          } else if (setup.conflict) {
-            // G7: existing `.gitattributes` already claims `*.md merge=<X>`.
-            // We refuse to scaffold so we don't silently override the
-            // user's chosen driver via last-match-wins. Explain the
-            // options clearly — auto-distill is off for this session, but
-            // manual /distill still works.
-            ctx.ui.notify(
-              [
-                `Auto-distill setup blocked: your .gitattributes already has a merge rule for *.md ('${setup.conflict.rule}').`,
-                "Auto-distill needs its own driver to handle concurrent distill merges safely. To enable:",
-                `  - Remove the conflicting rule from ${setup.conflict.file}, OR`,
-                "  - Set distill.onShutdown: false in vault config.json to disable auto-distill on shutdown",
-                "Manual /distill still works regardless.",
-              ].join("\n"),
-              "error",
-            );
           } else {
             ctx.ui.notify(
               `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
@@ -545,7 +566,7 @@ export default function (pi: ExtensionAPI) {
         // `renderIdleStatus` self-guards against in-flight distills; when off
         // it paints `distill: off (session)` (pi dedupes identical status strings).
         renderIdleStatus();
-      }, 1000);
+      }, IDLE_STATUS_REPAINT_INTERVAL_MS);
     }
 
     intervalHandle = setInterval(() => {
@@ -627,7 +648,9 @@ export default function (pi: ExtensionAPI) {
               vault: vaultInfo.contentPath,
               sessionFile,
               parentCwd: ctx.cwd,
-              prompt: DISTILL_PROMPT,
+              maxDurationSecs: Math.round(
+                getMaxDistillDurationMs(config) / 1000,
+              ),
               model: modelStr,
             });
             // Mark this size as "spawned" so if the parent re-enters shutdown
@@ -751,8 +774,8 @@ export default function (pi: ExtensionAPI) {
       /**
        * Optional probe invoked when `target` disappears AND `checkFailure`
        * returned null (no fatal error). Returns the wrapper-emitted
-       * outcome sidecar (POST-CONV-5): `{ outcomeClass, outcomePath,
-       * partialMergeLogPath }` when present, null when missing.
+       * outcome sidecar (POST-CONV-5) as a `DistillOutcome` (see
+       * `distill-workspace.ts`) when present, null when missing.
        *
        * Missing sidecar AND missing failure log = abnormal termination
        * (SIGKILL / `set -e` / disk full / race) — the runner surfaces
@@ -760,11 +783,7 @@ export default function (pi: ExtensionAPI) {
        * contract. Legacy spawn doesn't produce outcome sidecars — omit
        * or return null.
        */
-      checkOutcome?: () => {
-        outcomeClass: string;
-        outcomePath: string;
-        partialMergeLogPath: string | null;
-      } | null;
+      checkOutcome?: () => DistillOutcome | null;
     } | null;
   }
 
@@ -997,11 +1016,11 @@ export default function (pi: ExtensionAPI) {
       // Wrapper-failure check (R7-SC-3). Mirrors the timeout-surfacing
       // pattern: target disappearance is the success condition, but the
       // wrapper writes a forensic log on any non-success exit (missing
-      // napkin, pi subprocess error, merge-driver 3-strike, etc.). If a
-      // log file matching this distill's branch is present in the
-      // error dir, the run failed even though the worktree is gone.
-      // Surface the failure in the UI so the user can act on it instead
-      // of the run silently disappearing.
+      // napkin, pi subprocess error, agent timeout, post-call validation
+      // failure, etc.). If a log file matching this distill's branch is
+      // present in the error dir, the run failed even though the worktree
+      // is gone. Surface the failure in the UI so the user can act on it
+      // instead of the run silently disappearing.
       let failureLogPath: string | null = null;
       if (checkFailure) {
         try {
@@ -1046,11 +1065,7 @@ export default function (pi: ExtensionAPI) {
       // full mapping. Strategies that don't produce sidecars (legacy
       // /distill on git-less or disabled vaults) skip this entire
       // dispatch and fall through to the default info notification.
-      let outcome: {
-        outcomeClass: string;
-        outcomePath: string;
-        partialMergeLogPath: string | null;
-      } | null = null;
+      let outcome: DistillOutcome | null = null;
       if (checkOutcome) {
         try {
           outcome = checkOutcome();
@@ -1069,13 +1084,6 @@ export default function (pi: ExtensionAPI) {
           const dispatch = formatOutcomeNotification({
             outcome,
             elapsedSec: elapsed,
-            readPartialMergeLog: (p) => {
-              try {
-                return fs.readFileSync(p, "utf-8");
-              } catch {
-                return null;
-              }
-            },
           });
           level = dispatch.level;
           message = dispatch.message;
@@ -1091,7 +1099,7 @@ export default function (pi: ExtensionAPI) {
         }
         ctx.ui.notify(message, level);
       }
-    }, 2000);
+    }, DISTILL_POLL_TICK_MS);
   }
 
   function runDistill(ctx: RunCtx) {
@@ -1101,9 +1109,8 @@ export default function (pi: ExtensionAPI) {
     // back to the legacy tmpdir spawn, which has zero git side effects.
     //
     // `distill.enabled=false` means the user opted out of auto-distill's
-    // infrastructure (including `.gitattributes` rewrites). Worktree
-    // spawn calls `registerMergeDriver()` which writes git config; legacy
-    // path doesn't.
+    // infrastructure (worktree-based concurrency, scaffolded `.gitignore`,
+    // session-fork housekeeping). Legacy path bypasses all of it.
     //
     // Legacy-embedded layout (`configPath === contentPath`) forces the
     // same fallback: the worktree path silently corrupts on that layout
@@ -1117,7 +1124,8 @@ export default function (pi: ExtensionAPI) {
     // worktree isolation — two concurrent `/distill` calls on a git-less,
     // disabled, or legacy-embedded vault race on napkin writes. With
     // git + enabled + subdir layout, both manual and auto paths serialize
-    // through the merge driver.
+    // through per-distill worktrees, and the agent owns merge resolution
+    // end-to-end (PR #12).
     runDistillWith(ctx, {
       spawnFn: (args) => {
         const gitPresent = fs.existsSync(
@@ -1137,10 +1145,11 @@ export default function (pi: ExtensionAPI) {
   /**
    * Worktree-backed auto-distill path — used by the interval timer and the
    * shutdown handler (Item 8). Concurrency-safe via per-distill git
-   * worktrees: each call spawns a detached wrapper that operates on its
-   * own branch, so overlapping distills (interval + shutdown, or multiple
-   * pi sessions on the same vault) merge serially on main via the LLM
-   * merge driver.
+   * worktrees: each call spawns a detached wrapper that drives the agent
+   * to distill, merge default into its branch, squash to default, and
+   * push — so overlapping distills (interval + shutdown, or multiple pi
+   * sessions on the same vault) integrate serially through the agent's
+   * own merge resolution rather than colliding on main.
    */
   function runAutoDistill(ctx: RunCtx) {
     runDistillWith(ctx, {
@@ -1190,14 +1199,17 @@ export default function (pi: ExtensionAPI) {
 
   /**
    * Worktree spawn strategy. Creates a per-distill git worktree off the
-   * vault's default branch, runs the detached wrapper that merges back
-   * via the LLM merge driver + squash. Concurrency-safe across sessions.
+   * vault's default branch, then runs the detached wrapper that hands a
+   * full distill→merge→squash→push contract to the agent (see
+   * `distill-prompt.md` and design.md "Locked decisions"). Wrapper
+   * post-validates the agent's output (markers, commit count, HEAD) and
+   * salvages the worktree on failure. Concurrency-safe across sessions.
    *
    * Shared by `runDistill` (when git is available) and `runAutoDistill`.
    * A `DistillError` from the workspace layer (branch collision, fork
-   * failure, invalid HEAD, merge driver missing) is caught and rendered
-   * as an error status; the shared runner treats a null return as a
-   * spawn failure and skips the poll loop.
+   * failure, invalid HEAD) is caught and rendered as an error status; the
+   * shared runner treats a null return as a spawn failure and skips the
+   * poll loop.
    */
   function worktreeSpawnFn(args: {
     ctx: RunCtx;
@@ -1210,11 +1222,7 @@ export default function (pi: ExtensionAPI) {
     cleanup: () => void;
     onComplete?: (ctx: RunCtx) => void;
     checkFailure?: () => string | null;
-    checkOutcome?: () => {
-      outcomeClass: string;
-      outcomePath: string;
-      partialMergeLogPath: string | null;
-    } | null;
+    checkOutcome?: () => DistillOutcome | null;
   } | null {
     const { ctx: c, vaultContentPath, sessionFile, config } = args;
     try {
@@ -1225,7 +1233,7 @@ export default function (pi: ExtensionAPI) {
         vault: vaultContentPath,
         sessionFile,
         parentCwd: c.cwd,
-        prompt: DISTILL_PROMPT,
+        maxDurationSecs: Math.round(getMaxDistillDurationMs(config) / 1000),
         model: modelStr,
       });
       // Capture startSha so the completion handler can diff post-squash
@@ -1663,19 +1671,16 @@ export function formatOverlapNotice(overlapFiles: string[]): string {
  * dispatches to `ctx.ui.notify` / `ctx.ui.setStatus`.
  *
  * Inputs:
- *   - `outcome`: the parsed sidecar (`{ outcomeClass, partialMergeLogPath }`)
+ *   - `outcome`: the parsed sidecar (`{ outcomeClass, recoveryHint }`)
  *               or null when no sidecar exists at all (abnormal termination).
  *   - `elapsedSec`: wall-clock seconds since spawn, used in the
  *                  default success message (`merged-content`).
- *   - `readPartialMergeLog`: optional reader injected for testability.
- *                            Returns the log content as a string, or
- *                            null on read failure. Production passes
- *                            an `fs.readFileSync` wrapper.
  *
  * Outputs `{ level, message, statusKey, statusText }` per class:
  *   merged-content   → info  / "Distillation complete (Ns)"
+ *   merged-local     → warn  / "Distillation complete locally; not pushed to origin"
  *   no-content       → warn  / "Distillation ran but saved no content"
- *   partial-merge    → warn  / "Distillation: partial merge — N file(s) reverted to main; see <log>"
+ *   failed:<reason>  → error / "Distillation failed: <reason> [— <hint>]"
  *   <unknown>        → warn  / defensive class string
  *   missing sidecar  → warn  / "Distillation terminated abnormally — no outcome record"
  *
@@ -1685,12 +1690,8 @@ export function formatOverlapNotice(overlapFiles: string[]): string {
  * Exported for unit tests; production wiring lives in `runDistillWith`.
  */
 export function formatOutcomeNotification(args: {
-  outcome: {
-    outcomeClass: string;
-    partialMergeLogPath: string | null;
-  } | null;
+  outcome: Pick<DistillOutcome, "outcomeClass" | "recoveryHint"> | null;
   elapsedSec: number;
-  readPartialMergeLog?: (path: string) => string | null;
 }): {
   level: "info" | "warning" | "error";
   message: string;
@@ -1698,7 +1699,7 @@ export function formatOutcomeNotification(args: {
   statusGlyph: string;
   statusText: string;
 } {
-  const { outcome, elapsedSec, readPartialMergeLog } = args;
+  const { outcome, elapsedSec } = args;
   if (!outcome) {
     return {
       level: "warning",
@@ -1717,6 +1718,20 @@ export function formatOutcomeNotification(args: {
         statusGlyph: "✓",
         statusText: ` distill ${elapsedSec}s`,
       };
+    case "merged-local":
+      // PR #12: agent landed content on main but origin wasn't reached
+      // (push failed, network down, or origin moved and the agent gave
+      // up rather than loop indefinitely). Local main is ahead of
+      // origin/<default>. User must push manually or wait for the next
+      // distill's push to carry both forward. Surface as `warning` per
+      // the locked notification severity contract.
+      return {
+        level: "warning",
+        message: `Distillation complete locally; not pushed to origin (${elapsedSec}s)`,
+        statusKey: "warning",
+        statusGlyph: "⚠",
+        statusText: " distill: local-only",
+      };
     case "no-content":
       return {
         level: "warning",
@@ -1725,28 +1740,32 @@ export function formatOutcomeNotification(args: {
         statusGlyph: "⚠",
         statusText: " distill: no content",
       };
-    case "partial-merge": {
-      let revertedCount = 0;
-      if (outcome.partialMergeLogPath && readPartialMergeLog) {
-        const content = readPartialMergeLog(outcome.partialMergeLogPath);
-        if (content) {
-          revertedCount = content
-            .split("\n")
-            .filter((line) => /\breverted '/.test(line)).length;
-        }
+    default: {
+      // PR #12: `failed:<reason>` carries a reason code identifying
+      // which validator tripped (markers-after-agent-exit,
+      // pre-existing-markers, head-not-on-default, agent-exit-nonzero,
+      // agent-timeout, divergent-history). Surface as `error` with the
+      // reason in
+      // the message so the user can diagnose without opening the
+      // error log first.
+      //
+      // PR #12 A4: when the wrapper's salvage path emitted a recovery
+      // hint into the outcome sidecar (lines 2+), append it to the
+      // notification message so the user sees the recommended
+      // `git revert` / `git reflog` recovery action inline.
+      if (outcome.outcomeClass.startsWith("failed:")) {
+        const reason = outcome.outcomeClass.slice("failed:".length);
+        const message = outcome.recoveryHint
+          ? `Distillation failed: ${reason} — ${outcome.recoveryHint}`
+          : `Distillation failed: ${reason}`;
+        return {
+          level: "error",
+          message,
+          statusKey: "error",
+          statusGlyph: "✗",
+          statusText: ` distill: ${reason}`,
+        };
       }
-      const message = outcome.partialMergeLogPath
-        ? `Distillation: partial merge — ${revertedCount} file${revertedCount === 1 ? "" : "s"} reverted to main; see ${outcome.partialMergeLogPath}`
-        : "Distillation: partial merge — some files reverted to main";
-      return {
-        level: "warning",
-        message,
-        statusKey: "warning",
-        statusGlyph: "⚠",
-        statusText: " distill: partial",
-      };
-    }
-    default:
       return {
         level: "warning",
         message: `Distillation: unrecognised outcome '${outcome.outcomeClass}'`,
@@ -1754,6 +1773,7 @@ export function formatOutcomeNotification(args: {
         statusGlyph: "⚠",
         statusText: " distill: unknown outcome",
       };
+    }
   }
 }
 

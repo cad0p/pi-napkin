@@ -14,7 +14,6 @@ import {
   DISTILL_SUBDIR,
   DistillError,
   type DistillMeta,
-  diffWorktreeSinceStart,
   generateDistillBranchName,
   getActiveDistills,
   getDistillState,
@@ -301,76 +300,6 @@ describe("createDistillWorktree", () => {
       );
     } finally {
       removeDistillWorktree(vault, wt1, branch);
-    }
-  });
-
-  test("registered merge driver path is shell-quoted (space-safe) (SEC-2+C4)", () => {
-    // The driver path is stored as part of a shell command string that git
-    // runs via sh -c when the merge fires. If the path contains a space or
-    // shell metacharacter and isn't quoted, sh word-splits it and driver
-    // invocation fails. Also: an attacker-controlled path prefix could
-    // inject arguments. Fix: wrap the path in single quotes.
-    const branch = generateDistillBranchName();
-    const wt = path.join(vault, "test-worktrees", "wt-quoted");
-    createDistillWorktree(vault, branch, wt);
-    try {
-      const cfg = spawnSync(
-        "git",
-        ["-C", wt, "config", "--get", "merge.napkin-distill-merge.driver"],
-        { encoding: "utf-8" },
-      ).stdout.trim();
-      // The path is single-quoted and ends with ' before the git
-      // placeholder arguments.
-      expect(cfg.startsWith("'")).toBe(true);
-      expect(cfg).toMatch(/' %O %A %B %P$/);
-    } finally {
-      removeDistillWorktree(vault, wt, branch);
-    }
-  });
-
-  test("merge driver works when vault path contains a space (SEC-2+C4)", () => {
-    // Real integration check: create a vault inside a parent dir whose
-    // name contains a space and verify createDistillWorktree succeeds.
-    // Pre-fix, `git config merge....driver` would have stored the path
-    // unquoted; a subsequent merge would split on the space.
-    //
-    // We stop at worktree creation + config readback (no actual merge run)
-    // to keep the test hermetic — the merge pipeline has its own
-    // coverage in spawn-distill-in-worktree.test.ts.
-    const parent = fs.mkdtempSync(path.join(os.tmpdir(), "space path parent-"));
-    const spacedVault = path.join(parent, "vault with space");
-    fs.mkdirSync(spacedVault);
-    const env = {
-      ...process.env,
-      GIT_AUTHOR_NAME: "test",
-      GIT_AUTHOR_EMAIL: "t@e",
-      GIT_COMMITTER_NAME: "test",
-      GIT_COMMITTER_EMAIL: "t@e",
-    };
-    const run = (args: string[], cwd = spacedVault) => {
-      const r = spawnSync("git", args, { cwd, env, encoding: "utf-8" });
-      if (r.status !== 0) {
-        throw new Error(
-          `git ${args.join(" ")} failed: ${r.stderr || r.stdout}`,
-        );
-      }
-    };
-    try {
-      run(["init", "-q", "-b", "main"]);
-      run(["config", "commit.gpgsign", "false"]);
-      fs.writeFileSync(path.join(spacedVault, "seed.md"), "# seed\n");
-      run(["add", "-A"]);
-      run(["commit", "-q", "-m", "seed"]);
-
-      const branch = generateDistillBranchName();
-      const wt = path.join(spacedVault, "test-worktrees", "wt-spaced");
-      // Should not throw even though the driver path on this box may
-      // contain spaces further up the tree.
-      createDistillWorktree(spacedVault, branch, wt);
-      expect(fs.existsSync(wt)).toBe(true);
-      removeDistillWorktree(spacedVault, wt, branch);
-    } finally {
-      fs.rmSync(parent, { recursive: true, force: true });
     }
   });
 });
@@ -1331,93 +1260,5 @@ describe("R2-4: getActiveDistills skips branch listing", () => {
     } finally {
       cleanupDistillWorkspace(vault, w);
     }
-  });
-});
-
-describe("diffWorktreeSinceStart", () => {
-  let vault: string;
-  let sessionDir: string;
-  let sourceSession: string;
-
-  beforeEach(() => {
-    vault = createGitVault();
-    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "diff-src-"));
-    sourceSession = createSeededSessionFile(sessionDir, sessionDir);
-  });
-
-  afterEach(() => {
-    fs.rmSync(sessionDir, { recursive: true, force: true });
-    fs.rmSync(vault, { recursive: true, force: true });
-  });
-
-  test("empty worktree (no changes since startSha) returns []", () => {
-    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
-    try {
-      const meta = readDistillMeta(w.worktreePath);
-      expect(
-        diffWorktreeSinceStart({
-          worktreePath: w.worktreePath,
-          startSha: meta?.startSha,
-        }),
-      ).toEqual([]);
-    } finally {
-      cleanupDistillWorkspace(vault, w);
-    }
-  });
-
-  test("committed change shows up after startSha", () => {
-    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
-    try {
-      // Write + commit a new file inside the worktree.
-      const newFile = path.join(w.worktreePath, "distilled.md");
-      fs.writeFileSync(newFile, "# new\n");
-      const env = {
-        ...process.env,
-        GIT_AUTHOR_NAME: "test",
-        GIT_AUTHOR_EMAIL: "test@example.com",
-        GIT_COMMITTER_NAME: "test",
-        GIT_COMMITTER_EMAIL: "test@example.com",
-      };
-      spawnSync("git", ["-C", w.worktreePath, "add", "distilled.md"], { env });
-      spawnSync(
-        "git",
-        ["-C", w.worktreePath, "commit", "-m", "add distilled.md"],
-        { env },
-      );
-
-      const meta = readDistillMeta(w.worktreePath);
-      const changed = diffWorktreeSinceStart({
-        worktreePath: w.worktreePath,
-        startSha: meta?.startSha,
-      });
-      expect(changed).toContain("distilled.md");
-    } finally {
-      cleanupDistillWorkspace(vault, w);
-    }
-  });
-
-  test("legacy meta (no startSha) falls back to status --porcelain", () => {
-    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
-    try {
-      // Uncommitted change — status picks it up.
-      fs.writeFileSync(path.join(w.worktreePath, "scratch.md"), "# scratch\n");
-
-      const changed = diffWorktreeSinceStart({
-        worktreePath: w.worktreePath,
-        startSha: undefined,
-      });
-      expect(changed).toContain("scratch.md");
-    } finally {
-      cleanupDistillWorkspace(vault, w);
-    }
-  });
-
-  test("returns [] for missing worktree path", () => {
-    expect(
-      diffWorktreeSinceStart({
-        worktreePath: "/tmp/does-not-exist",
-        startSha: "abc1234",
-      }),
-    ).toEqual([]);
   });
 });

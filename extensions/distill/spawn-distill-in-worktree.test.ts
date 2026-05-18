@@ -7,9 +7,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { withNapkinOnPath } from "./_test-helpers";
+import { TIMEOUT_BIN_DIR, withNapkinOnPath } from "./_test-helpers";
 import {
-  buildWorktreeDistillPrompt,
   cleanupDistillWorkspace,
   type DistillWorkspace,
   spawnDistillInWorktree,
@@ -23,12 +22,18 @@ import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
 // lives outside /usr/bin. Prepend the test runner's own node bindir
 // (mirrors the wrapper's runtime expectation — pi-bun spawns the
 // wrapper with node on PATH).
+//
+// Also include `TIMEOUT_BIN_DIR` so the wrapper's coreutils-timeout(1)
+// startup check passes on macOS, where `gtimeout` lives in Homebrew's
+// bin dir (not /usr/bin). Without it, the wrapper exits 2 at the
+// timeout check before reaching the guards these tests intend to
+// exercise.
 const NODE_BIN_DIR = path.dirname(
   spawnSync("sh", ["-c", "command -v node"], {
     encoding: "utf-8",
   }).stdout.trim() || "/usr/bin",
 );
-const NAPKIN_STRIPPED_PATH = `${NODE_BIN_DIR}:/usr/bin:/bin`;
+const NAPKIN_STRIPPED_PATH = `${NODE_BIN_DIR}:${TIMEOUT_BIN_DIR}:/usr/bin:/bin`;
 
 // Path that has napkin reachable (via repo-local node_modules/.bin)
 // but deliberately strips the node bindir, exercising the
@@ -42,7 +47,7 @@ const NAPKIN_LOCAL_BIN = path.resolve(
   "node_modules",
   ".bin",
 );
-const NAPKIN_NODE_STRIPPED_PATH = `${NAPKIN_LOCAL_BIN}:/usr/bin:/bin`;
+const NAPKIN_NODE_STRIPPED_PATH = `${NAPKIN_LOCAL_BIN}:${TIMEOUT_BIN_DIR}:/usr/bin:/bin`;
 // Probe whether the test runner's `/usr/bin:/bin` happens to also
 // contain node (e.g. some Linux distros ship it there). When that is
 // the case the node-missing test cannot be exercised on this host;
@@ -107,15 +112,6 @@ function createGitVault(opts: { seedMd?: string } = {}): string {
   fs.writeFileSync(
     path.join(dir, "seed.md"),
     opts.seedMd ?? "---\ntitle: seed\n---\n# seed\n",
-  );
-  // Pre-scaffold the merge-driver .gitattributes rule. Mirrors what Phase C
-  // auto-init will do so `registerMergeDriver` becomes a no-op in tests — if
-  // we didn't do this, the first distill would always commit a .gitattributes
-  // change on top of any content changes, polluting test expectations and
-  // causing cross-distill merge conflicts on .gitattributes.
-  fs.writeFileSync(
-    path.join(dir, ".gitattributes"),
-    "*.md merge=napkin-distill-merge\n",
   );
   // Pre-scaffold the `.gitignore` rule that Phase C auto-setup writes at
   // session_start. Needed for the wrapper's `git add -A` step: without
@@ -212,7 +208,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
       vault,
       sessionFile,
       parentCwd,
-      prompt: "test prompt",
+      maxDurationSecs: 600,
       spawnFn,
     });
     workspaces.push(result.workspace);
@@ -221,18 +217,35 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     const call = calls[0];
     expect(call.command).toBe("bash");
 
-    // Args: [wrapper, vault, worktree, branch, sessionFork, prompt, errorDir, model, defaultBranch, parentCwd]
+    // Args (PR #12 A2): [wrapper, vault, worktree, branch, sessionFork,
+    //   prompt, errorDir, model, defaultBranch, parentCwd, maxDurationSecs]
     expect(call.args[0]).toBe(DISTILL_WRAPPER_SCRIPT);
     expect(call.args[1]).toBe(vault);
     expect(call.args[2]).toBe(result.workspace.worktreePath);
     expect(call.args[3]).toBe(result.workspace.branchName);
     expect(call.args[4]).toBe(result.workspace.sessionForkPath);
-    // Prompt is wrapped with the worktree-isolation prefix; assert the
-    // prefix is present and the base prompt follows. POST-R6-CACHE.
+    // Prompt is now built internally via buildDistillPrompt against the
+    // shipped distill-prompt.md template. It must contain the worktree-
+    // isolation cwd contract (POST-R6-CACHE; CLEAN-A-2/CLEAN-A-3 prompt
+    // rewrite) AND the agent-driven step markers for steps 7–9
+    // (merge / squash / push) with the four template placeholders
+    // substituted to real values. Worktree cleanup is owned by the
+    // wrapper, not the agent, so the prompt has 9 steps, not 10.
     expect(call.args[5]).toContain(
-      `isolated git worktree at ${result.workspace.worktreePath}`,
+      `git worktree at ${result.workspace.worktreePath}`,
     );
-    expect(call.args[5].endsWith("test prompt")).toBe(true);
+    expect(call.args[5]).toContain(`git -C ${result.workspace.worktreePath}`);
+    expect(call.args[5]).toContain(result.workspace.branchName);
+    expect(call.args[5]).toContain(vault);
+    // Steps 1–9 markers (line-start `<n>.`).
+    for (let n = 1; n <= 9; n++) {
+      expect(call.args[5]).toMatch(new RegExp(`^${n}\\.`, "m"));
+    }
+    // No leftover unresolved placeholders.
+    expect(call.args[5]).not.toContain("{{worktreePath}}");
+    expect(call.args[5]).not.toContain("{{vaultPath}}");
+    expect(call.args[5]).not.toContain("{{branchName}}");
+    expect(call.args[5]).not.toContain("{{defaultBranch}}");
     // errorDir lives under Napkin's configPath — may be either `<vault>/.napkin`
     // (content layout) or `~/.napkin` (legacy). Just assert it ends with
     // `distill/errors`.
@@ -245,6 +258,9 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     // POST-R6-CACHE: parentCwd flows through as positional arg [9] so the
     // wrapper can `cd` there before running pi (preserves prompt-cache hits).
     expect(call.args[9]).toBe(parentCwd);
+    // PR #12 A2: maxDurationSecs flows through as positional arg [10] so the
+    // wrapper can `timeout(1)` the agent task.
+    expect(call.args[10]).toBe("600");
   });
 
   test("sets detached, stdio:ignore, and NAPKIN_DISTILL_NO_RECURSE", () => {
@@ -254,7 +270,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
       vault,
       sessionFile,
       parentCwd,
-      prompt: "p",
+      maxDurationSecs: 600,
       spawnFn,
     });
     workspaces.push(result.workspace);
@@ -275,7 +291,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
       vault,
       sessionFile,
       parentCwd: sessionDir,
-      prompt: "p",
+      maxDurationSecs: 600,
       model: "anthropic/claude-sonnet-4-5",
       spawnFn,
     });
@@ -290,7 +306,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
       vault,
       sessionFile,
       parentCwd: sessionDir,
-      prompt: "p",
+      maxDurationSecs: 600,
       spawnFn,
     });
     workspaces.push(result.workspace);
@@ -306,7 +322,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
       vault,
       sessionFile,
       parentCwd: sessionDir,
-      prompt: "p",
+      maxDurationSecs: 600,
       spawnFn,
     });
     workspaces.push(result.workspace);
@@ -314,30 +330,6 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     expect(result.workspace.branchName).toMatch(/^distill\/[0-9a-f]{6}-\d+$/);
     expect(result.pid).toBe(12345);
     expect(fs.existsSync(result.workspace.worktreePath)).toBe(true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// buildWorktreeDistillPrompt — POST-R6-CACHE worktree-isolation prefix.
-// ---------------------------------------------------------------------------
-
-describe("buildWorktreeDistillPrompt (POST-R6-CACHE)", () => {
-  test("prepends a worktree-isolation prefix that names the worktree path", () => {
-    const wt = "/tmp/example-worktree-abc/123";
-    const out = buildWorktreeDistillPrompt(wt, "BASE PROMPT");
-    expect(out).toContain(`isolated git worktree at ${wt}`);
-    expect(out).toContain(
-      "Do NOT use absolute paths from the conversation history",
-    );
-    // Base prompt is preserved verbatim at the end.
-    expect(out.endsWith("BASE PROMPT")).toBe(true);
-  });
-
-  test("prefix is non-trivial in length so the agent can't miss it", () => {
-    const out = buildWorktreeDistillPrompt("/tmp/wt", "x");
-    // Base prompt is 1 char; everything else is the prefix. Length floor
-    // catches accidental degeneration of the prefix to a one-liner.
-    expect(out.length).toBeGreaterThan(200);
   });
 });
 
@@ -367,234 +359,6 @@ describe("distill-wrapper.sh (integration)", () => {
     if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
-  });
-
-  /**
-   * Run the wrapper synchronously using the workspace handle. Returns
-   * { exitCode, stderr }.
-   *
-   * We use `NAPKIN_DISTILL_SKIP_PI=1` to bypass the pi call; the caller
-   * pre-stages any file changes they want to simulate.
-   */
-  function runWrapper(
-    workspace: DistillWorkspace,
-    extraEnv: Record<string, string> = {},
-  ): { exitCode: number; stderr: string } {
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    fs.mkdirSync(errorDir, { recursive: true });
-    const r = spawnSync(
-      "bash",
-      [
-        DISTILL_WRAPPER_SCRIPT,
-        vault,
-        workspace.worktreePath,
-        workspace.branchName,
-        workspace.sessionForkPath,
-        "test prompt",
-        errorDir,
-        "",
-        "main",
-        vault,
-      ],
-      {
-        cwd: workspace.worktreePath,
-        encoding: "utf-8",
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "test",
-          GIT_AUTHOR_EMAIL: "test@example.com",
-          GIT_COMMITTER_NAME: "test",
-          GIT_COMMITTER_EMAIL: "test@example.com",
-          NAPKIN_DISTILL_NO_RECURSE: "1",
-          NAPKIN_DISTILL_SKIP_PI: "1",
-          ...extraEnv,
-        },
-      },
-    );
-    return { exitCode: r.status ?? -1, stderr: r.stderr ?? "" };
-  }
-
-  /**
-   * Create a workspace and stage a new markdown file in it so the wrapper's
-   * `git add -A` has something to commit. Returns the workspace and the
-   * absolute path to the staged file.
-   */
-  function createWorkspaceWithChanges(
-    filename: string,
-    content: string,
-  ): { workspace: DistillWorkspace; stagedFile: string } {
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
-    const stagedFile = path.join(workspace.worktreePath, filename);
-    fs.writeFileSync(stagedFile, content);
-    return { workspace, stagedFile };
-  }
-
-  test("happy path: commits distill changes and squash-merges to main", () => {
-    const { workspace } = createWorkspaceWithChanges(
-      "note.md",
-      "---\ntitle: new\n---\n# new note\n",
-    );
-    const branch = workspace.branchName;
-
-    const r = runWrapper(workspace);
-    expect(r.exitCode).toBe(0);
-
-    // Worktree and branch cleaned up.
-    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
-    const branches = spawnSync("git", ["-C", vault, "branch"], {
-      encoding: "utf-8",
-    }).stdout;
-    expect(branches).not.toContain(branch);
-
-    // main has a new squash commit with our file.
-    const log = spawnSync("git", ["-C", vault, "log", "--oneline", "-n", "5"], {
-      encoding: "utf-8",
-    }).stdout;
-    expect(log).toContain("distill: merge");
-
-    // The note.md should be on main now.
-    const mainFile = path.join(vault, "note.md");
-    expect(fs.existsSync(mainFile)).toBe(true);
-    expect(fs.readFileSync(mainFile, "utf-8")).toContain("# new note");
-
-    // POST-CONV-5: outcome sidecar records `merged-content`.
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    const branchShort = branch.replace(/^distill\//, "");
-    const outcomeFiles = fs
-      .readdirSync(errorDir)
-      .filter((f) => f.endsWith(`-${branchShort}.outcome`));
-    expect(outcomeFiles).toHaveLength(1);
-    expect(
-      fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
-    ).toBe("merged-content");
-  });
-
-  test("empty distill (no changes): exits 0 and cleans up without creating a commit", () => {
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
-    const branch = workspace.branchName;
-    const logBefore = spawnSync("git", ["-C", vault, "log", "--oneline"], {
-      encoding: "utf-8",
-    }).stdout;
-
-    const r = runWrapper(workspace);
-    expect(r.exitCode).toBe(0);
-
-    // Cleanup happened.
-    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
-    const branches = spawnSync("git", ["-C", vault, "branch"], {
-      encoding: "utf-8",
-    }).stdout;
-    expect(branches).not.toContain(branch);
-
-    // No new commits on main.
-    const logAfter = spawnSync("git", ["-C", vault, "log", "--oneline"], {
-      encoding: "utf-8",
-    }).stdout;
-    expect(logAfter).toBe(logBefore);
-
-    // POST-CONV-5: outcome sidecar records `no-content`.
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    const branchShort = branch.replace(/^distill\//, "");
-    const outcomeFiles = fs
-      .readdirSync(errorDir)
-      .filter((f) => f.endsWith(`-${branchShort}.outcome`));
-    expect(outcomeFiles).toHaveLength(1);
-    expect(
-      fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
-    ).toBe("no-content");
-  });
-
-  test("POST-CONV-1: pi-self-committed content squashes to main (no silent drop)", () => {
-    // Regression for the dropped-distill-commit `a13e8b1` failure mode:
-    // pi's bash tool ran `git commit` itself, leaving the worktree clean
-    // post-`add -A` because pi already advanced HEAD. The legacy
-    // `git diff --cached --quiet` check reported false-no-op and the
-    // wrapper exited 0 before the squash phase, then the cleanup trap
-    // force-deleted the branch. The new `git diff --quiet $START_SHA`
-    // check catches both the staged-only and pi-committed cases.
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
-    const branch = workspace.branchName;
-
-    // Simulate pi self-committing inside the worktree.
-    const stagedFile = path.join(workspace.worktreePath, "selfcommit.md");
-    fs.writeFileSync(
-      stagedFile,
-      "---\ntitle: self\n---\n# pi self-committed this\n",
-    );
-    const stage = spawnSync(
-      "git",
-      ["-C", workspace.worktreePath, "add", "-A"],
-      { encoding: "utf-8" },
-    );
-    expect(stage.status).toBe(0);
-    const commit = spawnSync(
-      "git",
-      [
-        "-C",
-        workspace.worktreePath,
-        "-c",
-        "user.name=pi",
-        "-c",
-        "user.email=pi@example.com",
-        "-c",
-        "commit.gpgsign=false",
-        "commit",
-        "-m",
-        "pi self-commit",
-      ],
-      { encoding: "utf-8" },
-    );
-    expect(commit.status).toBe(0);
-
-    const r = runWrapper(workspace);
-    expect(r.exitCode).toBe(0);
-
-    // Worktree and branch cleaned up.
-    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
-    const branches = spawnSync("git", ["-C", vault, "branch"], {
-      encoding: "utf-8",
-    }).stdout;
-    expect(branches).not.toContain(branch);
-
-    // main has the squash commit + pi's file content.
-    const log = spawnSync("git", ["-C", vault, "log", "--oneline", "-n", "5"], {
-      encoding: "utf-8",
-    }).stdout;
-    expect(log).toContain("distill: merge");
-    const mainFile = path.join(vault, "selfcommit.md");
-    expect(fs.existsSync(mainFile)).toBe(true);
-    expect(fs.readFileSync(mainFile, "utf-8")).toContain(
-      "# pi self-committed this",
-    );
-
-    // POST-CONV-5: outcome sidecar records `merged-content` even though
-    // the wrapper did not run its own `git commit` step.
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    const branchShort = branch.replace(/^distill\//, "");
-    const outcomeFiles = fs
-      .readdirSync(errorDir)
-      .filter((f) => f.endsWith(`-${branchShort}.outcome`));
-    expect(outcomeFiles).toHaveLength(1);
-    expect(
-      fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
-    ).toBe("merged-content");
-  });
-
-  test("concurrent worktrees don't interfere (both complete)", () => {
-    // Two workspaces with disjoint content — both should land on main.
-    const a = createWorkspaceWithChanges("a.md", "---\ntitle: a\n---\n# a\n");
-    const b = createWorkspaceWithChanges("b.md", "---\ntitle: b\n---\n# b\n");
-
-    const rA = runWrapper(a.workspace);
-    expect(rA.exitCode).toBe(0);
-    const rB = runWrapper(b.workspace);
-    expect(rB.exitCode).toBe(0);
-
-    expect(fs.existsSync(path.join(vault, "a.md"))).toBe(true);
-    expect(fs.existsSync(path.join(vault, "b.md"))).toBe(true);
   });
 
   test("missing required arg: exits 2 without cleanup errors", () => {
@@ -630,6 +394,37 @@ describe("distill-wrapper.sh (integration)", () => {
     );
     expect(r.status).toBe(2);
     expect(r.stderr).toContain("missing required argument 9 (parentCwd)");
+  });
+
+  test("missing maxDurationSecs (arg 10) hard-fails with exit 2", () => {
+    // The JS side always passes a value derived from
+    // distill.maxDurationMinutes; making the wrapper hard-fail when arg
+    // 10 is empty keeps the timeout(1) budget single-sourced JS-side
+    // and surfaces any out-of-tree caller skipping the budget loud
+    // and early.
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "bash",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        "/tmp/wt",
+        "distill/abc-1",
+        "/tmp/session.jsonl",
+        "prompt",
+        errorDir,
+        "",
+        "main",
+        vault, // parentCwd (arg 9) provided so we reach the arg-10 check.
+        // 10th arg deliberately omitted — expect exit 2.
+      ],
+      { encoding: "utf-8" },
+    );
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain(
+      "missing required argument 10 (maxDurationSecs)",
+    );
   });
 
   test("wrapper rewrites meta.json pid to its own pid (C2)", () => {
@@ -672,6 +467,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         vault,
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: workspace.worktreePath,
@@ -743,6 +540,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         sessionDir, // parentCwd
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: sessionDir,
@@ -831,6 +630,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         sessionDir,
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: sessionDir,
@@ -905,6 +706,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         sessionDir,
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: sessionDir,
@@ -927,9 +730,7 @@ describe("distill-wrapper.sh (integration)", () => {
     );
     expect(r.status).toBe(1);
 
-    const errors = fs
-      .readdirSync(errorDir)
-      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+    const errors = fs.readdirSync(errorDir).filter((f) => f.endsWith(".log"));
     expect(errors.length).toBeGreaterThan(0);
     const errorContent = errors
       .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
@@ -972,6 +773,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         sessionDir, // parentCwd
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: sessionDir,
@@ -1051,6 +854,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         vault,
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: workspace.worktreePath,
@@ -1059,8 +864,6 @@ describe("distill-wrapper.sh (integration)", () => {
           ...process.env,
           NAPKIN_DISTILL_NO_RECURSE: "1",
           NAPKIN_DISTILL_SKIP_PI: "1",
-          NAPKIN_GIT_RETRY_MAX: "2",
-          NAPKIN_GIT_RETRY_DELAY: "0",
         },
       },
     );
@@ -1069,753 +872,13 @@ describe("distill-wrapper.sh (integration)", () => {
     // Diagnostic landed in the error log file (not just stderr).
     const errorEntries = fs
       .readdirSync(errorDir)
-      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+      .filter((f) => f.endsWith(".log"));
     expect(errorEntries.length).toBeGreaterThan(0);
     const combined = errorEntries
       .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
       .join("\n");
     expect(combined).toContain("meta.json missing startSha");
     expect(combined).toContain("refusing to proceed");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Partial-merge salvage tests. Forces a conflict between main and the distill
-// branch, stubs the merge driver via NAPKIN_DISTILL_MERGE_MOCK=fail so the
-// LLM path always 3-strikes, then verifies that:
-//   - clean files keep the distill's content
-//   - conflicted files revert to main's version
-//   - error log is written with file path + reason
-//   - main still receives a squash commit with the clean-file change
-//
-// Note: the wrapper self-heals .gitattributes via registerMergeDriver. The
-// vault fixture pre-scaffolds the same line so config drift doesn't affect
-// these assertions.
-// ---------------------------------------------------------------------------
-
-describe("distill-wrapper.sh (partial-merge salvage)", () => {
-  let vault: string;
-  let sessionDir: string;
-  let sessionFile: string;
-  let xdgCacheDir: string;
-  let _savedXdgCache: string | undefined;
-
-  beforeEach(() => {
-    _savedXdgCache = process.env.XDG_CACHE_HOME;
-    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-salvage-xdg-"));
-    process.env.XDG_CACHE_HOME = xdgCacheDir;
-    vault = createGitVault();
-    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-salvage-src-"));
-    sessionFile = createSeededSessionFile(sessionDir, sessionDir);
-  });
-
-  afterEach(() => {
-    fs.rmSync(sessionDir, { recursive: true, force: true });
-    fs.rmSync(vault, { recursive: true, force: true });
-    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
-    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
-    else process.env.XDG_CACHE_HOME = _savedXdgCache;
-  });
-
-  /**
-   * Run a git command in `dir`, throwing on non-zero exit. Used to build
-   * conflict-inducing state on the vault's main branch before invoking the
-   * wrapper.
-   */
-  function runGitOrThrow(dir: string, args: string[]): string {
-    const env = {
-      ...process.env,
-      GIT_AUTHOR_NAME: "test",
-      GIT_AUTHOR_EMAIL: "test@example.com",
-      GIT_COMMITTER_NAME: "test",
-      GIT_COMMITTER_EMAIL: "test@example.com",
-    };
-    const r = spawnSync("git", ["-C", dir, ...args], {
-      env,
-      encoding: "utf-8",
-    });
-    if (r.status !== 0) {
-      throw new Error(`git ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
-    }
-    return r.stdout;
-  }
-
-  /**
-   * Run the wrapper with the merge driver mocked to always fail. Pre-stages
-   * the given files in the worktree before invoking. Returns exit code +
-   * error log contents (read post-run from the vault's error dir).
-   */
-  function runWrapperWithMockFail(
-    workspace: DistillWorkspace,
-    worktreeFiles: Record<string, string>,
-  ): { exitCode: number; errorLogs: string[] } {
-    for (const [relPath, content] of Object.entries(worktreeFiles)) {
-      const abs = path.join(workspace.worktreePath, relPath);
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, content);
-    }
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    fs.mkdirSync(errorDir, { recursive: true });
-    const r = spawnSync(
-      "bash",
-      [
-        DISTILL_WRAPPER_SCRIPT,
-        vault,
-        workspace.worktreePath,
-        workspace.branchName,
-        workspace.sessionForkPath,
-        "test prompt",
-        errorDir,
-        "",
-        "main",
-        vault,
-      ],
-      {
-        cwd: workspace.worktreePath,
-        encoding: "utf-8",
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "test",
-          GIT_AUTHOR_EMAIL: "test@example.com",
-          GIT_COMMITTER_NAME: "test",
-          GIT_COMMITTER_EMAIL: "test@example.com",
-          NAPKIN_DISTILL_NO_RECURSE: "1",
-          NAPKIN_DISTILL_SKIP_PI: "1",
-          NAPKIN_DISTILL_MERGE_MOCK: "fail",
-          // Speed up tests: no retry backoff.
-          NAPKIN_GIT_RETRY_MAX: "2",
-          NAPKIN_GIT_RETRY_DELAY: "0",
-        },
-      },
-    );
-    const errorLogs: string[] = [];
-    if (fs.existsSync(errorDir)) {
-      for (const f of fs.readdirSync(errorDir)) {
-        // Skip the `.outcome` sidecar (POST-CONV-5) — not a log; tests
-        // assert outcome separately. Skip `.merge-driver*` files
-        // (R12-SC-1: driver now co-locates its forensic log + 3-strike
-        // snapshots here too). Keep both `.log` (fatal) and
-        // `.partial-merge.log` (R8-CC-1 forensic) — partial-merge tests
-        // below assert content of the latter.
-        if (f.endsWith(".outcome")) continue;
-        if (f.includes(".merge-driver")) continue;
-        errorLogs.push(fs.readFileSync(path.join(errorDir, f), "utf-8"));
-      }
-    }
-    return { exitCode: r.status ?? -1, errorLogs };
-  }
-
-  test("clean file keeps distill's content, conflicted file reverts to main", () => {
-    // Baseline: main already has `conflict.md` and `clean.md` from the seed
-    // commit. Mutate `conflict.md` on main so the distill's version
-    // conflicts; leave `clean.md` untouched on main.
-    const conflictPath = path.join(vault, "conflict.md");
-    const cleanPath = path.join(vault, "clean.md");
-    fs.writeFileSync(
-      conflictPath,
-      "---\ntitle: conflict\n---\n# initial content\n",
-    );
-    fs.writeFileSync(
-      cleanPath,
-      "---\ntitle: clean\n---\n# initial clean content\n",
-    );
-    runGitOrThrow(vault, ["add", "-A"]);
-    runGitOrThrow(vault, ["commit", "-q", "-m", "add baseline files"]);
-
-    // Create workspace AFTER the baseline commit so the worktree sees both
-    // files. Then mutate main's copy of conflict.md to force a divergence.
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace: DistillWorkspace = createDistillWorkspace(
-      vault,
-      sessionFile,
-      sessionDir,
-    );
-
-    fs.writeFileSync(
-      conflictPath,
-      "---\ntitle: conflict\n---\n# MAIN's version after baseline\n",
-    );
-    runGitOrThrow(vault, ["add", "conflict.md"]);
-    runGitOrThrow(vault, ["commit", "-q", "-m", "main mutates conflict.md"]);
-
-    // Stage distill-branch changes in the worktree:
-    //   - conflict.md: different content → merge conflict
-    //   - clean.md:    modified, no conflict on main → clean merge
-    const r = runWrapperWithMockFail(workspace, {
-      "conflict.md":
-        "---\ntitle: conflict\n---\n# DISTILL's different version\n",
-      "clean.md": "---\ntitle: clean\n---\n# distill updated the clean file\n",
-    });
-
-    expect(r.exitCode).toBe(0);
-
-    // Worktree + branch cleaned up.
-    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
-    const branches = runGitOrThrow(vault, ["branch"]);
-    expect(branches).not.toContain(workspace.branchName);
-
-    // conflict.md on main = MAIN's version (salvage reverted distill's).
-    const conflictAfter = fs.readFileSync(conflictPath, "utf-8");
-    expect(conflictAfter).toContain("MAIN's version after baseline");
-    expect(conflictAfter).not.toContain("DISTILL's different version");
-
-    // clean.md on main = distill's version (merged cleanly).
-    const cleanAfter = fs.readFileSync(cleanPath, "utf-8");
-    expect(cleanAfter).toContain("distill updated the clean file");
-
-    // Error log written with the conflicted file path + reason.
-    expect(r.errorLogs.length).toBeGreaterThan(0);
-    const combined = r.errorLogs.join("\n");
-    expect(combined).toContain("conflict.md");
-    expect(combined).toContain("partial-merge");
-
-    // Main has a squash commit.
-    const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "5"]);
-    expect(log).toContain("distill: merge");
-
-    // POST-CONV-5: outcome sidecar records `partial-merge` (squash
-    // landed on main, but some files reverted to default-branch's copy).
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    const branchShort = workspace.branchName.replace(/^distill\//, "");
-    const outcomeFiles = fs
-      .readdirSync(errorDir)
-      .filter((f) => f.endsWith(`-${branchShort}.outcome`));
-    expect(outcomeFiles).toHaveLength(1);
-    expect(
-      fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
-    ).toBe("partial-merge");
-  });
-
-  test("all files conflict: salvage reverts everything, no squash commit created", () => {
-    // Both distill's files collide with main, AND there are no clean files
-    // — the squash merge produces nothing new, so main should NOT get a
-    // distill commit. This verifies the empty-squash guard survives the
-    // salvage path.
-    const a = path.join(vault, "a.md");
-    fs.writeFileSync(a, "---\ntitle: a\n---\n# baseline\n");
-    runGitOrThrow(vault, ["add", "a.md"]);
-    runGitOrThrow(vault, ["commit", "-q", "-m", "add a"]);
-
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace: DistillWorkspace = createDistillWorkspace(
-      vault,
-      sessionFile,
-      sessionDir,
-    );
-
-    fs.writeFileSync(a, "---\ntitle: a\n---\n# MAIN's later version\n");
-    runGitOrThrow(vault, ["add", "a.md"]);
-    runGitOrThrow(vault, ["commit", "-q", "-m", "main mutates a"]);
-
-    const logBefore = runGitOrThrow(vault, ["log", "--oneline"]);
-
-    const r = runWrapperWithMockFail(workspace, {
-      "a.md": "---\ntitle: a\n---\n# DISTILL's different version\n",
-    });
-    expect(r.exitCode).toBe(0);
-
-    // Cleanup happened.
-    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
-
-    // Main unchanged: no new squash commit because all content was salvaged
-    // back to main's version.
-    const logAfter = runGitOrThrow(vault, ["log", "--oneline"]);
-    expect(logAfter).toBe(logBefore);
-
-    // Error log records the salvage.
-    expect(r.errorLogs.length).toBeGreaterThan(0);
-    expect(r.errorLogs.join("\n")).toContain("a.md");
-
-    // POST-CONV-5: outcome sidecar records `no-content` because the
-    // squash produced no staged changes on main (all files reverted to
-    // main's existing version). Even though the inner merge ran the
-    // salvage path, no distill content reached main this round.
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    const branchShort = workspace.branchName.replace(/^distill\//, "");
-    const outcomeFiles = fs
-      .readdirSync(errorDir)
-      .filter((f) => f.endsWith(`-${branchShort}.outcome`));
-    expect(outcomeFiles).toHaveLength(1);
-    expect(
-      fs.readFileSync(path.join(errorDir, outcomeFiles[0]), "utf-8").trim(),
-    ).toBe("no-content");
-  });
-
-  // R12-SC-1: the wrapper sets NAPKIN_DISTILL_ERROR_DIR but historically
-  // forgot to `export` it, so the merge driver — spawned by `git merge`
-  // two layers below the wrapper — fell through to its XDG_CACHE_HOME
-  // fallback. Tests didn't catch the drift because `runMergeDriverWithEnv`
-  // in scripts.test.ts sets the env var explicitly. This regression
-  // exercises the export through the real wrapper-driver call chain.
-  test("merge-driver log co-locates in vault errorDir, not XDG cache", () => {
-    const conflictPath = path.join(vault, "conflict.md");
-    fs.writeFileSync(
-      conflictPath,
-      "---\ntitle: conflict\n---\n# initial content\n",
-    );
-    runGitOrThrow(vault, ["add", "-A"]);
-    runGitOrThrow(vault, ["commit", "-q", "-m", "add baseline"]);
-
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace: DistillWorkspace = createDistillWorkspace(
-      vault,
-      sessionFile,
-      sessionDir,
-    );
-
-    fs.writeFileSync(
-      conflictPath,
-      "---\ntitle: conflict\n---\n# MAIN's later version\n",
-    );
-    runGitOrThrow(vault, ["add", "conflict.md"]);
-    runGitOrThrow(vault, ["commit", "-q", "-m", "main mutates conflict"]);
-
-    const r = runWrapperWithMockFail(workspace, {
-      "conflict.md":
-        "---\ntitle: conflict\n---\n# DISTILL's different version\n",
-    });
-    expect(r.exitCode).toBe(0);
-
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    const driverLogsInVault = fs
-      .readdirSync(errorDir)
-      .filter((f) => f.endsWith(".merge-driver.log"));
-    expect(driverLogsInVault.length).toBeGreaterThan(0);
-
-    // XDG fallback dir must not have received any merge-driver logs.
-    // beforeEach overrides XDG_CACHE_HOME to a per-test temp; the
-    // pre-export bug landed logs at $xdgCacheDir/napkin-distill/
-    // merge-driver-logs/ instead.
-    const xdgFallbackDir = path.join(
-      xdgCacheDir,
-      "napkin-distill",
-      "merge-driver-logs",
-    );
-    const xdgFallbackEntries = fs.existsSync(xdgFallbackDir)
-      ? fs.readdirSync(xdgFallbackDir)
-      : [];
-    expect(xdgFallbackEntries).toEqual([]);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// MERGE_HEAD escape-hatch. The wrapper's last-line defense (after salvage)
-// covers the case where the driver returned exit 0 but its output still
-// contained conflict markers — git then sees MERGE_HEAD still present and
-// the merge is incomplete. The wrapper bails and writes to error log.
-// Previously dead code in CI (no mock mode emitted conflict markers).
-// Covers coverage-review G4.
-// ---------------------------------------------------------------------------
-
-describe("distill-wrapper.sh (MERGE_HEAD escape-hatch)", () => {
-  let vault: string;
-  let sessionDir: string;
-  let sessionFile: string;
-  let xdgCacheDir: string;
-  let _savedXdgCache: string | undefined;
-
-  beforeEach(() => {
-    _savedXdgCache = process.env.XDG_CACHE_HOME;
-    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-mh-xdg-"));
-    process.env.XDG_CACHE_HOME = xdgCacheDir;
-    vault = createGitVault();
-    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-mh-src-"));
-    sessionFile = createSeededSessionFile(sessionDir, sessionDir);
-  });
-
-  afterEach(() => {
-    fs.rmSync(sessionDir, { recursive: true, force: true });
-    fs.rmSync(vault, { recursive: true, force: true });
-    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
-    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
-    else process.env.XDG_CACHE_HOME = _savedXdgCache;
-  });
-
-  function runGitOrThrow(dir: string, args: string[]): string {
-    const env = {
-      ...process.env,
-      GIT_AUTHOR_NAME: "test",
-      GIT_AUTHOR_EMAIL: "test@example.com",
-      GIT_COMMITTER_NAME: "test",
-      GIT_COMMITTER_EMAIL: "test@example.com",
-    };
-    const r = spawnSync("git", ["-C", dir, ...args], {
-      env,
-      encoding: "utf-8",
-    });
-    if (r.status !== 0) {
-      throw new Error(`git ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
-    }
-    return r.stdout;
-  }
-
-  test("MERGE_HEAD persists after merge: wrapper bails + logs", () => {
-    // Real-world triggering (driver writes conflict-markers and git still
-    // marks merge incomplete) requires a specific git internals state
-    // that CI can't reliably stage: driver exit 0 clears MERGE_HEAD. Use
-    // the NAPKIN_DISTILL_FORCE_MERGE_HEAD=1 testing hook so the wrapper
-    // creates MERGE_HEAD immediately before its escape-hatch check.
-    //
-    // Pre-stage a simple change so the wrapper runs past the no-op early
-    // exit.
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace: DistillWorkspace = createDistillWorkspace(
-      vault,
-      sessionFile,
-      sessionDir,
-    );
-    fs.writeFileSync(
-      path.join(workspace.worktreePath, "new.md"),
-      "---\ntitle: new\n---\n# content\n",
-    );
-
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    fs.mkdirSync(errorDir, { recursive: true });
-    const r = spawnSync(
-      "bash",
-      [
-        DISTILL_WRAPPER_SCRIPT,
-        vault,
-        workspace.worktreePath,
-        workspace.branchName,
-        workspace.sessionForkPath,
-        "test prompt",
-        errorDir,
-        "",
-        "main",
-        vault,
-      ],
-      {
-        cwd: workspace.worktreePath,
-        encoding: "utf-8",
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "test",
-          GIT_AUTHOR_EMAIL: "test@example.com",
-          GIT_COMMITTER_NAME: "test",
-          GIT_COMMITTER_EMAIL: "test@example.com",
-          NAPKIN_DISTILL_NO_RECURSE: "1",
-          NAPKIN_DISTILL_SKIP_PI: "1",
-          NAPKIN_DISTILL_FORCE_MERGE_HEAD: "1",
-          NAPKIN_GIT_RETRY_MAX: "2",
-          NAPKIN_GIT_RETRY_DELAY: "0",
-        },
-      },
-    );
-
-    // Wrapper exits 1 because the escape-hatch fires.
-    expect(r.status).toBe(1);
-
-    // Error log contains the MERGE_HEAD diagnostic.
-    const errorLogs = fs.existsSync(errorDir)
-      ? fs
-          .readdirSync(errorDir)
-          // Skip `.outcome` (sidecar) and `.merge-driver*` (R12-SC-1
-          // driver-side forensic) — we want the wrapper-side fatal log.
-          .filter(
-            (f) => !f.endsWith(".outcome") && !f.includes(".merge-driver"),
-          )
-          .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
-      : [];
-    expect(errorLogs.length).toBeGreaterThan(0);
-    expect(errorLogs.join("\n")).toContain("MERGE_HEAD still present");
-
-    // Dangling SHA recorded for forensic recovery.
-    expect(errorLogs.join("\n")).toContain("dangling distill commit SHA:");
-
-    // No distill squash commit on main — the content was never merged.
-    const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "10"]);
-    expect(log).not.toContain("distill: merge");
-  });
-
-  test("git merge returns unexpected exit code (C6): wrapper aborts + logs, no salvage", () => {
-    // Force merge_rc=128 via the testing hook so we exercise the
-    // unexpected-exit-code bail-out path. 128 is git's "general fatal"
-    // (corrupt index, invalid ref, etc.) — distinct from the expected
-    // exit 1 (conflicts remain, salvage). Without this branch the wrapper
-    // would fall through to the empty-UNMERGED salvage and attempt a
-    // spurious squash on a branch that was never actually merged.
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace: DistillWorkspace = createDistillWorkspace(
-      vault,
-      sessionFile,
-      sessionDir,
-    );
-    fs.writeFileSync(
-      path.join(workspace.worktreePath, "new.md"),
-      "---\ntitle: new\n---\n# content\n",
-    );
-
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    fs.mkdirSync(errorDir, { recursive: true });
-    const r = spawnSync(
-      "bash",
-      [
-        DISTILL_WRAPPER_SCRIPT,
-        vault,
-        workspace.worktreePath,
-        workspace.branchName,
-        workspace.sessionForkPath,
-        "test prompt",
-        errorDir,
-        "",
-        "main",
-        vault,
-      ],
-      {
-        cwd: workspace.worktreePath,
-        encoding: "utf-8",
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "test",
-          GIT_AUTHOR_EMAIL: "test@example.com",
-          GIT_COMMITTER_NAME: "test",
-          GIT_COMMITTER_EMAIL: "test@example.com",
-          NAPKIN_DISTILL_NO_RECURSE: "1",
-          NAPKIN_DISTILL_SKIP_PI: "1",
-          NAPKIN_DISTILL_FORCE_MERGE_RC: "128",
-          NAPKIN_GIT_RETRY_MAX: "2",
-          NAPKIN_GIT_RETRY_DELAY: "0",
-        },
-      },
-    );
-
-    // Wrapper exits 1 via the unexpected-exit branch.
-    expect(r.status).toBe(1);
-
-    const errorLogs = fs.existsSync(errorDir)
-      ? fs
-          .readdirSync(errorDir)
-          // Skip `.outcome` (sidecar) and `.merge-driver*` (R12-SC-1).
-          .filter(
-            (f) => !f.endsWith(".outcome") && !f.includes(".merge-driver"),
-          )
-          .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
-      : [];
-    expect(errorLogs.length).toBeGreaterThan(0);
-    const combined = errorLogs.join("\n");
-    // Explicit diagnostic: unexpected exit code + dangling SHA.
-    expect(combined).toMatch(/failed unexpectedly \(exit 128\)/);
-    expect(combined).toContain("aborting");
-    expect(combined).toContain("dangling distill commit SHA:");
-
-    // No squash to main.
-    const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "10"]);
-    expect(log).not.toContain("distill: merge");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// End-to-end LLM-resolved conflict tests. Forces a real conflict between main
-// and the distill branch, uses NAPKIN_DISTILL_MERGE_MOCK=ok so the driver
-// emits a plausible merge (ours+theirs concatenated), then verifies that the
-// resolved content SURVIVES the squash-merge to main.
-//
-// Covers the core concurrency story end-to-end: `.gitattributes` routes to
-// the driver, the driver fires during `git merge main` in the wrapper, and
-// the driver's output reaches main. Previous salvage tests only force
-// `fail`; these pin the happy path.
-// ---------------------------------------------------------------------------
-
-describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
-  let vault: string;
-  let sessionDir: string;
-  let sessionFile: string;
-  let xdgCacheDir: string;
-  let _savedXdgCache: string | undefined;
-
-  beforeEach(() => {
-    _savedXdgCache = process.env.XDG_CACHE_HOME;
-    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-e2e-xdg-"));
-    process.env.XDG_CACHE_HOME = xdgCacheDir;
-    vault = createGitVault();
-    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-e2e-src-"));
-    sessionFile = createSeededSessionFile(sessionDir, sessionDir);
-  });
-
-  afterEach(() => {
-    fs.rmSync(sessionDir, { recursive: true, force: true });
-    fs.rmSync(vault, { recursive: true, force: true });
-    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
-    if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
-    else process.env.XDG_CACHE_HOME = _savedXdgCache;
-  });
-
-  function runGitOrThrow(dir: string, args: string[]): string {
-    const env = {
-      ...process.env,
-      GIT_AUTHOR_NAME: "test",
-      GIT_AUTHOR_EMAIL: "test@example.com",
-      GIT_COMMITTER_NAME: "test",
-      GIT_COMMITTER_EMAIL: "test@example.com",
-    };
-    const r = spawnSync("git", ["-C", dir, ...args], {
-      env,
-      encoding: "utf-8",
-    });
-    if (r.status !== 0) {
-      throw new Error(`git ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
-    }
-    return r.stdout;
-  }
-
-  /**
-   * Invoke the wrapper against a pre-populated worktree with the `ok`
-   * merge-driver mock enabled, so the LLM driver "resolves" conflicts by
-   * concatenating ours+theirs. Returns the wrapper exit code + any error-log
-   * contents (expected empty on the happy path).
-   */
-  function runWrapperWithMockOk(
-    workspace: DistillWorkspace,
-    worktreeFiles: Record<string, string>,
-    mockOverride?: string,
-  ): { exitCode: number; errorLogs: string[] } {
-    for (const [relPath, content] of Object.entries(worktreeFiles)) {
-      const abs = path.join(workspace.worktreePath, relPath);
-      fs.mkdirSync(path.dirname(abs), { recursive: true });
-      fs.writeFileSync(abs, content);
-    }
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    fs.mkdirSync(errorDir, { recursive: true });
-    const r = spawnSync(
-      "bash",
-      [
-        DISTILL_WRAPPER_SCRIPT,
-        vault,
-        workspace.worktreePath,
-        workspace.branchName,
-        workspace.sessionForkPath,
-        "test prompt",
-        errorDir,
-        "",
-        "main",
-        vault,
-      ],
-      {
-        cwd: workspace.worktreePath,
-        encoding: "utf-8",
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "test",
-          GIT_AUTHOR_EMAIL: "test@example.com",
-          GIT_COMMITTER_NAME: "test",
-          GIT_COMMITTER_EMAIL: "test@example.com",
-          NAPKIN_DISTILL_NO_RECURSE: "1",
-          NAPKIN_DISTILL_SKIP_PI: "1",
-          NAPKIN_DISTILL_MERGE_MOCK: mockOverride ?? "ok",
-          NAPKIN_GIT_RETRY_MAX: "2",
-          NAPKIN_GIT_RETRY_DELAY: "0",
-        },
-      },
-    );
-    const errorLogs: string[] = [];
-    if (fs.existsSync(errorDir)) {
-      for (const f of fs.readdirSync(errorDir)) {
-        // Skip the `.outcome` sidecar (POST-CONV-5) and `.merge-driver*`
-        // files (R12-SC-1). Keep both `.log` (fatal) and
-        // `.partial-merge.log` (R8-CC-1 forensic) — partial-merge tests
-        // below assert content of the latter.
-        if (f.endsWith(".outcome")) continue;
-        if (f.includes(".merge-driver")) continue;
-        errorLogs.push(fs.readFileSync(path.join(errorDir, f), "utf-8"));
-      }
-    }
-    return { exitCode: r.status ?? -1, errorLogs };
-  }
-
-  test("LLM-resolved conflict: driver output lands on main", () => {
-    // Baseline: a file that both sides will diverge on.
-    const conflictPath = path.join(vault, "shared.md");
-    fs.writeFileSync(
-      conflictPath,
-      "---\ntitle: shared\n---\n# baseline shared content\n",
-    );
-    runGitOrThrow(vault, ["add", "-A"]);
-    runGitOrThrow(vault, ["commit", "-q", "-m", "add shared"]);
-
-    // Create the worktree at this baseline, then mutate main post-hoc so
-    // the divergence is real (same pattern as the salvage tests).
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace: DistillWorkspace = createDistillWorkspace(
-      vault,
-      sessionFile,
-      sessionDir,
-    );
-
-    fs.writeFileSync(
-      conflictPath,
-      "---\ntitle: shared\n---\n# MAIN's later addition\n",
-    );
-    runGitOrThrow(vault, ["add", "shared.md"]);
-    runGitOrThrow(vault, ["commit", "-q", "-m", "main mutates shared"]);
-
-    // The distill branch writes its own divergent version. With the `ok`
-    // mock the driver emits ours+theirs concatenated.
-    const r = runWrapperWithMockOk(workspace, {
-      "shared.md":
-        "---\ntitle: shared\n---\n# DISTILL's addition (not the same)\n",
-    });
-    expect(r.exitCode).toBe(0);
-    // No error log on the happy path.
-    expect(r.errorLogs).toEqual([]);
-
-    // Worktree + branch cleaned up.
-    expect(fs.existsSync(workspace.worktreePath)).toBe(false);
-    const branches = runGitOrThrow(vault, ["branch"]);
-    expect(branches).not.toContain(workspace.branchName);
-
-    // Resolved content on main contains BOTH sides' markers (driver=ok
-    // concatenates). Proves: (1) driver fired during git merge in the
-    // worktree, (2) the resolved content survived the squash-merge to main.
-    const finalContent = fs.readFileSync(conflictPath, "utf-8");
-    expect(finalContent).toContain("MAIN's later addition");
-    expect(finalContent).toContain("DISTILL's addition (not the same)");
-
-    // Main has a squash commit.
-    const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "5"]);
-    expect(log).toContain("distill: merge");
-  });
-
-  test("driver retries: ok-after-2 succeeds on the third attempt", () => {
-    // Verifies the 3-strike retry loop bridges transient failures. The
-    // first two attempts fail (exit 1) and the third succeeds — the
-    // resolved content must still land on main.
-    const conflictPath = path.join(vault, "retry.md");
-    fs.writeFileSync(conflictPath, "---\ntitle: retry\n---\n# baseline\n");
-    runGitOrThrow(vault, ["add", "-A"]);
-    runGitOrThrow(vault, ["commit", "-q", "-m", "add retry"]);
-
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace: DistillWorkspace = createDistillWorkspace(
-      vault,
-      sessionFile,
-      sessionDir,
-    );
-
-    fs.writeFileSync(
-      conflictPath,
-      "---\ntitle: retry\n---\n# MAIN post-baseline\n",
-    );
-    runGitOrThrow(vault, ["add", "retry.md"]);
-    runGitOrThrow(vault, ["commit", "-q", "-m", "main mutates retry"]);
-
-    const r = runWrapperWithMockOk(
-      workspace,
-      {
-        "retry.md":
-          "---\ntitle: retry\n---\n# DISTILL post-baseline (diverges)\n",
-      },
-      "ok-after-2",
-    );
-    expect(r.exitCode).toBe(0);
-    expect(r.errorLogs).toEqual([]);
-
-    const finalContent = fs.readFileSync(conflictPath, "utf-8");
-    expect(finalContent).toContain("MAIN post-baseline");
-    expect(finalContent).toContain("DISTILL post-baseline (diverges)");
-
-    const log = runGitOrThrow(vault, ["log", "--oneline", "-n", "5"]);
-    expect(log).toContain("distill: merge");
   });
 });
 
@@ -1829,7 +892,6 @@ describe("distill-wrapper.sh (LLM-resolved conflict, end-to-end)", () => {
 describe("distill-wrapper.sh (non-main default branch)", () => {
   let vault: string;
   let sessionDir: string;
-  let sessionFile: string;
 
   function createMasterDefaultVault(): string {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "distill-master-vault-"));
@@ -1853,10 +915,6 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
     run(["config", "user.name", "test"]);
     run(["config", "user.email", "test@example.com"]);
     fs.writeFileSync(path.join(dir, "seed.md"), "# seed\n");
-    fs.writeFileSync(
-      path.join(dir, ".gitattributes"),
-      "*.md merge=napkin-distill-merge\n",
-    );
     fs.writeFileSync(path.join(dir, ".gitignore"), ".napkin/distill/\n");
     fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
     fs.writeFileSync(path.join(dir, ".napkin", "config.json"), "{}");
@@ -1874,7 +932,11 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
     process.env.XDG_CACHE_HOME = xdgCacheDir;
     vault = createMasterDefaultVault();
     sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-master-src-"));
-    sessionFile = createSeededSessionFile(sessionDir, sessionDir);
+    // Side-effect-only: createSeededSessionFile seeds a SessionManager
+    // disk fixture under sessionDir. The current tests in this describe
+    // call detectDefaultBranch(vault) directly without spawning the
+    // wrapper, so we don't need to retain the returned path.
+    createSeededSessionFile(sessionDir, sessionDir);
   });
 
   afterEach(() => {
@@ -1888,77 +950,6 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
   test("detectDefaultBranch returns 'master' for a master-default vault", () => {
     const { detectDefaultBranch } = require("./distill-workspace");
     expect(detectDefaultBranch(vault)).toBe("master");
-  });
-
-  test("wrapper squash-merges into master when default branch is master", () => {
-    const { createDistillWorkspace } = require("./distill-workspace");
-    const workspace: DistillWorkspace = createDistillWorkspace(
-      vault,
-      sessionFile,
-      sessionDir,
-    );
-    const stagedFile = path.join(workspace.worktreePath, "new-note.md");
-    fs.writeFileSync(stagedFile, "---\ntitle: new\n---\n# new note\n");
-
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
-    fs.mkdirSync(errorDir, { recursive: true });
-    const r = spawnSync(
-      "bash",
-      [
-        DISTILL_WRAPPER_SCRIPT,
-        vault,
-        workspace.worktreePath,
-        workspace.branchName,
-        workspace.sessionForkPath,
-        "test prompt",
-        errorDir,
-        "",
-        "master", // 8th arg: default branch
-        vault,
-      ],
-      {
-        cwd: workspace.worktreePath,
-        encoding: "utf-8",
-        env: {
-          ...process.env,
-          GIT_AUTHOR_NAME: "test",
-          GIT_AUTHOR_EMAIL: "test@example.com",
-          GIT_COMMITTER_NAME: "test",
-          GIT_COMMITTER_EMAIL: "test@example.com",
-          NAPKIN_DISTILL_NO_RECURSE: "1",
-          NAPKIN_DISTILL_SKIP_PI: "1",
-          NAPKIN_GIT_RETRY_MAX: "2",
-          NAPKIN_GIT_RETRY_DELAY: "0",
-        },
-      },
-    );
-    expect(r.status).toBe(0);
-
-    // No error log entries.
-    const errorLogs = fs.existsSync(errorDir)
-      ? fs
-          .readdirSync(errorDir)
-          // Skip `.outcome` (POST-CONV-5 success-path marker) and
-          // `.merge-driver*` (R12-SC-1 driver forensic). `.partial-merge.log`
-          // (R8-CC-1) is also a success-path forensic file but doesn't
-          // appear here (no salvage).
-          .filter(
-            (f) => !f.endsWith(".outcome") && !f.includes(".merge-driver"),
-          )
-          .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
-      : [];
-    expect(errorLogs).toEqual([]);
-
-    // master has the squash commit.
-    const log = spawnSync(
-      "git",
-      ["-C", vault, "log", "--oneline", "master", "-n", "5"],
-      { encoding: "utf-8" },
-    ).stdout;
-    expect(log).toContain("distill: merge");
-
-    // The new note lands on master.
-    expect(fs.existsSync(path.join(vault, "new-note.md"))).toBe(true);
   });
 });
 
@@ -2030,6 +1021,8 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
         "",
         "main",
         sessionDir, // parentCwd
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: sessionDir,
@@ -2074,7 +1067,7 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
     // install block, never reaching the hook).
     const errorFiles = fs
       .readdirSync(errorDir)
-      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+      .filter((f) => f.endsWith(".log"));
     expect(errorFiles.length).toBeGreaterThan(0);
     const errorContent = errorFiles
       .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
@@ -2114,7 +1107,7 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
     // this describe block, since both share runWrapperForceCleanup.
     const errorFiles = fs
       .readdirSync(errorDir)
-      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+      .filter((f) => f.endsWith(".log"));
     expect(errorFiles.length).toBeGreaterThan(0);
     const errorContent = errorFiles
       .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))

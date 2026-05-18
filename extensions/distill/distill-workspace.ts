@@ -32,8 +32,22 @@ import * as path from "node:path";
 
 import { Napkin } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { buildDistillPrompt } from "./distill-prompt";
+import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
 
-import { DISTILL_WRAPPER_SCRIPT, MERGE_DRIVER_SCRIPT } from "./scripts-paths";
+/**
+ * Per-subcommand wall-clock ceiling for `git` invocations from the
+ * JS-side. Typical git plumbing returns in milliseconds; this is a
+ * generous upper bound that catches truly stuck operations (network
+ * hangs, lock contention, fsmonitor wedges) without slowing the happy
+ * path. Tuned alongside the distill cleanup-trap budget so a single
+ * hung subcommand can't keep the wrapper alive past its overall
+ * `timeout(1)` wall-clock budget.
+ *
+ * Re-exported and consumed by `auto-setup.ts`'s sibling `runGit` so
+ * both call sites share a single source of truth.
+ */
+export const GIT_SUBCOMMAND_TIMEOUT_MS = 30_000;
 
 /**
  * Error class thrown by distill-workspace operations. Separate class so
@@ -82,9 +96,6 @@ export interface DistillMeta {
    * vault):
    *
    *   git -C <vaultPath> log --name-only <startSha>..HEAD
-   *
-   * Also useful for the live `diffWorktreeSinceStart` helper while the
-   * worktree is still alive (status displays, debugging).
    *
    * Absent on meta.json files written by pre-Phase-C2 code paths — readers
    * MUST tolerate undefined and fall back to scanning the whole worktree.
@@ -226,7 +237,7 @@ function runGit(
   const r = spawnSync("git", args, {
     cwd,
     encoding: "utf-8",
-    timeout: 30_000,
+    timeout: GIT_SUBCOMMAND_TIMEOUT_MS,
     env: process.env,
   });
   return {
@@ -237,74 +248,8 @@ function runGit(
 }
 
 /**
- * Ensure the worktree's local git config has the napkin-distill-merge
- * driver registered, and that `.gitattributes` routes `*.md` through it.
- *
- * Registration is per-worktree (`--local`, stays in the worktree's git config
- * dir, never propagates to the main repo or gets committed). The
- * `.gitattributes` line is per-file though \u2014 if the vault doesn't already
- * have one routing `*.md` through the driver, we append one. The appended
- * line gets committed along with the distill's content changes, which is
- * fine: committing the merge-driver rule to the vault is what lets the
- * driver actually fire during the merge back to main.
- *
- * Phase C's auto-init will pre-scaffold `.gitattributes` so this append
- * becomes a no-op; until then, we self-heal.
- */
-function registerMergeDriver(worktreePath: string): void {
-  // Register the driver in local git config. Local config lives in the
-  // worktree's `.git` file (actually in the main repo's .git/config, since
-  // worktrees share config by default \u2014 the config applies during all git
-  // operations from this worktree's perspective).
-  const nameRes = runGit(worktreePath, [
-    "config",
-    "--local",
-    "merge.napkin-distill-merge.name",
-    "napkin distill LLM merge driver",
-  ]);
-  if (nameRes.status !== 0) {
-    throw new DistillError(
-      `failed to configure merge driver name: ${nameRes.stderr.trim()}`,
-    );
-  }
-  // Quote the driver path so spaces / shell metacharacters in the path
-  // don't break git's sh -c invocation of the driver command, and so a
-  // malicious path prefix (unlikely locally, possible in CI with a
-  // runner-controlled workspace path) can't inject arguments.
-  // Single-quote the path and escape any literal ' as '\''.
-  const quotedDriverPath = `'${MERGE_DRIVER_SCRIPT.replace(/'/g, "'\\''")}'`;
-  const driverRes = runGit(worktreePath, [
-    "config",
-    "--local",
-    "merge.napkin-distill-merge.driver",
-    `${quotedDriverPath} %O %A %B %P`,
-  ]);
-  if (driverRes.status !== 0) {
-    throw new DistillError(
-      `failed to configure merge driver command: ${driverRes.stderr.trim()}`,
-    );
-  }
-
-  // Ensure `*.md merge=napkin-distill-merge` is in .gitattributes. This is
-  // the bit git consults during `git merge` to pick the driver. If
-  // .gitattributes is missing or the line isn't present, append it.
-  const attrsPath = path.join(worktreePath, ".gitattributes");
-  const attrLine = "*.md merge=napkin-distill-merge";
-  let existing = "";
-  if (fs.existsSync(attrsPath)) {
-    existing = fs.readFileSync(attrsPath, "utf-8");
-  }
-  if (!existing.split("\n").some((line) => line.trim() === attrLine)) {
-    const sep = existing.length > 0 && !existing.endsWith("\n") ? "\n" : "";
-    fs.writeFileSync(attrsPath, `${existing}${sep}${attrLine}\n`);
-  }
-}
-
-/**
  * Create a git worktree at `worktreePath` checked out to a fresh branch
- * `branchName` rooted at the vault's HEAD. Registers the napkin-distill-merge
- * driver in the worktree's local git config so subsequent `git merge`
- * invocations can resolve conflicts via the LLM.
+ * `branchName` rooted at the vault's HEAD.
  *
  * Precondition: vault is a git repo with at least one commit (HEAD
  * resolvable). Phase C's auto-init ensures both.
@@ -312,7 +257,6 @@ function registerMergeDriver(worktreePath: string): void {
  * @throws DistillError if:
  *   - vault has no `.git/` directory
  *   - `git worktree add` exits non-zero (branch collision, dirty state, ...)
- *   - merge driver registration fails
  *
  * @returns absolute worktree path on success (same as input, for chaining).
  */
@@ -345,7 +289,7 @@ export function createDistillWorktree(
 
   // Ensure the parent of worktreePath exists; `git worktree add` requires a
   // non-existent target directory but will happily create intermediate dirs
-  // for us \u2014 except when the parent (e.g. the vault's XDG cache root
+  // for us — except when the parent (e.g. the vault's XDG cache root
   // `~/.cache/napkin-distill/<hash>/`) only exists after first use.
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
 
@@ -361,21 +305,6 @@ export function createDistillWorktree(
     throw new DistillError(
       `git worktree add failed (exit ${res.status}): ${res.stderr.trim() || res.stdout.trim()}`,
     );
-  }
-
-  try {
-    registerMergeDriver(worktreePath);
-  } catch (err) {
-    // Roll back the worktree if driver registration fails \u2014 an unregistered
-    // worktree would merge with plain conflict markers instead of going
-    // through the LLM, defeating the point.
-    try {
-      runGit(vaultPath, ["worktree", "remove", "--force", worktreePath]);
-      runGit(vaultPath, ["branch", "-D", branchName]);
-    } catch {
-      // ignore
-    }
-    throw err;
   }
 
   return worktreePath;
@@ -793,9 +722,9 @@ export function resolveDistillErrorDir(vault: string): string {
  * Find the wrapper-emitted error log for a specific distill branch, if
  * any. The wrapper writes ‘forensic’ logs to
  * `<errorDir>/<ISO-timestamp>-<pid>-<branch-short>.log` whenever it
- * fails (missing napkin, pi subprocess error, merge driver 3-strike,
- * cd parent_cwd failure, …). Returns the absolute path to the first
- * matching log file, or null when no log exists.
+ * fails (missing napkin, pi subprocess error, agent timeout, post-call
+ * validation failure, cd parent_cwd failure, …). Returns the absolute
+ * path to the first matching log file, or null when no log exists.
  *
  * `branchShort` is the part after `distill/`, e.g. for
  * `distill/abc1234-1715198400` pass `abc1234-1715198400`.
@@ -829,34 +758,56 @@ export function findDistillErrorLogForBranch(
 
 /**
  * Find the most recent outcome sidecar for a distill branch. Returns
- * `{ class, outcomePath, partialMergeLogPath }` when a `*.outcome` file
- * exists for `branchShort`, else null.
+ * `{ class, outcomePath }` when a `*.outcome` file exists for
+ * `branchShort`, else null.
  *
  * The outcome sidecar (POST-CONV-5) is written by the wrapper as the
  * LAST action before any successful exit-0 path. One-line content is
- * the class string: `merged-content` / `no-content` / `partial-merge`.
- * Used by the JS-side `runDistillWith` poller to dispatch the right UI
- * severity (info vs warn) since multiple `exit 0` wrapper paths
- * previously produced the same notification.
+ * the class string: `merged-content` / `merged-local` / `no-content` /
+ * `failed:<reason>`. Used by the JS-side `runDistillWith` poller to
+ * dispatch the right UI severity (info vs warn vs error) since multiple
+ * `exit 0` wrapper paths previously produced the same notification.
  *
  * Missing outcome AND missing fatal error log = abnormal termination
  * (SIGKILL / `set -e` / disk full / race) — caller must surface this
  * as a warn since the wrapper is detached and we have no other signal
  * channel.
- *
- * `partialMergeLogPath` is populated when the class is `partial-merge`
- * AND a matching `.partial-merge.log` (R8-CC-1) exists in the same
- * directory; null otherwise. Caller can read the log to count
- * reverted files for the user-facing message.
  */
+/**
+ * Parsed outcome sidecar shape (POST-CONV-5 / PR #12 A4).
+ *
+ * One canonical type for the wrapper-emitted outcome record so callers
+ * (the `findDistillOutcomeForBranch` reader, the strategy `checkOutcome`
+ * callbacks in `index.ts`, the `formatOutcomeNotification` dispatcher)
+ * stay in sync as the shape evolves. Hand-redeclaring this shape at
+ * each call site causes drift on the next field addition / removal
+ * (CLEAN-7); pinning it here makes future changes single-edit.
+ *
+ * Field semantics:
+ *   - `outcomeClass`: machine-readable class string (line 1 of the
+ *     sidecar). Drives UI severity in `formatOutcomeNotification` per
+ *     the locked notification severity contract
+ *     (`merged-content`/`merged-local`/`no-content`/`failed:<reason>`).
+ *   - `outcomePath`: absolute path to the sidecar file on disk. Used
+ *     by tests (and ad-hoc forensic tooling) that need to inspect the
+ *     raw bytes; consumers that only want the class/hint can ignore
+ *     it.
+ *   - `recoveryHint`: lines 2+ of the sidecar concatenated, or `null`
+ *     when the wrapper wrote no hint (happy-path classes don't need
+ *     one; legacy single-line sidecars have none either). Surfaced
+ *     in the failure notification message so the user sees the
+ *     recommended recovery action without opening the error log.
+ */
+export interface DistillOutcome {
+  outcomeClass: string;
+  outcomePath: string;
+  recoveryHint: string | null;
+}
+
 export function findDistillOutcomeForBranch(
   errorDir: string,
   branchShort: string,
-): {
-  outcomeClass: string;
-  outcomePath: string;
-  partialMergeLogPath: string | null;
-} | null {
+): DistillOutcome | null {
   if (!fs.existsSync(errorDir)) return null;
   if (branchShort.length === 0) return null;
   let entries: string[];
@@ -869,51 +820,26 @@ export function findDistillOutcomeForBranch(
   const outcomes = entries.filter((f) => f.endsWith(outcomeSuffix)).sort();
   if (outcomes.length === 0) return null;
   const outcomePath = path.join(errorDir, outcomes[outcomes.length - 1]);
+  // PR #12 A4: outcome sidecar format is multi-line
+  //   line 1   = outcome class (machine-readable, drives JS-side dispatch)
+  //   lines 2+ = optional human-readable recovery hint (failed:* only)
+  // Pre-PR-12 sidecars are single-line; the split below handles both
+  // shapes: `lines[0]` is always the class, `lines.slice(1).join('\n')`
+  // is empty for legacy single-line sidecars.
   let outcomeClass = "";
+  let recoveryHint: string | null = null;
   try {
-    outcomeClass = fs.readFileSync(outcomePath, "utf-8").trim();
+    const raw = fs.readFileSync(outcomePath, "utf-8");
+    const lines = raw.split("\n");
+    outcomeClass = (lines[0] ?? "").trim();
+    const restRaw = lines.slice(1).join("\n").trim();
+    recoveryHint = restRaw.length > 0 ? restRaw : null;
   } catch {
     // Treat unreadable outcome as missing — caller will fall through to
     // abnormal-termination handling.
     return null;
   }
-  let partialMergeLogPath: string | null = null;
-  if (outcomeClass === "partial-merge") {
-    const pmSuffix = `-${branchShort}.partial-merge.log`;
-    const pmMatches = entries.filter((f) => f.endsWith(pmSuffix)).sort();
-    if (pmMatches.length > 0) {
-      partialMergeLogPath = path.join(
-        errorDir,
-        pmMatches[pmMatches.length - 1],
-      );
-    }
-  }
-  return { outcomeClass, outcomePath, partialMergeLogPath };
-}
-
-/**
- * Prefix prepended to the distill prompt only when running through the
- * worktree spawn path. Tells the agent its writes must stay inside the
- * per-distill worktree — critical because the agent inherits the parent
- * session's full message history (which contains absolute paths to the
- * MAIN vault) and would otherwise route writes there via `edit`/`write`
- * with absolute paths, silently bypassing worktree isolation.
- *
- * The prefix is added inside `spawnDistillInWorktree` (not at call sites)
- * so every worktree-mode caller gets it automatically. Legacy spawn
- * (manual /distill on git-less or disabled vaults) does NOT prepend
- * this — there's no isolation to preserve there.
- *
- * Exported for tests; production callers should rely on the implicit
- * application inside `spawnDistillInWorktree`.
- *
- * See POST-R6-CACHE in features/pi-napkin-distill/deferred.md for context.
- */
-export function buildWorktreeDistillPrompt(
-  worktreePath: string,
-  basePrompt: string,
-): string {
-  return `You are running in an isolated git worktree at ${worktreePath}. Only modify files within the worktree. Do NOT use absolute paths from the conversation history — those refer to the main vault and bypass isolation, causing the distill to silently merge nothing.\n\n${basePrompt}`;
+  return { outcomeClass, outcomePath, recoveryHint };
 }
 
 /**
@@ -933,10 +859,20 @@ export interface SpawnDistillOptions {
    * worktree is handled by the wrapper's napkin shim, NOT cwd resolution.
    */
   parentCwd: string;
-  /** Prompt passed to `pi -p`. */
-  prompt: string;
   /** Optional model override, `<provider>/<id>`. Undefined → pi's default. */
   model?: string;
+  /**
+   * Hard wall-clock budget (seconds) for the agent's distill+merge+squash+
+   * push+cleanup task. Wired into the wrapper's `timeout(1)` invocation so
+   * the agent is SIGTERMed (then SIGKILLed after grace) on overrun. Derived
+   * from `distill.maxDurationMinutes` (default 10 min = 600s). Must be a
+   * positive integer.
+   *
+   * PR #12 collapses the old per-phase timeouts (distill / per-file merge /
+   * squash) into this single agent-task budget — there are no per-phase
+   * subprocesses anymore for the wrapper to time-bound separately.
+   */
+  maxDurationSecs: number;
   /**
    * Override for the `spawn` function — wired by unit tests to capture calls
    * without actually starting processes. Defaults to the node:child_process
@@ -999,20 +935,26 @@ export function detectDefaultBranch(vaultPath: string): string {
 export function spawnDistillInWorktree(
   opts: SpawnDistillOptions,
 ): SpawnDistillResult {
-  const { vault, sessionFile, parentCwd, prompt, model } = opts;
+  const { vault, sessionFile, parentCwd, model, maxDurationSecs } = opts;
   const spawnFn = opts.spawnFn ?? spawn;
 
   const workspace = createDistillWorkspace(vault, sessionFile, parentCwd);
 
-  // Prepend the worktree-isolation prefix so the agent (which inherits the
-  // parent's full conversation context, including absolute paths to the
-  // MAIN vault) understands its writes must land in the worktree. This is
-  // applied centrally here — every worktree-mode caller benefits without
-  // having to remember to opt in.
-  const finalPrompt = buildWorktreeDistillPrompt(
-    workspace.worktreePath,
-    prompt,
-  );
+  const defaultBranch = detectDefaultBranch(vault);
+
+  // Build the agent-driven distill prompt by substituting the four
+  // placeholders into `extensions/distill/distill-prompt.md`. The .md
+  // contains the full agent contract (steps 1–6 distill content + steps
+  // 7–10 merge/squash/push/cleanup) plus the worktree-isolation prefix
+  // from POST-R6-CACHE — see PR #12 design "Agent contract". The wrapper
+  // hands this directly to `pi -p` as the agent's task; PR #12 deletes the
+  // per-file merge driver entirely.
+  const finalPrompt = buildDistillPrompt({
+    worktreePath: workspace.worktreePath,
+    vaultPath: vault,
+    branchName: workspace.branchName,
+    defaultBranch,
+  });
 
   // Error dir lives on the MAIN vault (not in the worktree — worktrees are
   // removed on cleanup, which would lose the logs). Resolve via Napkin's
@@ -1030,8 +972,20 @@ export function spawnDistillInWorktree(
     finalPrompt,
     errorDir,
     model ?? "",
-    detectDefaultBranch(vault),
+    defaultBranch,
     parentCwd,
+    String(maxDurationSecs),
+    // SEC-2 / CORR-3: pass the resolved cache root as an explicit
+    // positional arg so the wrapper's safe_rm_worktree path-safety
+    // guard can require worktrees to be descendants of THIS cache
+    // root (not just any path containing `/napkin-distill/<x>/<y>/`).
+    // The JS side is the source of truth — `resolveCacheRoot()` here
+    // is the same function that built `workspace.worktreePath`, so
+    // a future refactor that changes the cache layout updates both
+    // sides at once. Without this arg, the wrapper had to fall back
+    // on a glob pattern that any path containing the napkin-distill
+    // segment would satisfy.
+    resolveCacheRoot(vault),
   ];
 
   // Detached spawn: stdio "ignore" + unref() so the parent can exit cleanly
@@ -1247,64 +1201,14 @@ function toActiveDistills(
 }
 
 /**
- * Return the list of files an active distill worktree has changed since
- * it forked from the vault's HEAD. Used by live diagnostic surfaces
- * (status, debugging) while the worktree exists.
- *
- * For the per-distill-completion overlap notice (R7-PERF-2) the worktree
- * is already gone by the time we look — use
- * `getDistillTouchedFilesPostSquash(vault, startSha)` instead, which
- * runs against the main vault's commit log.
- *
- * Strategy:
- *   - When `startSha` is recorded in meta.json (Phase C2+), diff
- *     `<startSha>..HEAD` inside the worktree. That gives exactly the set
- *     of files the distill has committed.
- *   - When `startSha` is absent (legacy meta.json), fall back to
- *     `git status --porcelain` inside the worktree — captures both
- *     committed-and-not-merged AND uncommitted changes. Less precise but
- *     still useful for overlap detection.
- *
- * All paths are returned relative to the worktree root (which is the same
- * as the vault root from a tracking perspective). Returns `[]` on any
- * error — overlap detection is best-effort and must not throw.
- */
-export function diffWorktreeSinceStart(
-  active: Pick<ActiveDistill, "worktreePath" | "startSha">,
-): string[] {
-  if (!fs.existsSync(active.worktreePath)) return [];
-  if (active.startSha) {
-    const r = runGit(active.worktreePath, [
-      "diff",
-      "--name-only",
-      `${active.startSha}..HEAD`,
-    ]);
-    if (r.status !== 0) return [];
-    return r.stdout
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
-  }
-  // Legacy fallback: uncommitted + committed changes (porcelain lists both).
-  // Format: `XY path` where XY is the 2-char status code.
-  const r = runGit(active.worktreePath, ["status", "--porcelain"]);
-  if (r.status !== 0) return [];
-  return r.stdout
-    .split("\n")
-    .map((l) => l.slice(3).trim())
-    .filter((l) => l.length > 0);
-}
-
-/**
  * Return the list of files affected by commits in the main vault between
  * `startSha` (the distill's fork point) and HEAD (post-squash, after the
  * wrapper's squash-merge has landed). Used by per-completion overlap
  * detection (R7-PERF-2) to compare against the parent session's writes.
  *
- * Unlike `diffWorktreeSinceStart`, this runs against the MAIN vault —
- * the distill worktree has been removed by the time we're called. The
- * squash commit on main brings every file the distill affected into
- * `<startSha>..HEAD`'s name range.
+ * Runs against the MAIN vault — the distill worktree has been removed by
+ * the time we're called. The squash commit on main brings every file the
+ * distill affected into `<startSha>..HEAD`'s name range.
  *
  * If `startSha` is missing (legacy distill meta) we cannot reliably
  * compute the post-squash file set without scanning the now-removed

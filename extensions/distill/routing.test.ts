@@ -5,7 +5,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { withNapkinOnPath } from "./_test-helpers";
+import {
+  makeFakeUI,
+  makeMockExtensionAPI,
+  TIMEOUT_BIN_DIR,
+  withNapkinOnPath,
+} from "./_test-helpers";
 import { resolveCacheRoot, resolveDistillErrorDir } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -24,65 +29,6 @@ import distillExtension from "./index";
  * `setInterval` is stubbed so we can capture the interval callback set up
  * by `session_start` and invoke it deterministically instead of waiting.
  */
-
-/** Minimal spy-style ExtensionAPI that captures handlers and commands. */
-interface CapturedExtensionAPI {
-  // biome-ignore lint/suspicious/noExplicitAny: opaque event handlers by name
-  handlers: Record<string, (event: any, ctx: any) => Promise<void> | void>;
-  commands: Record<
-    string,
-    // biome-ignore lint/suspicious/noExplicitAny: opaque command handlers
-    { handler: (args: string, ctx: any) => Promise<void> | void }
-  >;
-}
-
-/**
- * Build a mock ExtensionAPI that captures `on(event, h)` and
- * `registerCommand(name, opts)` calls. Other methods are no-ops since the
- * extension doesn't use them during session_start / command invocation.
- */
-function makeMockExtensionAPI(): {
-  api: unknown;
-  captured: CapturedExtensionAPI;
-} {
-  const captured: CapturedExtensionAPI = { handlers: {}, commands: {} };
-  const api = {
-    // biome-ignore lint/suspicious/noExplicitAny: match ExtensionAPI shape loosely
-    on(event: string, handler: any) {
-      captured.handlers[event] = handler;
-    },
-    // biome-ignore lint/suspicious/noExplicitAny: match ExtensionAPI shape loosely
-    registerCommand(name: string, opts: any) {
-      captured.commands[name] = opts;
-    },
-    registerTool() {},
-    registerShortcut() {},
-    registerFlag() {},
-    getFlag() {
-      return undefined;
-    },
-    registerMessageRenderer() {},
-    sendMessage() {},
-    sendUserMessage() {},
-    appendEntry() {},
-    setSessionName() {},
-    getSessionName() {
-      return undefined;
-    },
-    setLabel() {},
-    async exec() {
-      return { exitCode: 0, stdout: "", stderr: "" };
-    },
-    getActiveTools() {
-      return [];
-    },
-    getAllTools() {
-      return [];
-    },
-    setActiveTools() {},
-  };
-  return { api, captured };
-}
 
 /** Git vault fixture with distill.enabled=true. */
 function createEnabledGitVault(intervalMinutes: number): string {
@@ -103,10 +49,6 @@ function createEnabledGitVault(intervalMinutes: number): string {
   fs.writeFileSync(
     path.join(dir, "seed.md"),
     "---\ntitle: seed\n---\n# seed\n",
-  );
-  fs.writeFileSync(
-    path.join(dir, ".gitattributes"),
-    "*.md merge=napkin-distill-merge\n",
   );
   fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
   fs.writeFileSync(
@@ -279,29 +221,13 @@ async function waitForWrapperDone(
 function assertNoWrapperFailures(vault: string): void {
   const errorDir = resolveDistillErrorDir(vault);
   if (!fs.existsSync(errorDir)) return;
-  // R8-CC-1: only `.log` files indicate fatal failures. `.partial-merge.log`
-  // files are forensic info from a successful salvage path and don't
-  // count as wrapper failures. Filter accordingly.
-  //
-  // R13-CC-2: also skip `.merge-driver*` files. Round-12's R12-SC-1
-  // moved merge-driver forensic logs (and their `.base`/`.ours`/
-  // `.theirs` 3-strike snapshots that share the prefix) into the
-  // wrapper's vault errorDir. Five sister readout sites in
-  // spawn-distill-in-worktree.test.ts were updated; this one was
-  // missed. Currently latent because routing tests run with
-  // NAPKIN_DISTILL_NO_RECURSE=1 + an empty pi stub, so no real merge
-  // happens — but bites the next contributor adding a real merge-
-  // path test. Substring match (rather than `endsWith`) catches both
-  // the bare `.merge-driver.log` and the `.merge-driver.log.{base,
-  // ours,theirs}` snapshot variants.
+  // Only `.log` files indicate fatal failures.
+  // `findDistillErrorLogForBranch` matches the suffix
+  // `-<branchShort>.log`, so sibling forensic logs with longer
+  // suffixes (e.g. `.warning.log`) are naturally excluded.
   const entries = fs
     .readdirSync(errorDir)
-    .filter(
-      (f) =>
-        f.endsWith(".log") &&
-        !f.endsWith(".partial-merge.log") &&
-        !f.includes(".merge-driver"),
-    );
+    .filter((f) => f.endsWith(".log") && !f.endsWith(".warning.log"));
   if (entries.length === 0) return;
   // Failed: surface the log content for diagnosis.
   const samples = entries
@@ -688,7 +614,11 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
     // returns empty and the missing-napkin guard fires — producing a
     // real fatal-error log we can verify the JS-side surfacing on.
     // /usr/bin:/bin doesn't contain napkin (verified during test setup).
-    process.env.PATH = "/usr/bin:/bin";
+    // Keep `TIMEOUT_BIN_DIR` so the wrapper's coreutils-timeout(1)
+    // startup check passes on macOS (where `gtimeout` lives outside
+    // /usr/bin); without it the wrapper exits 2 before reaching the
+    // missing-napkin guard this test pins (CI-A-1 startup check).
+    process.env.PATH = `${TIMEOUT_BIN_DIR}:/usr/bin:/bin`;
     vault = createEnabledGitVault(60);
     sm = createSeededSession(vault);
 
@@ -739,23 +669,9 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
   });
 
   test("wrapper writes error log → ui.notify('Distillation failed: see <path>', 'error') fires; onComplete does NOT", async () => {
-    // Mock UI that captures notify calls. "theme" is a stub object with
-    // the same shape the runner uses (`fg(severity, str)` returns the
-    // string verbatim for assertion ease).
-    const notifyCalls: { msg: string; severity: string }[] = [];
-    const setStatusCalls: { id: string; content: string }[] = [];
-    // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
-    const ui: any = {
-      theme: {
-        fg: (_severity: string, str: string) => str,
-      },
-      notify: (msg: string, severity: string) => {
-        notifyCalls.push({ msg, severity });
-      },
-      setStatus: (id: string, content: string) => {
-        setStatusCalls.push({ id, content });
-      },
-    };
+    // Mock UI that captures notify calls. The shared helper preserves the
+    // `{ msg, severity }` shape this suite asserts against.
+    const { ui, notifyCalls, setStatusCalls } = makeFakeUI();
 
     const { api, captured } = makeMockExtensionAPI();
     distillExtension(api as never);
@@ -833,8 +749,9 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
 // severity contract:
 //
 //   merged-content   → info
+//   merged-local     → warning  (local-only success)
 //   no-content       → warning
-//   partial-merge    → warning + log path
+//   failed:<reason>  → error
 //   no sidecar       → warning  ("abnormal termination")
 //
 // Drives the wrapper through the worktree path with `pi` stubbed out via
@@ -933,31 +850,10 @@ describe("runDistillWith outcome dispatch (POST-CONV-5)", () => {
     }
   }
 
-  function makeUI(): {
-    // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
-    ui: any;
-    notifyCalls: { msg: string; severity: string }[];
-    setStatusCalls: { id: string; content: string }[];
-  } {
-    const notifyCalls: { msg: string; severity: string }[] = [];
-    const setStatusCalls: { id: string; content: string }[] = [];
-    // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
-    const ui: any = {
-      theme: { fg: (_severity: string, str: string) => str },
-      notify: (msg: string, severity: string) => {
-        notifyCalls.push({ msg, severity });
-      },
-      setStatus: (id: string, content: string) => {
-        setStatusCalls.push({ id, content });
-      },
-    };
-    return { ui, notifyCalls, setStatusCalls };
-  }
-
   test("no-content outcome → warning notify", async () => {
     // pi stub is /usr/bin/true — no content produced. Wrapper writes
     // outcome=no-content; JS poller surfaces as warn.
-    const { ui, notifyCalls, setStatusCalls } = makeUI();
+    const { ui, notifyCalls, setStatusCalls } = makeFakeUI();
     const { api, captured } = makeMockExtensionAPI();
     distillExtension(api as never);
 

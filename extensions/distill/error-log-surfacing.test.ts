@@ -98,43 +98,21 @@ describe("findDistillErrorLogForBranch (R7-SC-3)", () => {
     expect(r).toBeNull();
   });
 
-  test("partial-merge salvage log files are NOT picked up as failures (R8-CC-1)", () => {
-    // R8-CC-1: the wrapper's salvage path writes forensic info to a
-    // `.partial-merge.log` file (distinct from `.log` which is the
-    // fatal-error log). The JS-side failure-surfacing must NOT pick up
-    // these salvage logs — a successful run with partial salvage
-    // should not be reported as a failed distillation.
-    const branchShort = "abc123-1715198400";
-    const partialMergeLog = `2026-05-14T10:00:00Z-12345-${branchShort}.partial-merge.log`;
+  test("warning log files are NOT picked up as failures (CORR-2)", () => {
+    // CORR-2 (Phase C Round 1): the wrapper's `log_warning` writes to
+    // `<base>.warning.log` for observed-but-accepted invariant breaches
+    // (e.g. squash-invariant violation when commit_count > 1). The
+    // JS-side failure-surfacing must NOT pick up these warning logs —
+    // a `merged-content` run with a warning attached is still a success.
+    const branchShort = "ghi789-1715198600";
+    const warningLog = `2026-05-14T12:00:00Z-12347-${branchShort}.warning.log`;
     fs.writeFileSync(
-      path.join(errorDir, partialMergeLog),
-      "# napkin distill partial-merge salvage log\nreverted 'foo.md' ...\n",
+      path.join(errorDir, warningLog),
+      "# napkin distill warning log\nWARNING: squash-invariant violation\n",
     );
     const r = findDistillErrorLogForBranch(errorDir, branchShort);
-    // Salvage log present, but no fatal log → returns null.
+    // Warning log present, but no fatal log → returns null.
     expect(r).toBeNull();
-  });
-
-  test("fatal log alongside partial-merge log: returns the fatal log only (R8-CC-1)", () => {
-    // The two log types can coexist: a wrapper run that did partial
-    // salvage AND then hit a fatal error during the salvage commit. In
-    // that case, both files exist; the failure-surfacing path should
-    // pick up the fatal `.log` and surface it as a failure (without
-    // confusing the user with the salvage `.partial-merge.log` path).
-    const branchShort = "def456-1715198500";
-    const partialMergeLog = `2026-05-14T11:00:00Z-12346-${branchShort}.partial-merge.log`;
-    const fatalLog = `2026-05-14T11:00:00Z-12346-${branchShort}.log`;
-    fs.writeFileSync(
-      path.join(errorDir, partialMergeLog),
-      "# napkin distill partial-merge salvage log\n",
-    );
-    fs.writeFileSync(
-      path.join(errorDir, fatalLog),
-      "# napkin distill error log\nfailed to complete partial-merge commit\n",
-    );
-    const r = findDistillErrorLogForBranch(errorDir, branchShort);
-    // Fatal log wins.
-    expect(r).toBe(path.join(errorDir, fatalLog));
   });
 });
 
@@ -164,7 +142,7 @@ describe("findDistillOutcomeForBranch (POST-CONV-5)", () => {
     expect(findDistillOutcomeForBranch(errorDir, "")).toBeNull();
   });
 
-  test("matching outcome: returns class + path, no partial-merge log", () => {
+  test("matching outcome: returns class + path", () => {
     const branchShort = "abc123-1";
     const fname = `2026-05-14T10:00:00Z-12345-${branchShort}.outcome`;
     const full = path.join(errorDir, fname);
@@ -173,10 +151,9 @@ describe("findDistillOutcomeForBranch (POST-CONV-5)", () => {
     expect(r).not.toBeNull();
     expect(r?.outcomeClass).toBe("merged-content");
     expect(r?.outcomePath).toBe(full);
-    expect(r?.partialMergeLogPath).toBeNull();
   });
 
-  test("no-content class: returns class + path, no partial-merge log", () => {
+  test("no-content class: returns class + path", () => {
     const branchShort = "abc-2";
     fs.writeFileSync(
       path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
@@ -184,34 +161,6 @@ describe("findDistillOutcomeForBranch (POST-CONV-5)", () => {
     );
     const r = findDistillOutcomeForBranch(errorDir, branchShort);
     expect(r?.outcomeClass).toBe("no-content");
-    expect(r?.partialMergeLogPath).toBeNull();
-  });
-
-  test("partial-merge class with matching .partial-merge.log: returns log path", () => {
-    const branchShort = "def-3";
-    fs.writeFileSync(
-      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
-      "partial-merge\n",
-    );
-    const pmLog = path.join(
-      errorDir,
-      `2026-05-14T10:00:00Z-1-${branchShort}.partial-merge.log`,
-    );
-    fs.writeFileSync(pmLog, "# log\nreverted 'foo.md' to main\n");
-    const r = findDistillOutcomeForBranch(errorDir, branchShort);
-    expect(r?.outcomeClass).toBe("partial-merge");
-    expect(r?.partialMergeLogPath).toBe(pmLog);
-  });
-
-  test("partial-merge class without .partial-merge.log: log path is null", () => {
-    const branchShort = "def-4";
-    fs.writeFileSync(
-      path.join(errorDir, `2026-05-14T10:00:00Z-1-${branchShort}.outcome`),
-      "partial-merge\n",
-    );
-    const r = findDistillOutcomeForBranch(errorDir, branchShort);
-    expect(r?.outcomeClass).toBe("partial-merge");
-    expect(r?.partialMergeLogPath).toBeNull();
   });
 
   test("non-matching outcome (different branch): returns null", () => {

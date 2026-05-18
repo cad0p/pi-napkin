@@ -159,7 +159,7 @@ describe("formatOutcomeNotification (POST-CONV-5)", () => {
 
   test("merged-content → info + elapsed seconds", () => {
     const r = formatOutcomeNotification({
-      outcome: { outcomeClass: "merged-content", partialMergeLogPath: null },
+      outcome: { outcomeClass: "merged-content", recoveryHint: null },
       elapsedSec: 42,
     });
     expect(r.level).toBe("info");
@@ -170,7 +170,7 @@ describe("formatOutcomeNotification (POST-CONV-5)", () => {
 
   test("no-content → warning", () => {
     const r = formatOutcomeNotification({
-      outcome: { outcomeClass: "no-content", partialMergeLogPath: null },
+      outcome: { outcomeClass: "no-content", recoveryHint: null },
       elapsedSec: 5,
     });
     expect(r.level).toBe("warning");
@@ -178,73 +178,11 @@ describe("formatOutcomeNotification (POST-CONV-5)", () => {
     expect(r.statusKey).toBe("warning");
   });
 
-  test("partial-merge with log: counts reverted lines", () => {
-    const log = [
-      "# napkin distill partial-merge salvage log",
-      "2026-05-14T10:00:00Z reverted 'foo.md' to main's version (LLM driver 3-strike)",
-      "2026-05-14T10:00:01Z reverted 'bar/baz.md' to main's version (LLM driver 3-strike)",
-      "2026-05-14T10:00:02Z   failed to checkout main:bar/baz.md",
-    ].join("\n");
-    const r = formatOutcomeNotification({
-      outcome: {
-        outcomeClass: "partial-merge",
-        partialMergeLogPath: "/tmp/dummy.partial-merge.log",
-      },
-      elapsedSec: 30,
-      readPartialMergeLog: () => log,
-    });
-    expect(r.level).toBe("warning");
-    expect(r.message).toContain("2 files reverted to main");
-    expect(r.message).toContain("/tmp/dummy.partial-merge.log");
-  });
-
-  test("partial-merge with log: singular when count is 1", () => {
-    const log =
-      "# napkin distill partial-merge salvage log\n2026-05-14T10:00:00Z reverted 'foo.md' to main's version";
-    const r = formatOutcomeNotification({
-      outcome: {
-        outcomeClass: "partial-merge",
-        partialMergeLogPath: "/tmp/dummy.partial-merge.log",
-      },
-      elapsedSec: 1,
-      readPartialMergeLog: () => log,
-    });
-    expect(r.message).toContain("1 file reverted to main");
-    expect(r.message).not.toContain("1 files");
-  });
-
-  test("partial-merge without log path: generic message", () => {
-    const r = formatOutcomeNotification({
-      outcome: {
-        outcomeClass: "partial-merge",
-        partialMergeLogPath: null,
-      },
-      elapsedSec: 1,
-    });
-    expect(r.level).toBe("warning");
-    expect(r.message).toBe(
-      "Distillation: partial merge \u2014 some files reverted to main",
-    );
-  });
-
-  test("partial-merge: log read returns null → zero-count fallback", () => {
-    const r = formatOutcomeNotification({
-      outcome: {
-        outcomeClass: "partial-merge",
-        partialMergeLogPath: "/tmp/dummy.partial-merge.log",
-      },
-      elapsedSec: 1,
-      readPartialMergeLog: () => null,
-    });
-    expect(r.level).toBe("warning");
-    expect(r.message).toContain("0 files reverted");
-  });
-
   test("unknown class → defensive warning with class verbatim", () => {
     const r = formatOutcomeNotification({
       outcome: {
         outcomeClass: "weird-future-class",
-        partialMergeLogPath: null,
+        recoveryHint: null,
       },
       elapsedSec: 7,
     });
