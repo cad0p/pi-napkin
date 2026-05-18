@@ -1,33 +1,39 @@
 /**
- * Regression test: agent step-10 / wrapper outcome-write race.
+ * Regression guard: wrapper write_outcome runs before any worktree
+ * removal on the happy path. Pins the structural fix from
+ * `fix(distill): drop step 10 (worktree cleanup) from agent prompt`.
  *
- * Reproduces the production bug where a successful merged-content
- * distill surfaces "Distillation terminated abnormally — no outcome
- * record" because the JS-side poller in `runDistillWith` observes the
- * worktree disappearance (caused by the agent's step-10 `git worktree
- * remove`) BEFORE the wrapper has finished post-validation and written
- * the outcome sidecar.
+ * Pre-fix the agent ran `git worktree remove` itself (step 10 of the
+ * distill prompt) BEFORE the wrapper had finished post-validation and
+ * written the outcome sidecar. The JS-side poller in `runDistillWith`
+ * ticks every ~2 s and observed worktree-gone in the gap between the
+ * agent's step 10 and the wrapper's `write_outcome` call — then
+ * dispatched a spurious "Distillation terminated abnormally — no
+ * outcome record" warning on a successful merged-content distill.
  *
- * Production timeline (annotated; matches feat/agent-driven-merge):
+ * The fix drops step 10 from the agent prompt; the wrapper's EXIT
+ * trap (which has always run unconditionally) is now the sole worktree-
+ * removal step on the happy path, and it fires AFTER `write_outcome`.
+ * The stub at `test-fixtures/agent-stubs/step10-race.sh` no longer
+ * removes the worktree itself — it matches post-fix production
+ * behaviour (agent commits + exits; wrapper handles cleanup).
+ *
+ * Post-fix timeline (happy path):
  *
  *   t0   wrapper invokes `pi --session ... -p $PROMPT`
  *   t0+  agent runs steps 1–9: distill, merge, squash, push
- *   t1   agent runs step 10: `git -C $VAULT worktree remove $WORKTREE`
- *        → worktree path disappears from disk HERE
- *   t1+  agent does follow-up work (~1m47s on real-LLM runs)
- *   t2   agent exits → pi exits → wrapper resumes
- *   t2+  wrapper runs validate_no_markers / validate_commit_count /
+ *   t1   agent exits → pi exits → wrapper resumes
+ *   t1+  wrapper runs validate_no_markers / validate_commit_count /
  *        detect_local_only (~tens of ms)
- *   t3   wrapper writes the `<ts>-<pid>-<branchShort>.outcome` sidecar
+ *   t2   wrapper writes the `<ts>-<pid>-<branchShort>.outcome` sidecar
+ *   t3   wrapper EXIT trap removes the worktree
  *
- *   The race window spans [t1, t3]. JS-side polling in `runDistillWith`
- *   ticks every ~2s and calls `findDistillOutcomeForBranch` as soon as
- *   `fs.existsSync(target)` returns false. If the tick lands in [t1, t3),
- *   the lookup returns null → `formatOutcomeNotification({outcome: null})`
- *   → "Distillation terminated abnormally — no outcome record" warning,
- *   even though the wrapper goes on to write `merged-content` at t3.
+ *   The race window is closed structurally: there is no point at which
+ *   `worktree-gone AND outcome-not-written` is observable. The JS
+ *   poller's tick lands somewhere in [t0, t3]; if it lands in [t3, ...]
+ *   it sees worktree-gone AND outcome-already-written.
  *
- * Strategy A (chosen): spawn the wrapper detached — mirroring how
+ * Strategy: spawn the wrapper detached — mirroring how
  * `spawnDistillInWorktree` does it in production — and poll worktree
  * disappearance from JS at 50 ms intervals. When disappearance is
  * observed, immediately call `findDistillOutcomeForBranch`. This
@@ -36,30 +42,31 @@
  * — this snapshots the eventual state.
  *
  * The fixture (`test-fixtures/agent-stubs/step10-race.sh`) widens the
- * race window deterministically by sleeping 0.5s after the worktree
- * removal but before the stub exits, keeping the wrapper blocked on
- * the `pi` subprocess long enough that the JS poller's tick lands
- * inside the window.
+ * window between agent-exit and worktree-removal deterministically by
+ * sleeping 0.5 s after the agent's commit work but before the stub
+ * exits, keeping the wrapper blocked on the `pi` subprocess long
+ * enough that the JS poller's tick lands inside the
+ * [agent-exit, worktree-removed] interval.
  *
  * Assertion contract:
  *   - outcomeAfterExit:    must be `merged-content` — proves the
  *                          wrapper does eventually succeed at writing
  *                          the outcome (so the test isn't passing for
  *                          some unrelated reason like a wrapper crash).
- *   - outcomeAtRaceWindow: SHOULD be non-null on a fix; on current main
- *                          it is null (race triggered, bug present).
+ *   - outcomeAtRaceWindow: must be non-null — the wrapper invariant
+ *                          (write_outcome before any worktree-removal)
+ *                          guarantees the JS poller's tick at
+ *                          worktree-disappearance always sees the
+ *                          outcome already written.
  *
- * This test FAILS on current main and will PASS after the fix lands.
- * Do NOT skip it — the failing assertion pins the regression so a
- * future "fix" that doesn't actually close the race window cannot
- * silently regress.
+ * If a future change re-introduces an agent-side worktree removal
+ * (or any other worktree-removing step before `write_outcome`), this
+ * test FAILS. Pair with `wrapper-invariant.test.ts` for the broader
+ * invariant pin (covers happy + salvage paths).
  *
- * Why existing bash-stub tests miss this: the fixtures under
- * `test-fixtures/agent-stubs/*.sh` do NOT call `git worktree remove`
- * themselves; the wrapper's EXIT trap removes the worktree AFTER
- * `write_outcome`, so the race window never opens in those tests.
- * `grep -E "worktree remove" extensions/distill/test-fixtures/agent-stubs/*.sh`
- * returns nothing on current main, confirming the gap.
+ * The historic step-10 reference in this file's name and stub name is
+ * retained as context for `git log` archaeology — the test originated
+ * as the deterministic reproducer for the agent-step-10 race.
  */
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
@@ -93,7 +100,7 @@ describe("agent step-10 / wrapper outcome-write race (regression)", () => {
     pathHandle.restore();
   });
 
-  test("outcome sidecar exists at the moment worktree disappears (FAILS on current main — bug)", async () => {
+  test("outcome sidecar exists at the moment worktree disappears (wrapper-invariant regression guard)", async () => {
     expect(fs.existsSync(FIXTURE)).toBe(true);
 
     const s = makeWrapperScaffold("napkin-distill-step10-race-");
@@ -216,16 +223,16 @@ describe("agent step-10 / wrapper outcome-write race (regression)", () => {
       ).not.toBeNull();
       expect(outcomeAfterExit?.outcomeClass).toBe("merged-content");
 
-      // The bug-asserting expectation. On current main the wrapper
-      // writes the outcome AFTER the agent has removed the worktree,
-      // so the JS-side poller's tick during [worktree-gone,
-      // outcome-written) sees null and classifies the run as
-      // "terminated abnormally". After the fix (e.g. wrapper writes
-      // the outcome before the agent's step-10, or step-10 moves into
-      // the wrapper), this passes.
+      // Wrapper-invariant assertion. The wrapper writes the outcome
+      // before any worktree-removal step on the happy path (EXIT trap
+      // fires AFTER write_outcome). The JS-side poller's tick at
+      // worktree-disappearance therefore always sees the outcome
+      // already written. If a future change re-introduces an
+      // agent-side worktree removal (or any other worktree-removing
+      // step before write_outcome), this assertion fails.
       expect(
         outcomeAtRaceWindow,
-        `outcome sidecar was missing at the moment the worktree disappeared — race window between agent step-10 (worktree remove) and wrapper write_outcome is open${diag()}`,
+        `outcome sidecar was missing at the moment the worktree disappeared — wrapper write_outcome is no longer running before worktree-removal on the happy path${diag()}`,
       ).not.toBeNull();
       expect(outcomeAtRaceWindow?.outcomeClass).toBe("merged-content");
 
