@@ -740,7 +740,11 @@ list_marker_files() {
 # vault working tree is the canonical post-condition.
 validate_no_markers() {
   local vault="$1"
-  local pre_file="${2:-/dev/null}"
+  local pre_file="$2"
+  if [ -z "$vault" ] || [ -z "$pre_file" ]; then
+    log_error "validate_no_markers: both <vault> and <pre_distill_marker_files> are required (caller passes /dev/null when no pre-distill snapshot is available)"
+    return 3
+  fi
 
   local post_file
   post_file="$(mktemp -t napkin-distill-post-marker.XXXXXX 2>/dev/null || true)"
@@ -766,11 +770,10 @@ validate_no_markers() {
   fi
 
   # Compute set difference: files in post but NOT in pre = NEW (agent-induced).
-  # `comm` requires sorted input. Pre-distill snapshot is /dev/null when
-  # the caller didn't pass one (out-of-tree callers / tests on the
-  # legacy 1-arg shape) — that collapses to "every post-marker file is
-  # NEW", preserving the old failed:markers-after-agent-exit
-  # classification.
+  # `comm` requires sorted input. The caller passes /dev/null as pre_file
+  # when no pre-distill snapshot is available (mktemp failed at startup),
+  # which collapses to "every post-marker file is NEW" and routes to
+  # failed:markers-after-agent-exit.
   local new_marker_files pre_existing_marker_files
   new_marker_files="$(comm -23 <(sort -u "$post_file") <(sort -u "$pre_file" 2>/dev/null) 2>/dev/null || cat "$post_file")"
   pre_existing_marker_files="$(comm -12 <(sort -u "$post_file") <(sort -u "$pre_file" 2>/dev/null) 2>/dev/null || true)"
@@ -1209,16 +1212,19 @@ fi
 # agent-induced — misleading users when the markers came from a prior
 # failed run, a botched manual merge, or user editing.
 #
-# Best-effort: if mktemp fails (very rare), we proceed without the
-# snapshot. validate_no_markers gracefully degrades to the legacy
-# every-marker-is-agent-induced behaviour when its second argument
-# is empty / /dev/null. The wrapper does NOT hard-fail on snapshot
-# failure — the worst-case is the pre-PR-12-Pass-2B behaviour.
+# Best-effort: if mktemp fails (very rare), set PRE_DISTILL_MARKER_FILES_FILE
+# to /dev/null so the call site always passes a concrete pre-snapshot
+# path. validate_no_markers treats /dev/null as "no pre-existing markers
+# observed", collapsing every post-agent marker to NEW (agent-induced)
+# and routing to failed:markers-after-agent-exit. The wrapper does NOT
+# hard-fail on snapshot failure — the worst-case is the pre-PR-12-Pass-2B
+# behaviour.
 PRE_DISTILL_MARKER_FILES_FILE="$(mktemp -t napkin-distill-pre-marker.XXXXXX 2>/dev/null || true)"
 if [ -n "$PRE_DISTILL_MARKER_FILES_FILE" ]; then
   list_marker_files "$VAULT" "$PRE_DISTILL_MARKER_FILES_FILE"
 else
-  log_error "pre-distill marker snapshot: mktemp failed; proceeding without snapshot (validate_no_markers will route any post-agent markers to failed:markers-after-agent-exit)"
+  log_error "pre-distill marker snapshot: mktemp failed; passing /dev/null to validate_no_markers (any post-agent markers will route to failed:markers-after-agent-exit)"
+  PRE_DISTILL_MARKER_FILES_FILE="/dev/null"
 fi
 
 # --- Step: run the agent under a hard timeout (PR #12 architecture) --------
@@ -1381,9 +1387,10 @@ fi
 #       SEC-1 R3)
 #
 # Pass the pre-distill snapshot file so validate_no_markers can do the
-# diff. Empty `PRE_DISTILL_MARKER_FILES_FILE` (mktemp failed) collapses
-# to legacy every-marker-is-agent-induced behaviour inside the
-# validator.
+# diff. PRE_DISTILL_MARKER_FILES_FILE is set to /dev/null upstream when
+# mktemp failed; validate_no_markers treats /dev/null as "no pre-existing
+# markers observed" and routes every post-agent marker to
+# failed:markers-after-agent-exit.
 validate_no_markers "$VAULT" "$PRE_DISTILL_MARKER_FILES_FILE"
 MARKER_RC=$?
 if [ "$MARKER_RC" -eq 1 ]; then
