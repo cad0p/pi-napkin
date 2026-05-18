@@ -29,10 +29,18 @@ import {
   DISTILL_PROMPT_PATH,
 } from "./distill-prompt";
 
+// Production-shape fixture values (cross-reference distill-workspace.ts):
+//   - vaultPath: arbitrary user vault root (a git repo). Not `.napkin/...`
+//     which is the config subdir inside the vault.
+//   - branchName: `distill/<6-hex-nonce>-<epoch-seconds>` per
+//     generateDistillBranchName.
+//   - worktreePath: `<XDG-cache>/napkin-distill/<16-hex-vault-hash>/<branch-suffix>`
+//     per resolveCacheRoot + branchSuffix derivation in createDistillWorkspace.
 const SAMPLE_INPUTS = {
-  worktreePath: "/home/user/.cache/napkin-distill/abc123/distill-1700000000000",
-  vaultPath: "/home/user/.napkin/notes",
-  branchName: "distill/abc123-1700000000000",
+  worktreePath:
+    "/home/user/.cache/napkin-distill/a1b2c3d4e5f6a7b8/abc123-1700000000",
+  vaultPath: "/home/user/Goldmine",
+  branchName: "distill/abc123-1700000000",
   defaultBranch: "main",
 };
 
