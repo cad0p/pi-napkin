@@ -430,15 +430,17 @@ Why manual: PR #12 deliberately avoids automatic migration. The orphaned `.gitat
 
 ## Maintenance
 
-### Verifying the agent prompt against a real LLM
+### Verifying the distill flow end-to-end against a real LLM
 
-CI uses bash-stub fixtures (`extensions/distill/test-fixtures/agent-stubs/`) to cover the agent-behavior space without burning tokens. For ad-hoc re-validation that a real model still walks the prompt cleanly — for instance after editing `extensions/distill/distill-prompt.md` — run:
+CI uses bash-stub fixtures (`extensions/distill/test-fixtures/agent-stubs/`) to cover the agent-behavior space without burning tokens. For ad-hoc re-validation that the full runtime — wrapper subprocess + agent + JS-side polling — still walks cleanly through a real model, run:
 
 ```bash
-bun run verify:agent-prompt
+bun run verify:e2e
 ```
 
-The script (`scripts/verify-agent-prompt.ts`) creates a tmpdir vault, builds the distill prompt with synthetic paths, invokes `pi -p` against the model named in `~/.config/napkin/config.json` (or whatever your global napkin config points at), and asserts the wrapper's documented post-conditions (see the script header for the full six-item list: no conflict markers, HEAD on default branch, agent's squash commit landed, distill branch removed, worktree removed, conflicted note resolved cleanly). Exits 0 on PASS, 1 on FAIL. Manual-only — not in CI.
+The script (`scripts/verify-e2e.ts`) creates a tmpdir vault with a bare-repo origin, registers the distill extension against a captured mock `ExtensionAPI`, triggers the `/distill` command handler so the production `runDistillWith` path runs (real wrapper subprocess, real 2-second `setInterval` poller), and asserts on the dispatched UI notification's severity + message together with filesystem post-conditions: no conflict markers, HEAD on default branch, agent's squash commit landed, distill branch removed, worktree removed, outcome sidecar with class `merged-content`, and origin advanced. Exits 0 on PASS, 1 on FAIL. Manual-only — not in CI; cost is roughly $0.50 per run.
+
+This replaces the earlier prompt-only gate. The strict superset matters because the wrapper↔JS-poller seam — where worktree-teardown and outcome-write race — is invisible to a prompt-only harness.
 
 ## Future: builder-deleter
 
