@@ -141,6 +141,11 @@ function runGit(
   const r = spawnSync("git", args, {
     cwd,
     encoding: "utf-8",
+    // 30 s ceiling: matches `runGit` in distill-workspace.ts. Typical
+    // git plumbing returns in ms; 30 s is a generous upper bound for
+    // truly stuck operations (network hangs, lock contention) and
+    // keeps auto-setup from blocking session startup indefinitely on a
+    // wedged repo.
     timeout: 30_000,
     env: process.env,
   });
