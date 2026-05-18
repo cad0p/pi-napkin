@@ -289,3 +289,125 @@ export function runWrapperWithStub(
     preSha,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Fake UI + mock ExtensionAPI factories
+//
+// Used by routing tests and by `scripts/verify-e2e.ts`. Both factories build
+// minimal stubs that capture observable side effects (notify calls, command
+// registrations) without pulling in the full pi runtime.
+//
+// Property name `msg` (not `message`) matches the existing capture shape
+// used across routing.test.ts; the consumer call sites read `c.msg.startsWith
+// (...)` etc., so preserving the name keeps the extraction mechanical.
+// ---------------------------------------------------------------------------
+
+/**
+ * Captured notify call: the message and severity passed to `ui.notify`.
+ */
+export interface NotifyCall {
+  msg: string;
+  severity: string;
+}
+
+/**
+ * Captured setStatus call: the line id and rendered content passed to
+ * `ui.setStatus`.
+ */
+export interface SetStatusCall {
+  id: string;
+  content: string;
+}
+
+/**
+ * Build a minimal fake UI that captures `notify` and `setStatus` calls into
+ * arrays. The `theme.fg(severity, str)` method returns the string verbatim
+ * (no ANSI) so assertions on captured content stay readable.
+ *
+ * Returns the `ui` stub plus the two capture arrays. Tests typically pass
+ * `ui` into a fake `RunCtx` and assert against `notifyCalls` / `setStatusCalls`.
+ */
+export function makeFakeUI(): {
+  // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
+  ui: any;
+  notifyCalls: NotifyCall[];
+  setStatusCalls: SetStatusCall[];
+} {
+  const notifyCalls: NotifyCall[] = [];
+  const setStatusCalls: SetStatusCall[] = [];
+  // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
+  const ui: any = {
+    theme: { fg: (_severity: string, str: string) => str },
+    notify: (msg: string, severity: string) => {
+      notifyCalls.push({ msg, severity });
+    },
+    setStatus: (id: string, content: string) => {
+      setStatusCalls.push({ id, content });
+    },
+  };
+  return { ui, notifyCalls, setStatusCalls };
+}
+
+/**
+ * Spy-style ExtensionAPI that records `on(event, handler)` and
+ * `registerCommand(name, opts)` calls. Other methods are no-ops since
+ * extension `session_start` and command invocation don't use them.
+ */
+export interface CapturedExtensionAPI {
+  // biome-ignore lint/suspicious/noExplicitAny: opaque event handlers by name
+  handlers: Record<string, (event: any, ctx: any) => Promise<void> | void>;
+  commands: Record<
+    string,
+    // biome-ignore lint/suspicious/noExplicitAny: opaque command handlers
+    { handler: (args: string, ctx: any) => Promise<void> | void }
+  >;
+}
+
+/**
+ * Build a mock ExtensionAPI plus the capture object that records what the
+ * extension registers when `distillExtension(api)` is called. Callers wire
+ * the `api` into the extension and then drive the extension via
+ * `captured.handlers.session_start(...)` or `captured.commands.distill?.handler(...)`.
+ */
+export function makeMockExtensionAPI(): {
+  api: unknown;
+  captured: CapturedExtensionAPI;
+} {
+  const captured: CapturedExtensionAPI = { handlers: {}, commands: {} };
+  const api = {
+    // biome-ignore lint/suspicious/noExplicitAny: match ExtensionAPI shape loosely
+    on(event: string, handler: any) {
+      captured.handlers[event] = handler;
+    },
+    // biome-ignore lint/suspicious/noExplicitAny: match ExtensionAPI shape loosely
+    registerCommand(name: string, opts: any) {
+      captured.commands[name] = opts;
+    },
+    registerTool() {},
+    registerShortcut() {},
+    registerFlag() {},
+    getFlag() {
+      return undefined;
+    },
+    registerMessageRenderer() {},
+    sendMessage() {},
+    sendUserMessage() {},
+    appendEntry() {},
+    setSessionName() {},
+    getSessionName() {
+      return undefined;
+    },
+    setLabel() {},
+    async exec() {
+      return { exitCode: 0, stdout: "", stderr: "" };
+    },
+    getActiveTools() {
+      return [];
+    },
+    getAllTools() {
+      return [];
+    },
+    setActiveTools() {},
+  };
+  return { api, captured };
+}

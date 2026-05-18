@@ -5,7 +5,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { withNapkinOnPath } from "./_test-helpers";
+import {
+  makeFakeUI,
+  makeMockExtensionAPI,
+  withNapkinOnPath,
+} from "./_test-helpers";
 import { resolveCacheRoot, resolveDistillErrorDir } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -24,65 +28,6 @@ import distillExtension from "./index";
  * `setInterval` is stubbed so we can capture the interval callback set up
  * by `session_start` and invoke it deterministically instead of waiting.
  */
-
-/** Minimal spy-style ExtensionAPI that captures handlers and commands. */
-interface CapturedExtensionAPI {
-  // biome-ignore lint/suspicious/noExplicitAny: opaque event handlers by name
-  handlers: Record<string, (event: any, ctx: any) => Promise<void> | void>;
-  commands: Record<
-    string,
-    // biome-ignore lint/suspicious/noExplicitAny: opaque command handlers
-    { handler: (args: string, ctx: any) => Promise<void> | void }
-  >;
-}
-
-/**
- * Build a mock ExtensionAPI that captures `on(event, h)` and
- * `registerCommand(name, opts)` calls. Other methods are no-ops since the
- * extension doesn't use them during session_start / command invocation.
- */
-function makeMockExtensionAPI(): {
-  api: unknown;
-  captured: CapturedExtensionAPI;
-} {
-  const captured: CapturedExtensionAPI = { handlers: {}, commands: {} };
-  const api = {
-    // biome-ignore lint/suspicious/noExplicitAny: match ExtensionAPI shape loosely
-    on(event: string, handler: any) {
-      captured.handlers[event] = handler;
-    },
-    // biome-ignore lint/suspicious/noExplicitAny: match ExtensionAPI shape loosely
-    registerCommand(name: string, opts: any) {
-      captured.commands[name] = opts;
-    },
-    registerTool() {},
-    registerShortcut() {},
-    registerFlag() {},
-    getFlag() {
-      return undefined;
-    },
-    registerMessageRenderer() {},
-    sendMessage() {},
-    sendUserMessage() {},
-    appendEntry() {},
-    setSessionName() {},
-    getSessionName() {
-      return undefined;
-    },
-    setLabel() {},
-    async exec() {
-      return { exitCode: 0, stdout: "", stderr: "" };
-    },
-    getActiveTools() {
-      return [];
-    },
-    getAllTools() {
-      return [];
-    },
-    setActiveTools() {},
-  };
-  return { api, captured };
-}
 
 /** Git vault fixture with distill.enabled=true. */
 function createEnabledGitVault(intervalMinutes: number): string {
@@ -735,23 +680,9 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
   });
 
   test("wrapper writes error log → ui.notify('Distillation failed: see <path>', 'error') fires; onComplete does NOT", async () => {
-    // Mock UI that captures notify calls. "theme" is a stub object with
-    // the same shape the runner uses (`fg(severity, str)` returns the
-    // string verbatim for assertion ease).
-    const notifyCalls: { msg: string; severity: string }[] = [];
-    const setStatusCalls: { id: string; content: string }[] = [];
-    // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
-    const ui: any = {
-      theme: {
-        fg: (_severity: string, str: string) => str,
-      },
-      notify: (msg: string, severity: string) => {
-        notifyCalls.push({ msg, severity });
-      },
-      setStatus: (id: string, content: string) => {
-        setStatusCalls.push({ id, content });
-      },
-    };
+    // Mock UI that captures notify calls. The shared helper preserves the
+    // `{ msg, severity }` shape this suite asserts against.
+    const { ui, notifyCalls, setStatusCalls } = makeFakeUI();
 
     const { api, captured } = makeMockExtensionAPI();
     distillExtension(api as never);
@@ -930,31 +861,10 @@ describe("runDistillWith outcome dispatch (POST-CONV-5)", () => {
     }
   }
 
-  function makeUI(): {
-    // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
-    ui: any;
-    notifyCalls: { msg: string; severity: string }[];
-    setStatusCalls: { id: string; content: string }[];
-  } {
-    const notifyCalls: { msg: string; severity: string }[] = [];
-    const setStatusCalls: { id: string; content: string }[] = [];
-    // biome-ignore lint/suspicious/noExplicitAny: minimal ui stub
-    const ui: any = {
-      theme: { fg: (_severity: string, str: string) => str },
-      notify: (msg: string, severity: string) => {
-        notifyCalls.push({ msg, severity });
-      },
-      setStatus: (id: string, content: string) => {
-        setStatusCalls.push({ id, content });
-      },
-    };
-    return { ui, notifyCalls, setStatusCalls };
-  }
-
   test("no-content outcome → warning notify", async () => {
     // pi stub is /usr/bin/true — no content produced. Wrapper writes
     // outcome=no-content; JS poller surfaces as warn.
-    const { ui, notifyCalls, setStatusCalls } = makeUI();
+    const { ui, notifyCalls, setStatusCalls } = makeFakeUI();
     const { api, captured } = makeMockExtensionAPI();
     distillExtension(api as never);
 
