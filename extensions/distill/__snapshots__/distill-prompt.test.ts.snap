@@ -1,9 +1,9 @@
 // Bun Snapshot v1, https://bun.sh/docs/test/snapshots
 
 exports[`buildDistillPrompt — full-document snapshot (regression guard, PR #12 C3) rendered prompt matches snapshot at canonical inputs 1`] = `
-"Your distill content lives in the git worktree at /tmp/distill-worktree-abc123. Use \`git -C /tmp/distill-worktree-abc123\` for all git operations there — your shell cwd is NOT the worktree. Edit files in the worktree by absolute path under \`/tmp/distill-worktree-abc123/...\` (or \`cd /tmp/distill-worktree-abc123\` first if your tool supports it).
+"Your distill content lives in the git worktree at /home/user/.cache/napkin-distill/abc123/distill-1700000000000. Use \`git -C /home/user/.cache/napkin-distill/abc123/distill-1700000000000\` for all git operations there — your shell cwd is NOT the worktree. Edit files in the worktree by absolute path under \`/home/user/.cache/napkin-distill/abc123/distill-1700000000000/...\` (or \`cd /home/user/.cache/napkin-distill/abc123/distill-1700000000000\` first if your tool supports it).
 
-For the distill-content phase (steps 1-6), edit files only inside \`/tmp/distill-worktree-abc123\`; do not edit files under \`/home/user/.napkin/notes\`. Writing distill content to \`/home/user/.napkin/notes\` directly bypasses the worktree's isolation and causes the merge in steps 7-8 to silently include none of your changes. The integration phase (steps 7-9) explicitly runs \`git -C /home/user/.napkin/notes\` commands to squash and push — those are correct and required, not a violation of this rule.
+For the distill-content phase (steps 1-6), edit files only inside \`/home/user/.cache/napkin-distill/abc123/distill-1700000000000\`; do not edit files under \`/home/user/.napkin/notes\`. Writing distill content to \`/home/user/.napkin/notes\` directly bypasses the worktree's isolation and causes the merge in steps 7-8 to silently include none of your changes. The integration phase (steps 7-9) explicitly runs \`git -C /home/user/.napkin/notes\` commands to squash and push — those are correct and required, not a violation of this rule.
 
 Distill this conversation into the napkin vault, then integrate your changes back into the main vault yourself. The wrapper that invoked you will only validate the result; it will NOT run merge, squash, push, or cleanup on your behalf.
 
@@ -19,23 +19,23 @@ Distill this conversation into the napkin vault, then integrate your changes bac
 
 Be selective. Only capture knowledge useful to someone working on this project later. Skip meta-discussion, tool output, and chatter.
 
-7. Integrate with main. If you decided nothing in this conversation merits capturing (per "Be selective" above), skip steps 7-9 entirely and exit — the wrapper will classify this as \`no-content\` and surface a warning to the user. Otherwise, from the worktree at /tmp/distill-worktree-abc123, commit your distilled content first if you haven't already:
+7. Integrate with main. If you decided nothing in this conversation merits capturing (per "Be selective" above), skip steps 7-9 entirely and exit — the wrapper will classify this as \`no-content\` and surface a warning to the user. Otherwise, from the worktree at /home/user/.cache/napkin-distill/abc123/distill-1700000000000, commit your distilled content first if you haven't already:
 
-       git -C /tmp/distill-worktree-abc123 add -A
-       git -C /tmp/distill-worktree-abc123 commit -m "distill: <one-line summary>"
+       git -C /home/user/.cache/napkin-distill/abc123/distill-1700000000000 add -A
+       git -C /home/user/.cache/napkin-distill/abc123/distill-1700000000000 commit -m "distill: <one-line summary>"
 
    Then merge main into your distill branch:
 
-       git -C /tmp/distill-worktree-abc123 merge --no-edit main
+       git -C /home/user/.cache/napkin-distill/abc123/distill-1700000000000 merge --no-edit main
 
    \`--no-edit\` accepts git's auto-generated merge commit message non-interactively; without it, git would open \`core.editor\` on a clean auto-merge and your bash tool (which has no TTY) would hang or fail.
 
    If conflicts arise, you will see files with standard \`<<<<<<<\`, \`=======\`, \`>>>>>>>\` markers. Resolve each by editing the file in place to produce the correct merged content. Use the conversation history above to inform your choices — you have full context on what content you intended to add. Once all markers are gone:
 
-       git -C /tmp/distill-worktree-abc123 add .
-       git -C /tmp/distill-worktree-abc123 commit --no-edit
+       git -C /home/user/.cache/napkin-distill/abc123/distill-1700000000000 add .
+       git -C /home/user/.cache/napkin-distill/abc123/distill-1700000000000 commit --no-edit
 
-   If \`git -C /tmp/distill-worktree-abc123 merge --no-edit main\` reports "Already up to date" (no merge commit), that's fine — proceed.
+   If \`git -C /home/user/.cache/napkin-distill/abc123/distill-1700000000000 merge --no-edit main\` reports "Already up to date" (no merge commit), that's fine — proceed.
 
 8. Squash to main. From the main vault at /home/user/.napkin/notes, switch to the default branch and squash-merge your branch:
 

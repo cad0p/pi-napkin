@@ -30,7 +30,7 @@ import {
 } from "./distill-prompt";
 
 const SAMPLE_INPUTS = {
-  worktreePath: "/tmp/distill-worktree-abc123",
+  worktreePath: "/home/user/.cache/napkin-distill/abc123/distill-1700000000000",
   vaultPath: "/home/user/.napkin/notes",
   branchName: "distill/abc123-1700000000000",
   defaultBranch: "main",
