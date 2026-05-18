@@ -53,10 +53,11 @@
 #   <maxDurationSecs> hard wall-clock budget for the agent task, in
 #                    seconds. Wired into `timeout(1)` so the agent is
 #                    SIGTERMed (then SIGKILLed after grace) on overrun.
-#                    Required at A2 onward; defaults to 600 (10 minutes)
-#                    when absent for backward-compatibility with any
-#                    out-of-tree caller still on the 9-arg shape.
-#                    Derived from `distill.maxDurationMinutes` config.
+#                    Required: the wrapper hard-fails at startup if
+#                    absent or empty. Derived from
+#                    `distill.maxDurationMinutes` config; the JS side's
+#                    `getMaxDistillDurationMs` (extensions/distill/index.ts)
+#                    is the single source of truth for the production default.
 #   <expectedCacheRoot> Absolute path to the resolved XDG cache root
 #                    (`<XDG_CACHE_HOME or ~/.cache>/napkin-distill/<vault-hash>`)
 #                    that contains <worktree>. Used by safe_rm_worktree
@@ -189,27 +190,18 @@ ERROR_DIR="${6:-}"
 MODEL="${7:-}"
 DEFAULT_BRANCH="${8:-main}"
 PARENT_CWD="${9:-}"
-# Default 600s (10 minutes) matches `DEFAULT_MAX_DISTILL_DURATION_MS` in
-# extensions/distill/index.ts. The JS side ALWAYS passes a value at A2+,
-# so this default exists only for direct test invocations of the wrapper
-# that omit the 11th arg.
-#
-# Magic number rationale: 600 = 10 minutes, the production-default agent
-# task budget locked in the PR #12 design ("One configuration knob:
-# distill.maxDurationMinutes"). Covers distill content production + merge
-# + squash + push + cleanup for typical workloads on a Sonnet-class
-# model with ~95s prelude.
-DEFAULT_MAX_DURATION_SECS=600
-MAX_DURATION_SECS="${10:-$DEFAULT_MAX_DURATION_SECS}"
+# Required: the wrapper hard-fails at startup if absent or empty. The
+# production default (10 minutes) lives JS-side in
+# `getMaxDistillDurationMs` (extensions/distill/index.ts) so there's a
+# single source of truth for the default; duplicating it here would be
+# drift waiting to happen.
+MAX_DURATION_SECS="${10:-}"
 # SEC-2 / CORR-3: explicit cache root the worktree must live under.
 # Required: validated below after the lower-numbered positional args.
 EXPECTED_CACHE_ROOT="${11:-}"
 # Treat empty string as "use fallback", not "literal empty branch name".
 if [ -z "$DEFAULT_BRANCH" ]; then
   DEFAULT_BRANCH="main"
-fi
-if [ -z "$MAX_DURATION_SECS" ]; then
-  MAX_DURATION_SECS="$DEFAULT_MAX_DURATION_SECS"
 fi
 # parentCwd (arg 9) is required since POST-R6-CACHE: pi spawns at
 # parentCwd to keep the system prompt's `Current working directory:`
@@ -220,6 +212,14 @@ fi
 # (R7-PERF-7, R7-CI-6.)
 if [ -z "$PARENT_CWD" ]; then
   echo "distill-wrapper: missing required argument 9 (parentCwd) — cache-preserving spawn requires the parent pi session's cwd" >&2
+  exit 2
+fi
+# maxDurationSecs (arg 10) required: timeout(1) needs an explicit
+# wall-clock budget. The JS side always passes
+# Math.round(getMaxDistillDurationMs(config) / 1000); silently falling
+# back to a hardcoded default would let two sources of truth drift.
+if [ -z "$MAX_DURATION_SECS" ]; then
+  echo "distill-wrapper: missing required argument 10 (maxDurationSecs) — timeout(1) wall-clock budget is mandatory; JS side derives it from distill.maxDurationMinutes config" >&2
   exit 2
 fi
 # expectedCacheRoot (arg 11) required: safe_rm_worktree's descendant

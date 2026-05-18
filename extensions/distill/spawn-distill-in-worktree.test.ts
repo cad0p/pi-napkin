@@ -396,6 +396,37 @@ describe("distill-wrapper.sh (integration)", () => {
     expect(r.stderr).toContain("missing required argument 9 (parentCwd)");
   });
 
+  test("missing maxDurationSecs (arg 10) hard-fails with exit 2", () => {
+    // The JS side always passes a value derived from
+    // distill.maxDurationMinutes; making the wrapper hard-fail when arg
+    // 10 is empty keeps the timeout(1) budget single-sourced JS-side
+    // and surfaces any out-of-tree caller skipping the budget loud
+    // and early.
+    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const r = spawnSync(
+      "bash",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        "/tmp/wt",
+        "distill/abc-1",
+        "/tmp/session.jsonl",
+        "prompt",
+        errorDir,
+        "",
+        "main",
+        vault, // parentCwd (arg 9) provided so we reach the arg-10 check.
+        // 10th arg deliberately omitted — expect exit 2.
+      ],
+      { encoding: "utf-8" },
+    );
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain(
+      "missing required argument 10 (maxDurationSecs)",
+    );
+  });
+
   test("wrapper rewrites meta.json pid to its own pid (C2)", () => {
     // The parent JS side writes meta.json with `pid: process.pid` (the
     // parent pi session). The wrapper MUST overwrite that with its own
