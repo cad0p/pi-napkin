@@ -29,6 +29,8 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { GIT_SUBCOMMAND_TIMEOUT_MS } from "./distill-workspace";
+
 /**
  * Lines appended to `<vault>/.gitignore` when scaffolding. Order is stable so
  * diff noise stays minimal on re-runs. Each group has a section-comment
@@ -141,7 +143,7 @@ function runGit(
   const r = spawnSync("git", args, {
     cwd,
     encoding: "utf-8",
-    timeout: 30_000,
+    timeout: GIT_SUBCOMMAND_TIMEOUT_MS,
     env: process.env,
   });
   return {

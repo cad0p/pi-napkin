@@ -36,6 +36,20 @@ import { buildDistillPrompt } from "./distill-prompt";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
 
 /**
+ * Per-subcommand wall-clock ceiling for `git` invocations from the
+ * JS-side. Typical git plumbing returns in milliseconds; this is a
+ * generous upper bound that catches truly stuck operations (network
+ * hangs, lock contention, fsmonitor wedges) without slowing the happy
+ * path. Tuned alongside the distill cleanup-trap budget so a single
+ * hung subcommand can't keep the wrapper alive past its overall
+ * `timeout(1)` wall-clock budget.
+ *
+ * Re-exported and consumed by `auto-setup.ts`'s sibling `runGit` so
+ * both call sites share a single source of truth.
+ */
+export const GIT_SUBCOMMAND_TIMEOUT_MS = 30_000;
+
+/**
  * Error class thrown by distill-workspace operations. Separate class so
  * callers can distinguish workspace-layer failures (worktree / git / fs)
  * from generic Errors raised by the stdlib.
@@ -223,7 +237,7 @@ function runGit(
   const r = spawnSync("git", args, {
     cwd,
     encoding: "utf-8",
-    timeout: 30_000,
+    timeout: GIT_SUBCOMMAND_TIMEOUT_MS,
     env: process.env,
   });
   return {

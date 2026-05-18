@@ -87,6 +87,26 @@ export function getMaxDistillDurationMs(config?: DistillConfig): number {
 }
 
 /**
+ * Repaint cadence for the human-visible idle-status countdown rendered
+ * by `renderIdleStatus`. One status repaint per second keeps the
+ * countdown smooth ("distill in 04:32" → "04:31" → "04:30") without
+ * redundant work; pi's status-bar dedupes identical strings, so a tick
+ * that produces an unchanged status is near-zero cost. Tighter cadences
+ * waste cycles on dedupes; coarser cadences make the countdown jumpy.
+ */
+const IDLE_STATUS_REPAINT_INTERVAL_MS = 1000;
+
+/**
+ * Poll cadence for `runDistillWith`'s completion watcher. Balances UI
+ * responsiveness (sub-3-second status updates when a distill finishes)
+ * against wakeup cost in idle sessions where no distill is in flight.
+ * Race-window tests use a much tighter 50 ms tick (see
+ * `wrapper-invariant.test.ts`) where they need to snapshot mid-cleanup
+ * state; production's coarser rate is intentional.
+ */
+const DISTILL_POLL_TICK_MS = 2000;
+
+/**
  * Custom entry type used to persist `/distill-auto-this-session` state into the
  * session file. CustomEntry (unlike CustomMessageEntry) does not participate in
  * LLM context, so we can write freely without affecting the agent.
@@ -546,7 +566,7 @@ export default function (pi: ExtensionAPI) {
         // `renderIdleStatus` self-guards against in-flight distills; when off
         // it paints `distill: off (session)` (pi dedupes identical status strings).
         renderIdleStatus();
-      }, 1000);
+      }, IDLE_STATUS_REPAINT_INTERVAL_MS);
     }
 
     intervalHandle = setInterval(() => {
@@ -1079,7 +1099,7 @@ export default function (pi: ExtensionAPI) {
         }
         ctx.ui.notify(message, level);
       }
-    }, 2000);
+    }, DISTILL_POLL_TICK_MS);
   }
 
   function runDistill(ctx: RunCtx) {
