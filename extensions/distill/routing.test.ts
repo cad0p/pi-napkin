@@ -224,26 +224,9 @@ function assertNoWrapperFailures(vault: string): void {
   // R8-CC-1: only `.log` files indicate fatal failures. `.partial-merge.log`
   // files are forensic info from a successful salvage path and don't
   // count as wrapper failures. Filter accordingly.
-  //
-  // R13-CC-2: also skip `.merge-driver*` files. Round-12's R12-SC-1
-  // moved merge-driver forensic logs (and their `.base`/`.ours`/
-  // `.theirs` 3-strike snapshots that share the prefix) into the
-  // wrapper's vault errorDir. Five sister readout sites in
-  // spawn-distill-in-worktree.test.ts were updated; this one was
-  // missed. Currently latent because routing tests run with
-  // NAPKIN_DISTILL_NO_RECURSE=1 + an empty pi stub, so no real merge
-  // happens — but bites the next contributor adding a real merge-
-  // path test. Substring match (rather than `endsWith`) catches both
-  // the bare `.merge-driver.log` and the `.merge-driver.log.{base,
-  // ours,theirs}` snapshot variants.
   const entries = fs
     .readdirSync(errorDir)
-    .filter(
-      (f) =>
-        f.endsWith(".log") &&
-        !f.endsWith(".partial-merge.log") &&
-        !f.includes(".merge-driver"),
-    );
+    .filter((f) => f.endsWith(".log") && !f.endsWith(".partial-merge.log"));
   if (entries.length === 0) return;
   // Failed: surface the log content for diagnosis.
   const samples = entries

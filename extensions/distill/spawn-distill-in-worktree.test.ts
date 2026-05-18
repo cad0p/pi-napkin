@@ -730,9 +730,7 @@ describe("distill-wrapper.sh (integration)", () => {
     );
     expect(r.status).toBe(1);
 
-    const errors = fs
-      .readdirSync(errorDir)
-      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+    const errors = fs.readdirSync(errorDir).filter((f) => f.endsWith(".log"));
     expect(errors.length).toBeGreaterThan(0);
     const errorContent = errors
       .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
@@ -874,7 +872,7 @@ describe("distill-wrapper.sh (integration)", () => {
     // Diagnostic landed in the error log file (not just stderr).
     const errorEntries = fs
       .readdirSync(errorDir)
-      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+      .filter((f) => f.endsWith(".log"));
     expect(errorEntries.length).toBeGreaterThan(0);
     const combined = errorEntries
       .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
@@ -1069,7 +1067,7 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
     // install block, never reaching the hook).
     const errorFiles = fs
       .readdirSync(errorDir)
-      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+      .filter((f) => f.endsWith(".log"));
     expect(errorFiles.length).toBeGreaterThan(0);
     const errorContent = errorFiles
       .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
@@ -1109,7 +1107,7 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
     // this describe block, since both share runWrapperForceCleanup.
     const errorFiles = fs
       .readdirSync(errorDir)
-      .filter((f) => f.endsWith(".log") && !f.includes(".merge-driver"));
+      .filter((f) => f.endsWith(".log"));
     expect(errorFiles.length).toBeGreaterThan(0);
     const errorContent = errorFiles
       .map((f) => fs.readFileSync(path.join(errorDir, f), "utf-8"))
