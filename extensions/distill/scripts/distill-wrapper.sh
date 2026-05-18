@@ -329,11 +329,11 @@ log_error() {
 # as `merged-content` but the squash-invariant is documented and
 # worth logging for forensic clarity).
 #
-# Naming convention follows `<base>.partial-merge.log` (see
-# error-log-surfacing.test.ts "partial-merge salvage log files are
-# NOT picked up as failures"): `findDistillErrorLogForBranch` matches
-# only the suffix `-<branchShort>.log`, so `<base>.warning.log` is
-# safely ignored by the JS-side poller.
+# Naming convention follows `<base>.warning.log`:
+# `findDistillErrorLogForBranch` matches only the suffix
+# `-<branchShort>.log`, so any sibling forensic file with a longer
+# pre-`.log` suffix (e.g. `<base>.warning.log`) is naturally excluded
+# from the JS-side fatal-failure poller.
 WARNING_LOG="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.warning.log"
 WARNING_LOG_TOUCHED=0
 log_warning() {

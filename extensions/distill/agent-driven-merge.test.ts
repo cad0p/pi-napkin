@@ -280,9 +280,10 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       // accepted as `merged-content`. The warning lives in a sibling
       // `.warning.log` file (distinct from `.log` which is the fatal-
       // error signal — adding to `.log` would mis-surface as a failed
-      // distillation in the UI). The naming convention mirrors the
-      // existing `.partial-merge.log` precedent — see
-      // error-log-surfacing.test.ts.
+      // distillation in the UI). `findDistillErrorLogForBranch` matches
+      // only the suffix `-<branchShort>.log`, so the longer
+      // `.warning.log` suffix is naturally excluded from the failure
+      // poller.
       const branchShort = r.branch.replace(/^distill\//, "");
       const warningLogs = fs
         .readdirSync(s.errorDir)

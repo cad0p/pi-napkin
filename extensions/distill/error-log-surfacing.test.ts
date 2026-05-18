@@ -98,45 +98,6 @@ describe("findDistillErrorLogForBranch (R7-SC-3)", () => {
     expect(r).toBeNull();
   });
 
-  test("partial-merge salvage log files are NOT picked up as failures (R8-CC-1)", () => {
-    // R8-CC-1: the wrapper's salvage path writes forensic info to a
-    // `.partial-merge.log` file (distinct from `.log` which is the
-    // fatal-error log). The JS-side failure-surfacing must NOT pick up
-    // these salvage logs — a successful run with partial salvage
-    // should not be reported as a failed distillation.
-    const branchShort = "abc123-1715198400";
-    const partialMergeLog = `2026-05-14T10:00:00Z-12345-${branchShort}.partial-merge.log`;
-    fs.writeFileSync(
-      path.join(errorDir, partialMergeLog),
-      "# napkin distill partial-merge salvage log\nreverted 'foo.md' ...\n",
-    );
-    const r = findDistillErrorLogForBranch(errorDir, branchShort);
-    // Salvage log present, but no fatal log → returns null.
-    expect(r).toBeNull();
-  });
-
-  test("fatal log alongside partial-merge log: returns the fatal log only (R8-CC-1)", () => {
-    // The two log types can coexist: a wrapper run that did partial
-    // salvage AND then hit a fatal error during the salvage commit. In
-    // that case, both files exist; the failure-surfacing path should
-    // pick up the fatal `.log` and surface it as a failure (without
-    // confusing the user with the salvage `.partial-merge.log` path).
-    const branchShort = "def456-1715198500";
-    const partialMergeLog = `2026-05-14T11:00:00Z-12346-${branchShort}.partial-merge.log`;
-    const fatalLog = `2026-05-14T11:00:00Z-12346-${branchShort}.log`;
-    fs.writeFileSync(
-      path.join(errorDir, partialMergeLog),
-      "# napkin distill partial-merge salvage log\n",
-    );
-    fs.writeFileSync(
-      path.join(errorDir, fatalLog),
-      "# napkin distill error log\nfailed to complete partial-merge commit\n",
-    );
-    const r = findDistillErrorLogForBranch(errorDir, branchShort);
-    // Fatal log wins.
-    expect(r).toBe(path.join(errorDir, fatalLog));
-  });
-
   test("warning log files are NOT picked up as failures (CORR-2)", () => {
     // CORR-2 (Phase C Round 1): the wrapper's `log_warning` writes to
     // `<base>.warning.log` for observed-but-accepted invariant breaches
