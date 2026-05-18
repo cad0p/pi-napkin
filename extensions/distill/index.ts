@@ -546,10 +546,6 @@ export default function (pi: ExtensionAPI) {
         // `renderIdleStatus` self-guards against in-flight distills; when off
         // it paints `distill: off (session)` (pi dedupes identical status strings).
         renderIdleStatus();
-        // 1000 ms tick keeps the human-visible countdown smooth (one
-        // status repaint per second) without redundant repaints; pi's
-        // status-bar dedupes identical strings so the cost of a
-        // no-op tick is near-zero.
       }, 1000);
     }
 
@@ -1083,10 +1079,6 @@ export default function (pi: ExtensionAPI) {
         }
         ctx.ui.notify(message, level);
       }
-      // 2000 ms tick balances UI responsiveness (sub-3 s status updates)
-      // against wakeup cost in idle sessions. Race-window tests use a
-      // faster 50 ms tick (`wrapper-invariant.test.ts`); the production
-      // rate is intentionally coarser.
     }, 2000);
   }
 

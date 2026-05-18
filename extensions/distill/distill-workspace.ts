@@ -223,12 +223,6 @@ function runGit(
   const r = spawnSync("git", args, {
     cwd,
     encoding: "utf-8",
-    // 30 s ceiling: typical git plumbing returns in ms; this is a
-    // generous upper bound that catches truly stuck operations (network
-    // hangs, lock contention, fsmonitor wedges) without slowing the
-    // happy path. Tuned alongside the distill cleanup-trap budget so
-    // a single hung subcommand can't keep the wrapper alive past its
-    // overall timeout(1) wall-clock budget.
     timeout: 30_000,
     env: process.env,
   });
