@@ -270,12 +270,9 @@ export function runWrapperWithStub(
       scaffold.parentCwd,
       opts.maxDurationSecs ?? "60",
       // SEC-2 / CORR-3: cache root is the worktree's parent dir per
-      // the cache layout `<cache-root>/<branch-suffix>/`. Tests pass
-      // it explicitly so safe_rm_worktree's strict-mode descendant
-      // check fires instead of the legacy cache-segment-glob
-      // fallback. The wrapper-validation suite covers the strict
-      // path; wrapper-salvage's safe_rm_worktree describe block has
-      // dedicated tests for both modes (legacy glob and strict).
+      // the cache layout `<cache-root>/<branch-suffix>/`. The wrapper
+      // hard-fails at startup if this 11th positional arg is empty;
+      // safe_rm_worktree's descendant check requires it.
       path.dirname(workspace.worktreePath),
     ],
     {

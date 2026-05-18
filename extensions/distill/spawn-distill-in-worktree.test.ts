@@ -436,6 +436,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         vault,
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: workspace.worktreePath,
@@ -507,6 +509,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         sessionDir, // parentCwd
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: sessionDir,
@@ -595,6 +599,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         sessionDir,
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: sessionDir,
@@ -669,6 +675,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         sessionDir,
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: sessionDir,
@@ -736,6 +744,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         sessionDir, // parentCwd
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: sessionDir,
@@ -815,6 +825,8 @@ describe("distill-wrapper.sh (integration)", () => {
         "",
         "main",
         vault,
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: workspace.worktreePath,
@@ -980,6 +992,8 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
         "",
         "main",
         sessionDir, // parentCwd
+        "60", // maxDurationSecs
+        path.dirname(workspace.worktreePath), // expectedCacheRoot (SEC-2 / CORR-3)
       ],
       {
         cwd: sessionDir,

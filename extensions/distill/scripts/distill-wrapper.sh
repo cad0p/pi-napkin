@@ -66,10 +66,8 @@
 #                    Computed JS-side by `resolveCacheRoot()` in
 #                    `extensions/distill/distill-workspace.ts` (the same
 #                    function that built <worktree>'s parent dir), so the
-#                    two sides stay in sync. Optional for backward
-#                    compatibility with tests / out-of-tree callers; when
-#                    empty/absent, safe_rm_worktree falls back to the
-#                    cache-segment-glob check (Pass 1A behaviour).
+#                    two sides stay in sync. Required: the wrapper hard-fails
+#                    at startup if absent or empty.
 #
 # Lifecycle (happy path, PR #12):
 #   1. install napkin shim at <worktree>/.napkin/distill/bin/napkin and
@@ -204,9 +202,7 @@ PARENT_CWD="${9:-}"
 DEFAULT_MAX_DURATION_SECS=600
 MAX_DURATION_SECS="${10:-$DEFAULT_MAX_DURATION_SECS}"
 # SEC-2 / CORR-3: explicit cache root the worktree must live under.
-# Empty string means "caller didn't pass one" (older test invocations,
-# out-of-tree callers); safe_rm_worktree falls back to the
-# pre-Pass-2A cache-segment-glob check in that case.
+# Required: validated below after the lower-numbered positional args.
 EXPECTED_CACHE_ROOT="${11:-}"
 # Treat empty string as "use fallback", not "literal empty branch name".
 if [ -z "$DEFAULT_BRANCH" ]; then
@@ -224,6 +220,15 @@ fi
 # (R7-PERF-7, R7-CI-6.)
 if [ -z "$PARENT_CWD" ]; then
   echo "distill-wrapper: missing required argument 9 (parentCwd) — cache-preserving spawn requires the parent pi session's cwd" >&2
+  exit 2
+fi
+# expectedCacheRoot (arg 11) required: safe_rm_worktree's descendant
+# check requires it; the JS side always passes resolveCacheRoot(vault)
+# (the same function that built <worktree>'s parent dir). Validated
+# AFTER parentCwd so positional-order error reporting matches arg
+# numbering.
+if [ -z "$EXPECTED_CACHE_ROOT" ]; then
+  echo "distill-wrapper: missing required argument 11 (expectedCacheRoot) — safe_rm_worktree's descendant check requires the resolved XDG cache root" >&2
   exit 2
 fi
 
@@ -407,7 +412,7 @@ write_outcome() {
   }
 }
 
-# safe_rm_worktree <worktree_path> [<expected_cache_root>]
+# safe_rm_worktree <worktree_path> <expected_cache_root>
 #
 # Defense-in-depth path-safety guard before `rm -rf <worktree>`. The
 # wrapper's primary defense is JS-side construction: `resolveCacheRoot`
@@ -420,22 +425,12 @@ write_outcome() {
 # `worktree remove` would run on whatever path was passed in —
 # `rm -rf /etc` if the upstream was that broken (SEC-A-2).
 #
-# This guard adds the wrapper-side check.
-#
-# Two acceptance modes:
-#   1. STRICT (preferred, SEC-2 / CORR-3): when `<expected_cache_root>`
-#      is supplied (the JS-side now passes `resolveCacheRoot(vault)`
-#      as the 11th positional arg of the wrapper), the worktree's
-#      canonical path must be a descendant of that exact cache root.
-#      A bug elsewhere that constructed a path like
-#      `/some/random/dir/napkin-distill/foo/bar` cannot bypass this
-#      check — even though it contains the napkin-distill segment,
-#      it isn't under the resolved root.
-#   2. LEGACY (fallback): when `<expected_cache_root>` is empty
-#      (older test invocations or out-of-tree callers on the 10-arg
-#      shape), fall back to the pre-Pass-2A cache-segment glob
-#      `*/napkin-distill/*/*`. This preserves backward compatibility
-#      while allowing new callers to opt into the strict check.
+# This guard adds the wrapper-side check: the worktree's canonical
+# path must be a descendant of `<expected_cache_root>` (SEC-2 / CORR-3).
+# A bug elsewhere that constructed a path like
+# `/some/random/dir/napkin-distill/foo/bar` cannot bypass this check —
+# even though it contains the napkin-distill segment, it isn't under
+# the resolved root.
 #
 # `pwd -P` resolves symlinks (and is portable across BSD/GNU,
 # unlike `readlink -f` which is GNU-only).
@@ -447,9 +442,13 @@ write_outcome() {
 # a malformed worktree path.
 safe_rm_worktree() {
   local worktree="$1"
-  local expected_cache_root="${2:-}"
+  local expected_cache_root="$2"
   if [ -z "$worktree" ]; then
     log_error "safe_rm_worktree: empty worktree path; refusing to rm-rf"
+    return 1
+  fi
+  if [ -z "$expected_cache_root" ]; then
+    log_error "safe_rm_worktree: empty expected_cache_root; refusing to rm-rf '$worktree'"
     return 1
   fi
   if [ ! -d "$worktree" ]; then
@@ -466,52 +465,34 @@ safe_rm_worktree() {
     log_error "safe_rm_worktree: could not resolve canonical path for '$worktree'; refusing to rm-rf"
     return 1
   fi
-  if [ -n "$expected_cache_root" ]; then
-    # STRICT mode (SEC-2 / CORR-3): require descendant-of-cache-root.
-    # Resolve the cache root canonically too — if it's a symlink the
-    # JS side might have given us the symlink's target via
-    # `fs.realpathSync`, but defending against the case where it
-    # didn't is cheap and removes a footgun.
-    local resolved_root
-    if [ -d "$expected_cache_root" ]; then
-      resolved_root="$(cd "$expected_cache_root" 2>/dev/null && pwd -P)" || resolved_root=""
-    else
-      # Cache root may not exist yet (e.g. test scaffold that built
-      # the worktree but never instantiated the parent vault-hash
-      # dir). Fall back to the literal value — the prefix match
-      # below still works on logically-equivalent absolute paths.
-      resolved_root="$expected_cache_root"
-    fi
-    if [ -z "$resolved_root" ]; then
-      log_error "safe_rm_worktree: could not resolve canonical path for cache root '$expected_cache_root'; refusing to rm-rf '$worktree'"
-      return 1
-    fi
-    # Require `$resolved` to start with `$resolved_root/`. Trailing
-    # slash on the prefix prevents a sibling-directory false-accept
-    # like `/cache/napkin-distill/abc` matching `/cache/napkin-distill/abc-evil`.
-    case "$resolved" in
-      "$resolved_root"/*)
-        rm -rf "$resolved" 2>/dev/null || true
-        return 0
-        ;;
-      *)
-        log_error "safe_rm_worktree: refusing to rm-rf '$resolved' (resolved from '$worktree') — not a descendant of expected cache root '$resolved_root'"
-        return 1
-        ;;
-    esac
+  # Resolve the cache root canonically too — if it's a symlink the
+  # JS side might have given us the symlink's target via
+  # `fs.realpathSync`, but defending against the case where it
+  # didn't is cheap and removes a footgun.
+  local resolved_root
+  if [ -d "$expected_cache_root" ]; then
+    resolved_root="$(cd "$expected_cache_root" 2>/dev/null && pwd -P)" || resolved_root=""
+  else
+    # Cache root may not exist yet (e.g. test scaffold that built
+    # the worktree but never instantiated the parent vault-hash
+    # dir). Fall back to the literal value — the prefix match
+    # below still works on logically-equivalent absolute paths.
+    resolved_root="$expected_cache_root"
   fi
-  # LEGACY mode (no expected_cache_root): fall back to the glob check
-  # (pre-Pass-2A behaviour). Refuse anything outside the napkin-distill
-  # cache layout. The match is on the absolute resolved path, so a
-  # symlink that points at /etc would resolve to /etc here and miss
-  # the pattern.
+  if [ -z "$resolved_root" ]; then
+    log_error "safe_rm_worktree: could not resolve canonical path for cache root '$expected_cache_root'; refusing to rm-rf '$worktree'"
+    return 1
+  fi
+  # Require `$resolved` to start with `$resolved_root/`. Trailing
+  # slash on the prefix prevents a sibling-directory false-accept
+  # like `/cache/napkin-distill/abc` matching `/cache/napkin-distill/abc-evil`.
   case "$resolved" in
-    */napkin-distill/*/*)
+    "$resolved_root"/*)
       rm -rf "$resolved" 2>/dev/null || true
       return 0
       ;;
     *)
-      log_error "safe_rm_worktree: refusing to rm-rf '$resolved' (resolved from '$worktree') — not under a 'napkin-distill/<hash>/' subtree"
+      log_error "safe_rm_worktree: refusing to rm-rf '$resolved' (resolved from '$worktree') — not a descendant of expected cache root '$resolved_root'"
       return 1
       ;;
   esac
