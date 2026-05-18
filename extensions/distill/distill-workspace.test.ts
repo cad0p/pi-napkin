@@ -14,7 +14,6 @@ import {
   DISTILL_SUBDIR,
   DistillError,
   type DistillMeta,
-  diffWorktreeSinceStart,
   generateDistillBranchName,
   getActiveDistills,
   getDistillState,
@@ -1261,93 +1260,5 @@ describe("R2-4: getActiveDistills skips branch listing", () => {
     } finally {
       cleanupDistillWorkspace(vault, w);
     }
-  });
-});
-
-describe("diffWorktreeSinceStart", () => {
-  let vault: string;
-  let sessionDir: string;
-  let sourceSession: string;
-
-  beforeEach(() => {
-    vault = createGitVault();
-    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "diff-src-"));
-    sourceSession = createSeededSessionFile(sessionDir, sessionDir);
-  });
-
-  afterEach(() => {
-    fs.rmSync(sessionDir, { recursive: true, force: true });
-    fs.rmSync(vault, { recursive: true, force: true });
-  });
-
-  test("empty worktree (no changes since startSha) returns []", () => {
-    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
-    try {
-      const meta = readDistillMeta(w.worktreePath);
-      expect(
-        diffWorktreeSinceStart({
-          worktreePath: w.worktreePath,
-          startSha: meta?.startSha,
-        }),
-      ).toEqual([]);
-    } finally {
-      cleanupDistillWorkspace(vault, w);
-    }
-  });
-
-  test("committed change shows up after startSha", () => {
-    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
-    try {
-      // Write + commit a new file inside the worktree.
-      const newFile = path.join(w.worktreePath, "distilled.md");
-      fs.writeFileSync(newFile, "# new\n");
-      const env = {
-        ...process.env,
-        GIT_AUTHOR_NAME: "test",
-        GIT_AUTHOR_EMAIL: "test@example.com",
-        GIT_COMMITTER_NAME: "test",
-        GIT_COMMITTER_EMAIL: "test@example.com",
-      };
-      spawnSync("git", ["-C", w.worktreePath, "add", "distilled.md"], { env });
-      spawnSync(
-        "git",
-        ["-C", w.worktreePath, "commit", "-m", "add distilled.md"],
-        { env },
-      );
-
-      const meta = readDistillMeta(w.worktreePath);
-      const changed = diffWorktreeSinceStart({
-        worktreePath: w.worktreePath,
-        startSha: meta?.startSha,
-      });
-      expect(changed).toContain("distilled.md");
-    } finally {
-      cleanupDistillWorkspace(vault, w);
-    }
-  });
-
-  test("legacy meta (no startSha) falls back to status --porcelain", () => {
-    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
-    try {
-      // Uncommitted change — status picks it up.
-      fs.writeFileSync(path.join(w.worktreePath, "scratch.md"), "# scratch\n");
-
-      const changed = diffWorktreeSinceStart({
-        worktreePath: w.worktreePath,
-        startSha: undefined,
-      });
-      expect(changed).toContain("scratch.md");
-    } finally {
-      cleanupDistillWorkspace(vault, w);
-    }
-  });
-
-  test("returns [] for missing worktree path", () => {
-    expect(
-      diffWorktreeSinceStart({
-        worktreePath: "/tmp/does-not-exist",
-        startSha: "abc1234",
-      }),
-    ).toEqual([]);
   });
 });

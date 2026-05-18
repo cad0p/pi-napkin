@@ -83,9 +83,6 @@ export interface DistillMeta {
    *
    *   git -C <vaultPath> log --name-only <startSha>..HEAD
    *
-   * Also useful for the live `diffWorktreeSinceStart` helper while the
-   * worktree is still alive (status displays, debugging).
-   *
    * Absent on meta.json files written by pre-Phase-C2 code paths — readers
    * MUST tolerate undefined and fall back to scanning the whole worktree.
    */
@@ -1190,64 +1187,14 @@ function toActiveDistills(
 }
 
 /**
- * Return the list of files an active distill worktree has changed since
- * it forked from the vault's HEAD. Used by live diagnostic surfaces
- * (status, debugging) while the worktree exists.
- *
- * For the per-distill-completion overlap notice (R7-PERF-2) the worktree
- * is already gone by the time we look — use
- * `getDistillTouchedFilesPostSquash(vault, startSha)` instead, which
- * runs against the main vault's commit log.
- *
- * Strategy:
- *   - When `startSha` is recorded in meta.json (Phase C2+), diff
- *     `<startSha>..HEAD` inside the worktree. That gives exactly the set
- *     of files the distill has committed.
- *   - When `startSha` is absent (legacy meta.json), fall back to
- *     `git status --porcelain` inside the worktree — captures both
- *     committed-and-not-merged AND uncommitted changes. Less precise but
- *     still useful for overlap detection.
- *
- * All paths are returned relative to the worktree root (which is the same
- * as the vault root from a tracking perspective). Returns `[]` on any
- * error — overlap detection is best-effort and must not throw.
- */
-export function diffWorktreeSinceStart(
-  active: Pick<ActiveDistill, "worktreePath" | "startSha">,
-): string[] {
-  if (!fs.existsSync(active.worktreePath)) return [];
-  if (active.startSha) {
-    const r = runGit(active.worktreePath, [
-      "diff",
-      "--name-only",
-      `${active.startSha}..HEAD`,
-    ]);
-    if (r.status !== 0) return [];
-    return r.stdout
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0);
-  }
-  // Legacy fallback: uncommitted + committed changes (porcelain lists both).
-  // Format: `XY path` where XY is the 2-char status code.
-  const r = runGit(active.worktreePath, ["status", "--porcelain"]);
-  if (r.status !== 0) return [];
-  return r.stdout
-    .split("\n")
-    .map((l) => l.slice(3).trim())
-    .filter((l) => l.length > 0);
-}
-
-/**
  * Return the list of files affected by commits in the main vault between
  * `startSha` (the distill's fork point) and HEAD (post-squash, after the
  * wrapper's squash-merge has landed). Used by per-completion overlap
  * detection (R7-PERF-2) to compare against the parent session's writes.
  *
- * Unlike `diffWorktreeSinceStart`, this runs against the MAIN vault —
- * the distill worktree has been removed by the time we're called. The
- * squash commit on main brings every file the distill affected into
- * `<startSha>..HEAD`'s name range.
+ * Runs against the MAIN vault — the distill worktree has been removed by
+ * the time we're called. The squash commit on main brings every file the
+ * distill affected into `<startSha>..HEAD`'s name range.
  *
  * If `startSha` is missing (legacy distill meta) we cannot reliably
  * compute the post-squash file set without scanning the now-removed
