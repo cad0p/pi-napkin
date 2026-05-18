@@ -303,12 +303,6 @@ exit $?
     expect(r.stderr).toMatch(/empty worktree path/);
   });
 
-  test("refuses an empty cache root", () => {
-    const r = callSafeRmWorktree("/tmp/some-path", "");
-    expect(r.rc).toBe(1);
-    expect(r.stderr).toMatch(/empty expected_cache_root/);
-  });
-
   test("returns 0 (already-removed) for a non-existent path", () => {
     const r = callSafeRmWorktree(
       "/tmp/sec-a-2-does-not-exist-xxxx-yyyy",

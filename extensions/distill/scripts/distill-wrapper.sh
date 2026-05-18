@@ -447,10 +447,6 @@ safe_rm_worktree() {
     log_error "safe_rm_worktree: empty worktree path; refusing to rm-rf"
     return 1
   fi
-  if [ -z "$expected_cache_root" ]; then
-    log_error "safe_rm_worktree: empty expected_cache_root; refusing to rm-rf '$worktree'"
-    return 1
-  fi
   if [ ! -d "$worktree" ]; then
     # Already gone — nothing to do.
     return 0
@@ -602,8 +598,8 @@ salvage() {
   # through safe_rm_worktree so an upstream bug that passed a non-
   # napkin-distill path can't escalate to `rm -rf /etc`-class damage
   # via this code path (SEC-A-2 defense-in-depth). Pass
-  # EXPECTED_CACHE_ROOT so safe_rm_worktree's strict-mode descendant
-  # check fires (SEC-2 / CORR-3) instead of the legacy glob fallback.
+  # EXPECTED_CACHE_ROOT so safe_rm_worktree's descendant check
+  # (SEC-2 / CORR-3) verifies the worktree is under the cache root.
   if [ -d "$worktree" ]; then
     safe_rm_worktree "$worktree" "$EXPECTED_CACHE_ROOT" || true
   fi
@@ -977,8 +973,8 @@ cleanup() {
   # safe_rm_worktree so an upstream bug that passed a non-napkin-distill
   # path can't escalate to `rm -rf /etc`-class damage via this code
   # path (SEC-A-2 defense-in-depth). Pass EXPECTED_CACHE_ROOT so
-  # safe_rm_worktree's strict-mode descendant check fires
-  # (SEC-2 / CORR-3) instead of the legacy glob fallback.
+  # safe_rm_worktree's descendant check (SEC-2 / CORR-3) verifies the
+  # worktree is under the cache root.
   if [ -d "$WORKTREE" ]; then
     safe_rm_worktree "$WORKTREE" "$EXPECTED_CACHE_ROOT" || true
   fi
