@@ -23,7 +23,7 @@ Fork drift vs upstream v0.2.4:
 - Document vault resolution + first-time setup in the skill so users don't hit the bare-vault footgun ([#9](https://github.com/cad0p/pi-napkin/pull/9)).
 - New `/distill-auto-this-session` command toggles auto-distill for the current session without changing vault config ([#10](https://github.com/cad0p/pi-napkin/pull/10)).
 - Shutdown-distill + worktree-based concurrency safety: distill runs in a per-attempt `git worktree`, multiple sessions / interval / shutdown distills no longer race on vault files ([#11](https://github.com/cad0p/pi-napkin/pull/11)).
-- Agent-driven merge architecture ([#12](https://github.com/cad0p/pi-napkin/pull/12)). Replaces the per-file LLM merge driver with an agent that owns commit → merge → squash → push end-to-end, plus full hardening + race fix + verify:e2e gate. See PR #12's description for the full breakdown.
+- Agent-driven merge architecture ([#12](https://github.com/cad0p/pi-napkin/pull/12)). Replaces the per-file LLM merge driver with an agent that owns commit → merge → squash → push end-to-end, plus full hardening + race fix + verify:e2e gate.
 
 <!-- USER-EDITABLE SECTION END -->
 
