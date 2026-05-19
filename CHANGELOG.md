@@ -10,20 +10,12 @@ First semver release of the cad0p fork, consolidating all changes since upstream
 
 Fork drift vs upstream v0.2.4:
 
-- kb_search / kb_read tool output respects the Ctrl+O expand/collapse toggle ([#2](https://github.com/cad0p/pi-napkin/pull/2)).
-- Biome formatter lint fix in the distill status setter ([#3](https://github.com/cad0p/pi-napkin/pull/3)).
-- Switch the `napkin-ai` dependency to the cad0p fork to consume native global-config support for vault resolution.
-- Use napkin's native global config for vault resolution; README updated accordingly.
-- Enhance the distill prompt with `_about.md` content, folder paths, and daily-notes context so the agent has folder-level orientation when distilling.
-- Trailing-dot cleanup in the prompt for upstream consistency.
-- Distill uses pi's default model when none is configured in vault config ([#5](https://github.com/cad0p/pi-napkin/pull/5)).
-- Document the `_about.md` format in the distill prompt ([#6](https://github.com/cad0p/pi-napkin/pull/6)).
-- Allowlist `napkin-ai` for pnpm build scripts ([#7](https://github.com/cad0p/pi-napkin/pull/7)).
-- Consume `@cad0p/napkin` from npm directly; drop the build-script workaround; README updated ([#8](https://github.com/cad0p/pi-napkin/pull/8)).
-- Document vault resolution + first-time setup in the skill so users don't hit the bare-vault footgun ([#9](https://github.com/cad0p/pi-napkin/pull/9)).
-- New `/distill-auto-this-session` command toggles auto-distill for the current session without changing vault config ([#10](https://github.com/cad0p/pi-napkin/pull/10)).
-- Shutdown-distill + worktree-based concurrency safety: distill runs in a per-attempt `git worktree`, multiple sessions / interval / shutdown distills no longer race on vault files ([#11](https://github.com/cad0p/pi-napkin/pull/11)).
-- Agent-driven merge architecture ([#12](https://github.com/cad0p/pi-napkin/pull/12)). Replaces the per-file LLM merge driver with an agent that owns commit → merge → squash → push end-to-end, plus full hardening + race fix + verify:e2e gate.
+- **Agent-driven distill merge** ([#12](https://github.com/cad0p/pi-napkin/pull/12)). The distill agent now owns commit → merge → squash → push end-to-end, replacing the per-file LLM merge driver. New `distill.maxDurationMinutes` config knob (default 10); structured outcome sidecar; race-fix outcome-write ordering; macOS in CI.
+- **Worktree-based distill concurrency** ([#11](https://github.com/cad0p/pi-napkin/pull/11)). Each distill runs in its own `git worktree` so concurrent distills (interval / shutdown / multiple sessions) don't race on vault files.
+- **`/distill-auto-this-session` command** ([#10](https://github.com/cad0p/pi-napkin/pull/10)). Toggles auto-distill for the current session without changing vault config.
+- **Distill prompt enhancements** ([#6](https://github.com/cad0p/pi-napkin/pull/6) + earlier work). `_about.md` content, folder paths, and daily-notes context give the agent folder-level orientation when distilling. Falls back to pi's default model when none is configured in vault config ([#5](https://github.com/cad0p/pi-napkin/pull/5)).
+- **`@cad0p/napkin` dependency** ([#7](https://github.com/cad0p/pi-napkin/pull/7), [#8](https://github.com/cad0p/pi-napkin/pull/8) + earlier work). Switched from `napkin-ai` to the cad0p fork (consumed from npm directly), unlocking native global-config support for vault resolution. First-time-setup docs in the skill help users avoid the bare-vault footgun ([#9](https://github.com/cad0p/pi-napkin/pull/9)).
+- **UX fixes**. `kb_search` / `kb_read` tool output respects the Ctrl+O expand/collapse toggle ([#2](https://github.com/cad0p/pi-napkin/pull/2)); biome formatter lint in distill status setter ([#3](https://github.com/cad0p/pi-napkin/pull/3)).
 
 <!-- USER-EDITABLE SECTION END -->
 
