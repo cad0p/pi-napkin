@@ -300,6 +300,30 @@ export function spawnDistill(
   }
 }
 
+/**
+ * Surface the fail-soft `setup.error` channel from
+ * {@link ensureVaultReadyForDistill} as a single user-facing notify at
+ * the worktree-spawn call sites. `setup.error` is populated for
+ * generic failures (`git init` / `git add` / `git commit` /
+ * scaffolding-write IO) that have no corresponding structured finding;
+ * the structured `findings` channel is rendered separately by
+ * {@link surfaceHealthFindings}. `hasUI`-safe: subprocess and detached
+ * test contexts skip the notify.
+ */
+function surfaceSetupError(
+  ctx: {
+    hasUI: boolean;
+    ui: {
+      notify: (message: string, severity: "info" | "warning" | "error") => void;
+    };
+  },
+  setupError: string | undefined,
+): void {
+  if (setupError && ctx.hasUI) {
+    ctx.ui.notify(`Auto-distill setup failed: ${setupError}.`, "error");
+  }
+}
+
 export default function (pi: ExtensionAPI) {
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
   let countdownHandle: ReturnType<typeof setInterval> | null = null;
@@ -671,17 +695,7 @@ export default function (pi: ExtensionAPI) {
               "full",
             );
             const { hasErrors } = surfaceHealthFindings(ctx, setup.findings);
-            // Generic fail-soft errors (git init / add / commit /
-            // scaffolding-write failures) populate `setup.error` but not
-            // `findings`; surface the underlying message so the user
-            // sees why the spawn was aborted instead of a silent skip.
-            // Mirrors the session_start handler's symmetric treatment.
-            if (setup.error && ctx.hasUI) {
-              ctx.ui.notify(
-                `Auto-distill setup failed: ${setup.error}.`,
-                "error",
-              );
-            }
+            surfaceSetupError(ctx, setup.error);
             if (!hasErrors && !setup.error) {
               const modelStr = config.model
                 ? `${config.model.provider}/${config.model.id}`
@@ -1193,16 +1207,7 @@ export default function (pi: ExtensionAPI) {
             "full",
           );
           const { hasErrors } = surfaceHealthFindings(args.ctx, setup.findings);
-          // Generic fail-soft errors (git init / add / commit /
-          // scaffolding-write failures) populate `setup.error` but not
-          // `findings`; surface the underlying message and abort, mirroring
-          // session_start's symmetric treatment.
-          if (setup.error && args.ctx.hasUI) {
-            args.ctx.ui.notify(
-              `Auto-distill setup failed: ${setup.error}.`,
-              "error",
-            );
-          }
+          surfaceSetupError(args.ctx, setup.error);
           if (hasErrors || setup.error) return null;
           return worktreeSpawnFn(args);
         }
@@ -1245,16 +1250,7 @@ export default function (pi: ExtensionAPI) {
           "full",
         );
         const { hasErrors } = surfaceHealthFindings(args.ctx, setup.findings);
-        // Generic fail-soft errors (git init / add / commit /
-        // scaffolding-write failures) populate `setup.error` but not
-        // `findings`; surface the underlying message and abort, mirroring
-        // session_start's symmetric treatment.
-        if (setup.error && args.ctx.hasUI) {
-          args.ctx.ui.notify(
-            `Auto-distill setup failed: ${setup.error}.`,
-            "error",
-          );
-        }
+        surfaceSetupError(args.ctx, setup.error);
         if (hasErrors || setup.error) return null;
         return worktreeSpawnFn(args);
       },
