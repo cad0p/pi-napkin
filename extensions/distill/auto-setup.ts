@@ -354,13 +354,20 @@ function mergeManagedBlock(
 ): BlockMergeResult {
   const existed = fs.existsSync(filePath);
   const existing = existed ? fs.readFileSync(filePath, "utf-8") : "";
+  // Detect the existing file's line-ending convention so we can
+  // round-trip it on write. Windows-checkout vaults often store
+  // `.gitignore` with CRLF; rewriting with bare LF would silently
+  // strip the `\r` from every line and look like spurious churn in
+  // git diffs. Default to LF for new files (matches the rest of the
+  // repo's TS-code conventions).
+  const eol: "\n" | "\r\n" = existing.includes("\r\n") ? "\r\n" : "\n";
   // Split into lines while preserving the trailing-newline shape: a
-  // file ending in `\n` produces a trailing empty element from `split`,
+  // file ending in EOL produces a trailing empty element from `split`,
   // which `join` reproduces faithfully on write. Empty file (no bytes
   // OR no trailing newline) is normalised to an empty array.
-  const lines = existing.length > 0 ? existing.split("\n") : [];
-  const hadTrailingNewline = existing.endsWith("\n");
-  // Drop the trailing empty produced by `split` on `...\n`; we'll restore
+  const lines = existing.length > 0 ? existing.split(eol) : [];
+  const hadTrailingNewline = existing.endsWith(eol);
+  // Drop the trailing empty produced by `split` on `...EOL`; we'll restore
   // the newline at write time. Keeps `lines` a clean array of content lines.
   if (hadTrailingNewline && lines.length > 0 && lines[lines.length - 1] === "")
     lines.pop();
@@ -405,11 +412,11 @@ function mergeManagedBlock(
   );
 
   const writeFile = (out: string[]): void => {
-    const body = out.join("\n");
+    const body = out.join(eol);
     // POSIX convention: gitignore ends with a newline. Always emit one
-    // when we're rewriting; it's harmless if the original already had
-    // one and a fix-up if it didn't.
-    fs.writeFileSync(filePath, body.endsWith("\n") ? body : `${body}\n`);
+    // (in the file's detected EOL) when we're rewriting; it's harmless
+    // if the original already had one and a fix-up if it didn't.
+    fs.writeFileSync(filePath, body.endsWith(eol) ? body : `${body}${eol}`);
   };
 
   if (markersAbsent) {

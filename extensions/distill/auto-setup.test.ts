@@ -591,6 +591,102 @@ describe("ensureVaultReadyForDistill", () => {
     expect(after).toBe(initial);
   });
 
+  test("CRLF input: legacy v0.3.0 line-by-line .gitignore migrates with CRLF preserved", () => {
+    // Windows-checkout vaults often store .gitignore with CRLF line
+    // endings. The line-by-line → managed-block migration must
+    // preserve that convention; rewriting with bare LF would silently
+    // strip every \r and look like spurious churn in git diffs.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(
+      path.join(vault, ".gitignore"),
+      `${GITIGNORE_LINES.join("\r\n")}\r\n`,
+    );
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "v0.3.0 line-by-line CRLF"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    // Output uses CRLF throughout — no bare LF anywhere in the file.
+    expect(gi).toContain("\r\n");
+    expect(gi.replace(/\r\n/g, "")).not.toContain("\n");
+    // Markers are present (block was installed/migrated, not skipped).
+    expect(gi).toContain(BLOCK_MARKER_BEGIN);
+    expect(gi).toContain(BLOCK_MARKER_END);
+  });
+
+  test("CRLF input: managed block with drift is reset with CRLF preserved", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    // Canonical block minus one line, written with CRLF.
+    const driftedLF = canonicalBlock().replace(".napkin/distill/\n", "");
+    const driftedCRLF = driftedLF.replace(/\n/g, "\r\n");
+    fs.writeFileSync(path.join(vault, ".gitignore"), driftedCRLF);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "drift CRLF"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.any(String),
+        recovery: "reset",
+      },
+    ]);
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(gi).toContain("\r\n");
+    expect(gi.replace(/\r\n/g, "")).not.toContain("\n");
+    // Drift was repaired: the missing canonical entry is present.
+    expect(gi).toContain(".napkin/distill/");
+  });
+
+  test("CRLF input: idempotent re-run produces no further writes", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    // Already-canonical managed block, written with CRLF.
+    const canonicalLF = canonicalBlock();
+    const canonicalCRLF = canonicalLF.replace(/\n/g, "\r\n");
+    fs.writeFileSync(path.join(vault, ".gitignore"), canonicalCRLF);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "canonical CRLF"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([]);
+
+    // File is byte-identical: no spurious EOL conversion.
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(canonicalCRLF);
+  });
+
+  test("LF input: continues to use LF on rewrite (regression check)", () => {
+    // Regression check: the CRLF-detection logic must not flip LF
+    // files to CRLF. Drift the canonical block under LF and assert
+    // the rewrite stays LF.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const driftedLF = canonicalBlock().replace(".napkin/distill/\n", "");
+    fs.writeFileSync(path.join(vault, ".gitignore"), driftedLF);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "drift LF"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(gi).not.toContain("\r\n");
+    // Drift was repaired.
+    expect(gi).toContain(".napkin/distill/");
+  });
+
   test("BEGIN marker without matching END is malformed: error finding, file untouched", () => {
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
