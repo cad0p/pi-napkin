@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
 
 import type { HealthFinding } from "./auto-setup";
-import { surfaceHealthFindings } from "./health-notify";
+import { surfaceHealthFindings, surfaceSetupError } from "./health-notify";
 
 /**
- * Direct unit tests for `surfaceHealthFindings`. The wiring tests in
- * `health-check-wiring.test.ts` exercise the helper indirectly via real
- * extension call sites; this file pins the helper's contract on the
- * branches that the wiring tests do not cover (multi-finding render,
- * `hasUI: false` subprocess path, return-shape) so a future refactor
+ * Direct unit tests for `surfaceHealthFindings` and `surfaceSetupError`.
+ * The wiring tests in `health-check-wiring.test.ts` exercise the
+ * helpers indirectly via real extension call sites; this file pins
+ * each helper's contract on the branches that the wiring tests do not
+ * cover (multi-finding render, `hasUI: false` subprocess path,
+ * return-shape, exact-format canonical message) so a future refactor
  * that drops one of those branches surfaces immediately.
  */
 
@@ -205,5 +206,48 @@ describe("surfaceHealthFindings", () => {
     ]);
     expect(Object.keys(err)).toEqual(["hasErrors"]);
     expect(err.hasErrors).toBe(true);
+  });
+});
+
+describe("surfaceSetupError", () => {
+  test("undefined setupError: no notify", () => {
+    // The healthy-vault path: `ensureVaultReadyForDistill` returns
+    // `setup.error === undefined` whenever the IO layer succeeds. Pin
+    // that the helper is a no-op in this case so a future refactor
+    // that hoists the notify out of the truthiness guard (e.g.
+    // mutating `if (setupError && ctx.hasUI)` to `if (ctx.hasUI)`)
+    // would surface here as `Auto-distill setup failed: undefined.`
+    // instead of slipping through the wiring tests (which only
+    // exercise the populated-error path).
+    const { ctx, notifies } = makeCtx(true);
+    surfaceSetupError(ctx, undefined);
+    expect(notifies).toEqual([]);
+  });
+
+  test("populated setupError + hasUI=true: one error notify with canonical format", () => {
+    // Pin the exact user-facing message format. The trailing period is
+    // load-bearing (callers grep on the `Auto-distill setup failed: `
+    // prefix in logs; the period closes the sentence so a follow-up
+    // sentence at the session_start call site reads naturally), and
+    // the severity is `error` (not `warning`) so the UI surfaces it
+    // prominently.
+    const { ctx, notifies } = makeCtx(true);
+    surfaceSetupError(ctx, "git init failed: ENOENT");
+    expect(notifies).toHaveLength(1);
+    expect(notifies[0].severity).toBe("error");
+    expect(notifies[0].msg).toBe(
+      "Auto-distill setup failed: git init failed: ENOENT.",
+    );
+  });
+
+  test("populated setupError + hasUI=false: no notify (subprocess path)", () => {
+    // Subprocess and detached test contexts: the helper must not call
+    // ctx.ui.notify (the surface may be a no-op stub or absent).
+    // `surfaceSetupError` returns void, so unlike `surfaceHealthFindings`
+    // there is no signal-channel for the caller to act on — callers
+    // in subprocess paths simply abort the spawn via other means.
+    const { ctx, notifies } = makeCtx(false);
+    surfaceSetupError(ctx, "failed to write scaffolding");
+    expect(notifies).toEqual([]);
   });
 });

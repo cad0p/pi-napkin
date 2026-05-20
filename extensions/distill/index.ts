@@ -31,7 +31,7 @@ import {
   resolveDistillErrorDir,
   spawnDistillInWorktree,
 } from "./distill-workspace";
-import { surfaceHealthFindings } from "./health-notify";
+import { surfaceHealthFindings, surfaceSetupError } from "./health-notify";
 import { getSessionTouchedFiles } from "./session-touched-files";
 import { shouldDistillOnShutdown } from "./should-distill-on-shutdown";
 
@@ -297,30 +297,6 @@ export function spawnDistill(
   } catch {
     fs.rmSync(tmpDir, { recursive: true, force: true });
     return null;
-  }
-}
-
-/**
- * Surface the fail-soft `setup.error` channel from
- * {@link ensureVaultReadyForDistill} as a single user-facing notify at
- * the worktree-spawn call sites. `setup.error` is populated for
- * generic failures (`git init` / `git add` / `git commit` /
- * scaffolding-write IO) that have no corresponding structured finding;
- * the structured `findings` channel is rendered separately by
- * {@link surfaceHealthFindings}. `hasUI`-safe: subprocess and detached
- * test contexts skip the notify.
- */
-function surfaceSetupError(
-  ctx: {
-    hasUI: boolean;
-    ui: {
-      notify: (message: string, severity: "info" | "warning" | "error") => void;
-    };
-  },
-  setupError: string | undefined,
-): void {
-  if (setupError && ctx.hasUI) {
-    ctx.ui.notify(`Auto-distill setup failed: ${setupError}.`, "error");
   }
 }
 

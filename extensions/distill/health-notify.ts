@@ -1,14 +1,20 @@
 /**
- * Surface findings from {@link ensureVaultReadyForDistill} as user-facing
- * notifications. Auto-recovered findings are grouped into a single info
- * notify (one per call); error findings are grouped into a single error
- * notify. Returns whether any error finding fired so the caller can
- * decide to abort a worktree-based spawn.
+ * Two helpers that surface the dual-channel output of
+ * {@link ensureVaultReadyForDistill} as user-facing notifications:
  *
- * The helper is `hasUI`-safe: when `ctx.hasUI === false` (subprocess,
- * detached test contexts), no notifications are emitted but the return
- * value still reflects the error-finding signal so the caller's abort
- * logic continues to work.
+ * - {@link surfaceHealthFindings} renders the structured `findings`
+ *   channel. Auto-recovered findings collapse into one info notify;
+ *   error findings collapse into one error notify. Returns
+ *   `{ hasErrors }` so callers can abort a worktree-based spawn.
+ * - {@link surfaceSetupError} renders the free-form `setup.error`
+ *   channel for fail-soft IO failures (`git init` / `git add` /
+ *   `git commit` / scaffolding-write) that have no corresponding
+ *   structured finding. Single error notify; void return.
+ *
+ * Both helpers are `hasUI`-safe: when `ctx.hasUI === false`
+ * (subprocess, detached test contexts), no notifications are emitted.
+ * `surfaceHealthFindings` still returns the error-finding signal so
+ * the caller's abort logic continues to work in the non-UI path.
  */
 
 import type { HealthFinding } from "./auto-setup";
@@ -66,4 +72,27 @@ export function surfaceHealthFindings(
   }
 
   return { hasErrors: errors.length > 0 };
+}
+
+/**
+ * Render the fail-soft `setup.error` channel from
+ * {@link ensureVaultReadyForDistill} as a single user-facing error
+ * notify. `setup.error` is populated for generic IO failures (`git
+ * init` / `git add` / `git commit` / scaffolding-write) that have no
+ * corresponding structured finding; the structured `findings` channel
+ * is rendered separately by {@link surfaceHealthFindings}.
+ *
+ * Canonical message format: `Auto-distill setup failed: <error>.`
+ * (note the trailing period — callers depend on this for grep-friendly
+ * log scraping). When `setupError` is `undefined` the helper is a
+ * no-op. `hasUI`-safe: subprocess and detached test contexts skip the
+ * notify entirely.
+ */
+export function surfaceSetupError(
+  ctx: HealthNotifyCtx,
+  setupError: string | undefined,
+): void {
+  if (setupError && ctx.hasUI) {
+    ctx.ui.notify(`Auto-distill setup failed: ${setupError}.`, "error");
+  }
 }
