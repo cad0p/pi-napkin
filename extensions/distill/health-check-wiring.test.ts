@@ -110,6 +110,45 @@ function createLegacyEmbeddedVault(): string {
   return dir;
 }
 
+/**
+ * Build a subdir-layout vault with `distill.enabled=true` but with
+ * `.napkin/config.json` deliberately untracked. Mirrors the Issue #14
+ * scenario: the user has a git repo and ran `napkin init`, but never
+ * `git add`-ed the config file.
+ */
+function createSubdirVaultWithUntrackedConfig(): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "health-untracked-"));
+  const env = {
+    ...process.env,
+    GIT_AUTHOR_NAME: "test",
+    GIT_AUTHOR_EMAIL: "t@e",
+    GIT_COMMITTER_NAME: "test",
+    GIT_COMMITTER_EMAIL: "t@e",
+  };
+  const git = (args: string[]) =>
+    spawnSync("git", ["-C", dir, ...args], { env, encoding: "utf-8" });
+  git(["init", "-q", "-b", "main"]);
+  git(["config", "commit.gpgsign", "false"]);
+  git(["config", "user.name", "t"]);
+  git(["config", "user.email", "t@e"]);
+  fs.writeFileSync(
+    path.join(dir, "seed.md"),
+    "---\ntitle: seed\n---\n# seed\n",
+  );
+  git(["add", "seed.md"]);
+  git(["commit", "-q", "-m", "seed"]);
+  // Write config AFTER the seed commit so it stays untracked.
+  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, ".napkin", "config.json"),
+    JSON.stringify({
+      vault: { root: ".." },
+      distill: { enabled: true, intervalMinutes: 60, onShutdown: true },
+    }),
+  );
+  return dir;
+}
+
 function createSession(dir: string): SessionManager {
   const sm = SessionManager.create(dir, dir);
   sm.appendMessage({ role: "user", content: "hello" });
@@ -279,6 +318,74 @@ describe("per-spawn health-check wiring", () => {
       expect(infos.length).toBe(1);
       expect(infos[0].msg).toContain("recovered");
       expect(worktreeCount(vault)).toBe(1);
+    } finally {
+      const dir = resolveCacheRoot(vault);
+      if (fs.existsSync(dir)) {
+        for (const entry of fs.readdirSync(dir)) {
+          spawnSync(
+            "git",
+            [
+              "-C",
+              vault,
+              "worktree",
+              "remove",
+              "--force",
+              path.join(dir, entry),
+            ],
+            { encoding: "utf-8" },
+          );
+        }
+      }
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  test("/distill on subdir-layout vault with untracked config.json: tracks it + spawn proceeds (Issue #14)", async () => {
+    // Issue #14: the worktree path requires config.json to be tracked
+    // so `git worktree add HEAD` copies it into the worktree. The
+    // full-level check at /distill stages + commits the file before
+    // worktreeSpawnFn fires, so the spawned wrapper sees a worktree
+    // with config.json present and napkin's findVault resolves the
+    // worktree as a subdir-layout vault.
+    const vault = createSubdirVaultWithUntrackedConfig();
+    try {
+      const sm = createSession(vault);
+      const { ui, notifyCalls } = makeFakeUI();
+      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+
+      const { api, captured } = makeMockExtensionAPI();
+      distillExtension(api as never);
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.handlers.session_start({ reason: "new" }, ctx as any);
+
+      // Pre-condition: config.json is NOT tracked after session_start
+      // (fast-level skips the tracking check).
+      const lsBefore = spawnSync(
+        "git",
+        ["-C", vault, "ls-files", "--error-unmatch", ".napkin/config.json"],
+        { encoding: "utf-8" },
+      );
+      expect(lsBefore.status).not.toBe(0);
+
+      notifyCalls.length = 0;
+
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.commands.distill.handler("", ctx as any);
+
+      // Post-condition: config.json is now tracked.
+      const lsAfter = spawnSync(
+        "git",
+        ["-C", vault, "ls-files", "--error-unmatch", ".napkin/config.json"],
+        { encoding: "utf-8" },
+      );
+      expect(lsAfter.status).toBe(0);
+
+      // Worktree was created (spawn proceeded).
+      expect(worktreeCount(vault)).toBe(1);
+
+      // No error notify fired (the recovery is auto-recovered).
+      const errors = notifyCalls.filter((n) => n.severity === "error");
+      expect(errors).toEqual([]);
     } finally {
       const dir = resolveCacheRoot(vault);
       if (fs.existsSync(dir)) {

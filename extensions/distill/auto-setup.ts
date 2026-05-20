@@ -282,6 +282,17 @@ const INVARIANT_VAULT_IS_GIT_REPO = "vault-is-git-repo";
 const INVARIANT_CONFIG_JSON_VALID = "config.json-valid-json";
 
 /**
+ * Stable invariant ID for `<configPath>/config.json` being tracked by
+ * git. Auto-recovered via `git add <configRel>`; the existing
+ * scaffolded[] consumption stages and commits the file on the same
+ * pass. Untracked config.json is the root cause of Issue #14: distill
+ * worktrees are checked out via `git worktree add HEAD`, which copies
+ * only tracked files, so untracked config.json never reaches the
+ * worktree and napkin's findVault falls back to legacy embedded layout.
+ */
+const INVARIANT_CONFIG_JSON_TRACKED = "config.json-tracked";
+
+/**
  * Internal result of {@link mergeManagedBlock}.
  *
  * - `changed`: whether the file was created or modified. Callers append
@@ -510,7 +521,6 @@ function mergeManagedBlock(
  */
 export function ensureVaultReadyForDistill(
   vault: SetupVault,
-  // biome-ignore lint/correctness/noUnusedFunctionParameters: required to make every call site explicit; the parameter is consumed by full-level invariants attached in subsequent commits.
   level: HealthLevel,
 ): SetupResult {
   const vaultPath = vault.contentPath;
@@ -614,6 +624,36 @@ export function ensureVaultReadyForDistill(
       error: `failed to write scaffolding: ${msg}`,
       findings,
     };
+  }
+
+  // Full-level only: confirm `<configPath>/config.json` is tracked by
+  // git. Distill worktrees are checked out via `git worktree add HEAD`
+  // which only copies tracked files — an untracked config.json never
+  // reaches the worktree and napkin's findVault falls back to legacy
+  // embedded layout. Closes Issue #14. Auto-recovers by adding the file
+  // to scaffolded[] so the existing-repo branch below stages and
+  // commits it on the same pass.
+  if (level === "full") {
+    const configRel = path.relative(
+      vaultPath,
+      path.join(vault.configPath, "config.json"),
+    );
+    if (fs.existsSync(path.join(vaultPath, configRel))) {
+      const tracked = runGit(vaultPath, [
+        "ls-files",
+        "--error-unmatch",
+        configRel,
+      ]);
+      if (tracked.status !== 0) {
+        scaffolded.push(configRel);
+        findings.push({
+          kind: "auto-recovered",
+          invariant: INVARIANT_CONFIG_JSON_TRACKED,
+          message: `${configRel} was untracked; staged for commit.`,
+          recovery: `git add ${configRel}`,
+        });
+      }
+    }
   }
 
   if (initialized) {

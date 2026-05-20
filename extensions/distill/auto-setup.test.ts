@@ -738,6 +738,118 @@ describe("ensureVaultReadyForDistill", () => {
       expect(f.invariant).not.toBe("config.json-valid-json");
     }
   });
+
+  // --- config.json tracked (full-level only; closes Issue #14) ----------
+  //
+  // Distill worktrees are checked out via `git worktree add HEAD`, which
+  // copies only tracked files. An untracked `.napkin/config.json` never
+  // reaches the worktree, napkin's findVault falls back to legacy
+  // embedded layout, and the distill agent reports `Empty vault`. The
+  // full-level check stages the file via the existing scaffolded[]
+  // commit branch.
+
+  test("existing repo, .napkin/config.json untracked: full-level tracks it", () => {
+    // RED for Issue #14. The fixture mirrors the reported scenario:
+    // a user runs `napkin init` (creates .napkin/config.json) on a
+    // git repo, but never `git add`s the file.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
+    git(vault, ["add", "seed.md"]);
+    git(vault, ["commit", "-q", "-m", "seed"]);
+
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+
+    // Pre-condition: config.json is NOT tracked.
+    const beforeLs = git(vault, [
+      "ls-files",
+      "--error-unmatch",
+      ".napkin/config.json",
+    ]);
+    expect(beforeLs.status).not.toBe(0);
+
+    const r = runSetup("full");
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toContain(".napkin/config.json");
+    expect(r.findings).toContainEqual({
+      kind: "auto-recovered",
+      invariant: "config.json-tracked",
+      message: expect.any(String),
+      recovery: "git add .napkin/config.json",
+    });
+
+    // Post-condition: config.json is tracked.
+    const afterLs = git(vault, [
+      "ls-files",
+      "--error-unmatch",
+      ".napkin/config.json",
+    ]);
+    expect(afterLs.status).toBe(0);
+  });
+
+  test("config.json-tracked is idempotent on a re-run (no spurious recovery, no new commit)", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
+    git(vault, ["add", "seed.md"]);
+    git(vault, ["commit", "-q", "-m", "seed"]);
+
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+
+    runSetup("full");
+    const headAfterFirst = git(vault, ["rev-parse", "HEAD"]).stdout.trim();
+
+    const second = runSetup("full");
+    expect(second.error).toBeUndefined();
+    expect(second.scaffolded).toEqual([]);
+    for (const f of second.findings) {
+      expect(f.invariant).not.toBe("config.json-tracked");
+    }
+
+    const headAfterSecond = git(vault, ["rev-parse", "HEAD"]).stdout.trim();
+    expect(headAfterSecond).toBe(headAfterFirst);
+  });
+
+  test("fast-level does NOT stage config.json even when it is untracked", () => {
+    // The tracking check is full-level only. Fast-level (session_start)
+    // must remain the cheapest necessary call — no git index probes
+    // beyond `ls-files`-style commit gates that the existing fast lane
+    // does not perform.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
+    git(vault, ["add", "seed.md"]);
+    git(vault, ["commit", "-q", "-m", "seed"]);
+
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+
+    const r = runSetup("fast");
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).not.toContain(".napkin/config.json");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-tracked");
+    }
+
+    // Confirm the file is still untracked after a fast-level call.
+    const ls = git(vault, [
+      "ls-files",
+      "--error-unmatch",
+      ".napkin/config.json",
+    ]);
+    expect(ls.status).not.toBe(0);
+  });
 });
 
 describe("countTrackedFiles", () => {
