@@ -29,8 +29,11 @@
  *     `# BEGIN NAPKIN-DISTILL MANAGED` / `# END NAPKIN-DISTILL
  *     MANAGED` block. User content outside the markers is preserved
  *     byte-identically. Drift inside the markers is auto-recovered
- *     (`installed` / `reset` / `migrated from line-by-line`). Malformed
- *     markers refuse auto-fix and emit a loud-error finding.
+ *     with one of four recovery flavors (`installed` / `reset` /
+ *     `migrated from line-by-line` / `reset and migrated from
+ *     line-by-line` — see {@link mergeManagedBlock} for the case
+ *     matrix). Malformed markers refuse auto-fix and emit a
+ *     loud-error finding.
  *   - Fail-soft: returns `{ error }` instead of throwing on
  *     filesystem-write or git-subprocess failures so callers can
  *     surface a notify and abort the spawn while keeping the session
@@ -275,9 +278,12 @@ function runGit(
 
 /**
  * Stable invariant ID for the managed-block check. Auto-recovered
- * findings carry recovery text describing which flavor fired (`installed`,
- * `reset`, `migrated from line-by-line`); error findings indicate the
- * markers are malformed and require manual resolution.
+ * findings carry recovery text describing which flavor fired
+ * (`installed`, `reset`, `migrated from line-by-line`, or the compound
+ * `reset and migrated from line-by-line` when both drift and orphan
+ * lines fire on the same pass — see {@link mergeManagedBlock} for the
+ * case matrix); error findings indicate the markers are malformed and
+ * require manual resolution.
  */
 const INVARIANT_GITIGNORE_BLOCK = "gitignore-block-correct";
 
@@ -341,8 +347,18 @@ interface BlockMergeResult {
  *   - One BEGIN before one END + content matches canonical + no orphans
  *     outside: idempotent no-op.
  *   - One BEGIN before one END + content drifts (added / removed / reordered
- *     entries): rewrite the bracketed region in place (`reset`). Orphan
- *     canonical lines outside the block are also stripped on the same pass.
+ *     entries) + no orphans outside: rewrite the bracketed region in
+ *     place (`reset`).
+ *   - One BEGIN before one END + content matches canonical + orphan
+ *     canonical lines outside: strip the orphans, leave the bracketed
+ *     region untouched (`migrated from line-by-line`). Covers the
+ *     partial-migration shape where a previous run installed the block
+ *     and a later edit re-introduced duplicates above it.
+ *   - One BEGIN before one END + content drifts + orphan canonical lines
+ *     outside: rewrite the bracketed region AND strip the orphans on
+ *     the same pass (`reset and migrated from line-by-line`). Compound
+ *     case for vaults that drifted inside the block while also keeping
+ *     stray duplicates outside.
  *   - Multiple BEGIN markers, one without a matching END, or END before
  *     BEGIN: malformed. Emit a loud-error finding and leave the file
  *     untouched so the user can resolve manually.

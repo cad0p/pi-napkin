@@ -888,6 +888,44 @@ describe("ensureVaultReadyForDistill", () => {
     expect(after).toContain(BLOCK_MARKER_END);
   });
 
+  test("managed block with drift AND orphan canonical lines outside fires the compound recovery", () => {
+    // Both drift conditions on the same pass: the bracketed region
+    // diverges from canonical (one line missing) AND a canonical line
+    // is duplicated outside the block. mergeManagedBlock must rewrite
+    // the block in place AND strip the orphan, surfacing a single
+    // compound recovery flavor (`reset and migrated from line-by-line`).
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const drifted = canonicalBlock().replace(".napkin/distill/\n", "");
+    const initial = `.env\n\n${drifted}`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), initial);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "compound drift"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining(
+          "managed block drifted and orphan canonical lines were present outside it",
+        ),
+        recovery: "reset and migrated from line-by-line",
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    // Block restored to canonical: the missing line is back inside the
+    // managed region.
+    const begin = after.indexOf(BLOCK_MARKER_BEGIN);
+    const end = after.indexOf(BLOCK_MARKER_END);
+    expect(after.slice(begin, end)).toContain(".napkin/distill/");
+    // Orphan stripped from outside the markers.
+    const before = after.slice(0, begin);
+    expect(before).not.toContain(".env");
+  });
+
   // --- config.json validity ----------------------------------------------
   //
   // The vault's config.json is the user's hand-edited (or napkin-
