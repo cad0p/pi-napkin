@@ -5,6 +5,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
+  BLOCK_CONTENT,
+  BLOCK_MARKER_BEGIN,
+  BLOCK_MARKER_END,
   countTrackedFiles,
   ensureVaultReadyForDistill,
   GITIGNORE_LINES,
@@ -25,6 +28,15 @@ function git(cwd: string, args: string[]) {
     GIT_COMMITTER_EMAIL: "test@example.com",
   };
   return spawnSync("git", args, { cwd, env, encoding: "utf-8" });
+}
+
+/**
+ * Render the canonical managed-block region as a string, suitable for
+ * dropping into a `.gitignore` fixture (with surrounding user content,
+ * leading/trailing newlines, etc.).
+ */
+function canonicalBlock(): string {
+  return `${BLOCK_MARKER_BEGIN}\n${BLOCK_CONTENT.join("\n")}\n${BLOCK_MARKER_END}\n`;
 }
 
 describe("ensureVaultReadyForDistill", () => {
@@ -98,7 +110,14 @@ describe("ensureVaultReadyForDistill", () => {
 
     expect(r.initialized).toBe(true);
     expect(r.error).toBeUndefined();
-    expect(r.findings).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.any(String),
+        recovery: "installed",
+      },
+    ]);
     expect(r.scaffolded).toContain(".gitignore");
     // PR #12: no `.gitattributes` is written by auto-setup any more (the
     // merge driver was removed; the agent owns merge resolution in its
@@ -181,7 +200,14 @@ describe("ensureVaultReadyForDistill", () => {
 
     expect(r.initialized).toBe(false);
     expect(r.error).toBeUndefined();
-    expect(r.findings).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.any(String),
+        recovery: "installed",
+      },
+    ]);
     // PR #12: only `.gitignore` is scaffolded (no `.gitattributes`).
     expect(r.scaffolded).toEqual([".gitignore"]);
 
@@ -208,7 +234,7 @@ describe("ensureVaultReadyForDistill", () => {
     expect(headAfterSecond).toBe(headAfterFirst);
   });
 
-  test("existing .gitignore with user content: merges napkin lines, preserves user lines", () => {
+  test("existing .gitignore with user content: installs block, preserves user lines", () => {
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
     fs.writeFileSync(path.join(vault, ".gitignore"), "# user\nnode_modules/\n");
@@ -220,22 +246,29 @@ describe("ensureVaultReadyForDistill", () => {
     const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
     expect(gi).toContain("# user");
     expect(gi).toContain("node_modules/");
+    expect(gi).toContain(BLOCK_MARKER_BEGIN);
+    expect(gi).toContain(BLOCK_MARKER_END);
     expect(gi).toContain(".napkin/distill/");
     expect(gi).toContain("search-cache.json");
     expect(r.scaffolded).toContain(".gitignore");
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.any(String),
+        recovery: "installed",
+      },
+    ]);
   });
 
-  test("existing .gitignore already contains napkin lines: no-op (no scaffolding)", () => {
+  test("existing .gitignore already contains napkin block: no-op (no scaffolding)", () => {
     // PR #12: pre-PR-12 this test asserted that `.gitattributes` would be
     // scaffolded if `.gitignore` was already complete. The merge driver is
     // gone, so a complete `.gitignore` means there's nothing left for
     // auto-setup to scaffold.
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
-    fs.writeFileSync(
-      path.join(vault, ".gitignore"),
-      `${GITIGNORE_LINES.join("\n")}\n`,
-    );
+    fs.writeFileSync(path.join(vault, ".gitignore"), canonicalBlock());
     git(vault, ["add", ".gitignore"]);
     git(vault, ["commit", "-q", "-m", "preseeded"]);
 
@@ -243,6 +276,7 @@ describe("ensureVaultReadyForDistill", () => {
 
     expect(r.error).toBeUndefined();
     expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([]);
   });
 
   test("simulated permission failure: git init fails without throwing", () => {
@@ -286,18 +320,16 @@ describe("ensureVaultReadyForDistill", () => {
 
   test("FB-2: existing empty repo, idempotent scaffolding — seeds empty commit so HEAD is valid", () => {
     // Setup: run `git init` in the vault, then pre-install our scaffolding
-    // file with exact content — so mergeLines appends nothing and the
+    // file with exact content — so mergeManagedBlock writes nothing and the
     // existing-repo commit branch is SKIPPED. This is the idempotent
     // re-run path on a vault that happens to have no commits yet. Pre-FB-2
     // this branch left HEAD unresolvable.
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
-    // Pre-populate .gitignore with our exact content so the scaffold is a
-    // no-op. PR #12: no `.gitattributes` to pre-populate any more.
-    const giContent = `${GITIGNORE_LINES.filter(
-      (l) => l.trim().length > 0 && !l.startsWith("#"),
-    ).join("\n")}\n`;
-    fs.writeFileSync(path.join(vault, ".gitignore"), giContent);
+    // Pre-populate .gitignore with our exact canonical block so the
+    // scaffold is a no-op. PR #12: no `.gitattributes` to pre-populate
+    // any more.
+    fs.writeFileSync(path.join(vault, ".gitignore"), canonicalBlock());
 
     // Pre-condition: HEAD does not resolve (no commits).
     const beforeHead = git(vault, ["rev-parse", "--verify", "HEAD"]);
@@ -307,6 +339,7 @@ describe("ensureVaultReadyForDistill", () => {
     expect(r.error).toBeUndefined();
     expect(r.initialized).toBe(false);
     expect(r.scaffolded).toEqual([]); // nothing to scaffold
+    expect(r.findings).toEqual([]);
     expect(r.seededCommit).toBe(true);
 
     // Post-condition: HEAD resolves — subsequent createDistillWorktree
@@ -321,12 +354,20 @@ describe("ensureVaultReadyForDistill", () => {
     // commit (scaffold commit + seeded empty commit).
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
-    // No pre-existing scaffolding — mergeLines will write `.gitignore`.
+    // No pre-existing scaffolding — mergeManagedBlock will write `.gitignore`.
 
     const r = runSetup();
     expect(r.error).toBeUndefined();
     expect(r.initialized).toBe(false);
     expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.any(String),
+        recovery: "installed",
+      },
+    ]);
     // The scaffold commit provides HEAD; no empty seed needed.
     expect(r.seededCommit).toBeUndefined();
 
@@ -390,7 +431,6 @@ describe("ensureVaultReadyForDistill", () => {
     const r = runSetup();
     expect(r.error).toBeUndefined();
     expect(r.legacyLayout).toBeUndefined();
-    expect(r.findings).toEqual([]);
   });
 
   test("both 'fast' and 'full' levels return the same shape on a healthy fresh vault", () => {
@@ -402,8 +442,16 @@ describe("ensureVaultReadyForDistill", () => {
     fs.writeFileSync(path.join(vault, "f.md"), "# f\n");
     const fast = runSetup("fast");
     expect(fast.error).toBeUndefined();
-    expect(fast.findings).toEqual([]);
     expect(fast.initialized).toBe(true);
+    // First run installs the managed block.
+    expect(fast.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.any(String),
+        recovery: "installed",
+      },
+    ]);
 
     // Run again at full level on the now-set-up vault: idempotent.
     const full = runSetup("full");
@@ -411,6 +459,225 @@ describe("ensureVaultReadyForDistill", () => {
     expect(full.findings).toEqual([]);
     expect(full.initialized).toBe(false);
     expect(full.scaffolded).toEqual([]);
+  });
+
+  // --- managed-block format (Ansible-style markers) -----------------------
+  //
+  // The .gitignore is rewritten as a `# BEGIN NAPKIN-DISTILL MANAGED` /
+  // `# END NAPKIN-DISTILL MANAGED` block. Drift inside the markers is
+  // auto-recovered; user content outside the markers is byte-preserved;
+  // malformed markers refuse auto-fix and surface a loud error.
+
+  test("BLOCK_CONTENT is a strict superset of GITIGNORE_LINES (non-comment, non-blank)", () => {
+    // Pin the contract from the v0.3.0 → v0.3.1 migration: every
+    // line-by-line entry that 0.3.0 vaults relied on must be present in
+    // the managed block. A future edit that drops one would break the
+    // SEC-5 belt-and-braces protections silently; this assertion fails
+    // loudly instead.
+    const meaningful = (xs: readonly string[]) =>
+      xs.map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#"));
+    const oldEntries = meaningful(GITIGNORE_LINES);
+    const newEntries = new Set(meaningful(BLOCK_CONTENT));
+    for (const entry of oldEntries) {
+      expect(newEntries.has(entry)).toBe(true);
+    }
+  });
+
+  test("v0.3.0-shaped line-by-line .gitignore migrates to managed block", () => {
+    // RED: this is the migration scenario for vaults that were set up by
+    // v0.3.0 (line-by-line append, no markers). After the run the file
+    // must have the markers, canonical content inside, and zero orphan
+    // lines outside.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(
+      path.join(vault, ".gitignore"),
+      `${GITIGNORE_LINES.join("\n")}\n`,
+    );
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "v0.3.0 line-by-line"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.any(String),
+        recovery: "migrated from line-by-line",
+      },
+    ]);
+
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(gi).toContain(BLOCK_MARKER_BEGIN);
+    expect(gi).toContain(BLOCK_MARKER_END);
+    // No orphan canonical lines outside the markers.
+    const begin = gi.indexOf(BLOCK_MARKER_BEGIN);
+    const end = gi.indexOf(BLOCK_MARKER_END);
+    const outside =
+      gi.slice(0, begin) + gi.slice(end + BLOCK_MARKER_END.length);
+    const canonicalNonComment = BLOCK_CONTENT.filter(
+      (l) => l.trim().length > 0 && !l.startsWith("#"),
+    );
+    for (const line of canonicalNonComment) {
+      expect(outside).not.toContain(line);
+    }
+  });
+
+  test("managed block with a missing canonical line is reset in place", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    // Canonical block minus one line (`.napkin/distill/`). The drift
+    // detector must spot the difference and rewrite the bracketed
+    // region back to canonical.
+    const drifted = canonicalBlock().replace(".napkin/distill/\n", "");
+    fs.writeFileSync(path.join(vault, ".gitignore"), drifted);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "drift"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.any(String),
+        recovery: "reset",
+      },
+    ]);
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(gi).toContain(".napkin/distill/");
+  });
+
+  test("user content outside markers is preserved byte-identically on idempotent runs", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    // Mix user content above + below the canonical block. Run setup;
+    // assert the file is byte-identical (idempotent path — nothing to do).
+    const userBefore = "# user header\nnode_modules/\nbuild/\n\n";
+    const userAfter = "\n# trailing user note\ncoverage/\n";
+    const initial = `${userBefore}${canonicalBlock()}${userAfter}`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), initial);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "mixed"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([]);
+
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(initial);
+  });
+
+  test("BEGIN marker without matching END is malformed: error finding, file untouched", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const original = `${BLOCK_MARKER_BEGIN}\n.napkin/distill/\n# missing END marker\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), original);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "malformed"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("malformed"),
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(original);
+  });
+
+  test("multiple BEGIN markers are malformed: error finding, file untouched", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const original = `${BLOCK_MARKER_BEGIN}\n.napkin/distill/\n${BLOCK_MARKER_END}\n${BLOCK_MARKER_BEGIN}\n.env\n${BLOCK_MARKER_END}\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), original);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "two-blocks"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("malformed"),
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(original);
+  });
+
+  test("unrelated user '# BEGIN ...' markers do not collide with detection", () => {
+    // The marker match requires the exact `NAPKIN-DISTILL MANAGED`
+    // suffix. A user marker like `# BEGIN MY-OWN-SECTION` must not be
+    // matched as ours.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const userMarkered =
+      "# BEGIN MY-OWN-SECTION\ncoverage/\n# END MY-OWN-SECTION\n";
+    fs.writeFileSync(path.join(vault, ".gitignore"), userMarkered);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "user markers"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.any(String),
+        recovery: "installed",
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toContain("# BEGIN MY-OWN-SECTION");
+    expect(after).toContain("# END MY-OWN-SECTION");
+    expect(after).toContain(BLOCK_MARKER_BEGIN);
+    expect(after).toContain(BLOCK_MARKER_END);
+  });
+
+  test("orphan canonical lines outside an already-correct block are removed", () => {
+    // Partial migration shape: a previous run installed the block, but
+    // the user (or a v0.3.0 stale fixture) has duplicated canonical
+    // entries above the block. The block stays put; the orphans are
+    // stripped on the next run.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const initial = `.napkin/distill/\n.env\n\n${canonicalBlock()}`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), initial);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "partial migration"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.any(String),
+        recovery: "migrated from line-by-line",
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    // Orphan lines above the block are gone.
+    const begin = after.indexOf(BLOCK_MARKER_BEGIN);
+    const before = after.slice(0, begin);
+    expect(before).not.toContain(".napkin/distill/");
+    expect(before).not.toContain(".env");
+    // Block is still intact.
+    expect(after).toContain(BLOCK_MARKER_BEGIN);
+    expect(after).toContain(BLOCK_MARKER_END);
   });
 });
 

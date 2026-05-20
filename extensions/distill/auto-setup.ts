@@ -32,12 +32,72 @@ import * as path from "node:path";
 import { GIT_SUBCOMMAND_TIMEOUT_MS } from "./distill-workspace";
 
 /**
- * Lines appended to `<vault>/.gitignore` when scaffolding. Order is stable so
- * diff noise stays minimal on re-runs. Each group has a section-comment
- * header — we match on the non-comment lines for idempotence, the comments
- * are cosmetic.
+ * Lines previously appended to `<vault>/.gitignore` (line-by-line, no
+ * markers) for vaults at v0.3.0 and earlier. Retained for one release as
+ * the source of truth for migration: at v0.3.1 sessions install the
+ * managed-block format ({@link BLOCK_CONTENT}) and remove orphan lines
+ * matching this list. Test pinning asserts that {@link BLOCK_CONTENT} is
+ * a strict superset of {@link GITIGNORE_LINES} so no scaffolding is
+ * silently dropped during the migration.
+ *
+ * @deprecated Replaced by {@link BLOCK_CONTENT}; will be removed in a
+ *   future release once the migration window has lapsed.
  */
 export const GITIGNORE_LINES: readonly string[] = [
+  "# napkin-distill ephemeral state",
+  ".napkin/distill/",
+  "",
+  "# Obsidian workspace-local state",
+  ".obsidian/workspace*.json",
+  ".obsidian/cache",
+  ".obsidian/.trash/",
+  "",
+  "# Local tmp/cache",
+  "search-cache.json",
+  ".DS_Store",
+  "",
+  "# Common secrets — belt-and-braces for vaults that end up alongside dev",
+  "# work. Auto-distill commits 'git add .' on first run; these patterns",
+  "# keep credentials out of the initial commit even if a user's vault",
+  "# happens to contain them.",
+  ".env",
+  ".env.local",
+  ".env.*.local",
+  "*.pem",
+  "*.key",
+  "id_rsa",
+  "id_ecdsa",
+  "id_ed25519",
+  "secrets.json",
+  ".aws/credentials",
+];
+
+/**
+ * Begin marker for the napkin-distill managed block in `<vault>/.gitignore`.
+ * Ansible-style markers bracket the lines that auto-setup owns; everything
+ * outside the markers is user territory and is never touched. The exact
+ * suffix `NAPKIN-DISTILL MANAGED` is required so unrelated `# BEGIN ...`
+ * comments in the user's file don't collide with our detection.
+ */
+export const BLOCK_MARKER_BEGIN = "# BEGIN NAPKIN-DISTILL MANAGED";
+
+/**
+ * End marker matching {@link BLOCK_MARKER_BEGIN}. See that constant for
+ * the rationale on the exact suffix.
+ */
+export const BLOCK_MARKER_END = "# END NAPKIN-DISTILL MANAGED";
+
+/**
+ * Canonical content of the napkin-distill managed block. Auto-setup
+ * rewrites the bracketed region to match this verbatim whenever drift
+ * is detected (lines added, removed, reordered, or modified).
+ *
+ * Strict superset of {@link GITIGNORE_LINES}: every non-blank,
+ * non-comment entry in `GITIGNORE_LINES` is present here. Test
+ * coverage pins the relationship so future edits to either constant
+ * surface as a test failure.
+ */
+export const BLOCK_CONTENT: readonly string[] = [
   "# napkin-distill ephemeral state",
   ".napkin/distill/",
   "",
@@ -195,58 +255,210 @@ function runGit(
 }
 
 /**
- * Merge `newLines` into the file at `filePath`, appending only the
- * non-comment, non-blank lines that aren't already present. A line is
- * considered "present" if it appears verbatim anywhere in the existing file
- * (leading/trailing whitespace trimmed for comparison). Returns `true` if
- * the file was created or modified.
- *
- * Creates the file if it doesn't exist. Preserves the existing content
- * verbatim otherwise — we never rewrite or re-order user lines.
+ * Stable invariant ID for the managed-block check. Auto-recovered
+ * findings carry recovery text describing which flavor fired (`installed`,
+ * `reset`, `migrated from line-by-line`); error findings indicate the
+ * markers are malformed and require manual resolution.
  */
-function mergeLines(filePath: string, newLines: readonly string[]): boolean {
+const INVARIANT_GITIGNORE_BLOCK = "gitignore-block-correct";
+
+/**
+ * Internal result of {@link mergeManagedBlock}.
+ *
+ * - `changed`: whether the file was created or modified. Callers append
+ *   `.gitignore` to `scaffolded` when this is `true` so the existing-repo
+ *   commit branch picks up the change.
+ * - `finding`: the structured outcome to surface to the user (auto-
+ *   recovered for any successful rewrite; error for malformed markers).
+ *   Absent on the idempotent no-op path.
+ */
+interface BlockMergeResult {
+  changed: boolean;
+  finding?: HealthFinding;
+}
+
+/**
+ * Reconcile `<filePath>` with a `BEGIN/END`-bracketed canonical block. The
+ * file is split into three regions: lines before BEGIN, the bracketed
+ * block, and lines after END. Only the bracketed region is rewritten;
+ * everything outside is user territory and is preserved byte-identically.
+ *
+ * Modes (single pass):
+ *   - Markers absent + no orphan canonical lines elsewhere: install the
+ *     block at the end of the file (`installed`).
+ *   - Markers absent + orphan lines in the file matching canonical content:
+ *     remove orphans + install the block (`migrated from line-by-line`).
+ *     Covers the v0.3.0 → v0.3.1 line-by-line-to-managed-block migration.
+ *   - One BEGIN before one END + content matches canonical + no orphans
+ *     outside: idempotent no-op.
+ *   - One BEGIN before one END + content drifts (added / removed / reordered
+ *     entries): rewrite the bracketed region in place (`reset`). Orphan
+ *     canonical lines outside the block are also stripped on the same pass.
+ *   - Multiple BEGIN markers, one without a matching END, or END before
+ *     BEGIN: malformed. Emit a loud-error finding and leave the file
+ *     untouched so the user can resolve manually.
+ *
+ * Marker matching requires the exact suffix (configured via the
+ * `beginMarker` / `endMarker` arguments) so unrelated `# BEGIN ...`-style
+ * markers in user content do not collide with our detection.
+ */
+function mergeManagedBlock(
+  filePath: string,
+  beginMarker: string,
+  endMarker: string,
+  blockContent: readonly string[],
+): BlockMergeResult {
   const existed = fs.existsSync(filePath);
   const existing = existed ? fs.readFileSync(filePath, "utf-8") : "";
-  const existingSet = new Set(
-    existing
-      .split("\n")
+  // Split into lines while preserving the trailing-newline shape: a
+  // file ending in `\n` produces a trailing empty element from `split`,
+  // which `join` reproduces faithfully on write. Empty file (no bytes
+  // OR no trailing newline) is normalised to an empty array.
+  const lines = existing.length > 0 ? existing.split("\n") : [];
+  const hadTrailingNewline = existing.endsWith("\n");
+  // Drop the trailing empty produced by `split` on `...\n`; we'll restore
+  // the newline at write time. Keeps `lines` a clean array of content lines.
+  if (hadTrailingNewline && lines.length > 0 && lines[lines.length - 1] === "")
+    lines.pop();
+
+  // Locate markers (compare on right-trimmed content to tolerate trailing
+  // whitespace, but reject leading whitespace — indented markers are not
+  // ours and shouldn't match).
+  const beginIndices: number[] = [];
+  const endIndices: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const rtrimmed = lines[i].replace(/\s+$/, "");
+    if (rtrimmed === beginMarker) beginIndices.push(i);
+    else if (rtrimmed === endMarker) endIndices.push(i);
+  }
+
+  const wellFormed =
+    beginIndices.length === 1 &&
+    endIndices.length === 1 &&
+    beginIndices[0] < endIndices[0];
+  const markersAbsent = beginIndices.length === 0 && endIndices.length === 0;
+
+  if (!wellFormed && !markersAbsent) {
+    // Multiple BEGINs, BEGIN without END, or END before BEGIN. Refuse to
+    // touch the file — a heuristic auto-fix risks shredding user content.
+    return {
+      changed: false,
+      finding: {
+        kind: "error",
+        invariant: INVARIANT_GITIGNORE_BLOCK,
+        message: `${filePath} contains malformed napkin-distill managed-block markers; resolve manually before distill can proceed.`,
+      },
+    };
+  }
+
+  // Set of canonical non-blank, non-comment entries. Used to detect
+  // orphan lines anywhere outside the managed block (line-by-line
+  // residue from v0.3.0).
+  const canonicalNonComment = new Set(
+    blockContent
       .map((l) => l.trim())
       .filter((l) => l.length > 0 && !l.startsWith("#")),
   );
 
-  const toAppend: string[] = [];
-  let sawMeaningful = false;
-  for (const line of newLines) {
-    const trimmed = line.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("#")) {
-      // Only keep headers/spacers if there's at least one real line to append
-      // below them. We can't decide that until we've scanned the whole block,
-      // so buffer optimistically and trim at the end.
-      toAppend.push(line);
+  const writeFile = (out: string[]): void => {
+    const body = out.join("\n");
+    // POSIX convention: gitignore ends with a newline. Always emit one
+    // when we're rewriting; it's harmless if the original already had
+    // one and a fix-up if it didn't.
+    fs.writeFileSync(filePath, body.endsWith("\n") ? body : `${body}\n`);
+  };
+
+  if (markersAbsent) {
+    // Identify orphan canonical lines anywhere in the file and drop
+    // them; then append the block.
+    const orphanIndices = new Set<number>();
+    for (let i = 0; i < lines.length; i++) {
+      const trimmed = lines[i].trim();
+      if (canonicalNonComment.has(trimmed)) orphanIndices.add(i);
+    }
+
+    const out: string[] = [];
+    for (let i = 0; i < lines.length; i++) {
+      if (!orphanIndices.has(i)) out.push(lines[i]);
+    }
+    // Visual separator between user content and the appended block:
+    // ensure a single blank line precedes BEGIN if the file had any
+    // content left.
+    if (out.length > 0 && out[out.length - 1].trim() !== "") out.push("");
+    out.push(beginMarker, ...blockContent, endMarker);
+    writeFile(out);
+
+    const flavor =
+      orphanIndices.size > 0 ? "migrated from line-by-line" : "installed";
+    return {
+      changed: true,
+      finding: {
+        kind: "auto-recovered",
+        invariant: INVARIANT_GITIGNORE_BLOCK,
+        message:
+          flavor === "migrated from line-by-line"
+            ? `${filePath} had unmanaged napkin-distill entries; migrated to managed block.`
+            : `${filePath} did not contain a napkin-distill managed block; installed.`,
+        recovery: flavor,
+      },
+    };
+  }
+
+  // Markers well-formed: compare bracketed content vs canonical, and
+  // sweep for orphans outside the block.
+  const beginIdx = beginIndices[0];
+  const endIdx = endIndices[0];
+  const blockLines = lines.slice(beginIdx + 1, endIdx);
+  const blockMatches =
+    blockLines.length === blockContent.length &&
+    blockLines.every(
+      (l, i) => l.replace(/\s+$/, "") === blockContent[i].replace(/\s+$/, ""),
+    );
+
+  const orphanOutside = new Set<number>();
+  for (let i = 0; i < lines.length; i++) {
+    if (i >= beginIdx && i <= endIdx) continue;
+    const trimmed = lines[i].trim();
+    if (canonicalNonComment.has(trimmed)) orphanOutside.add(i);
+  }
+
+  if (blockMatches && orphanOutside.size === 0) {
+    return { changed: false };
+  }
+
+  const out: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (i === beginIdx) {
+      out.push(beginMarker, ...blockContent, endMarker);
+      i = endIdx;
       continue;
     }
-    if (!existingSet.has(trimmed)) {
-      toAppend.push(line);
-      sawMeaningful = true;
-    }
+    if (orphanOutside.has(i)) continue;
+    out.push(lines[i]);
   }
+  writeFile(out);
 
-  if (!sawMeaningful) {
-    // File already has everything meaningful — no change needed even if we
-    // accumulated section headers in `toAppend`.
-    return false;
+  let recovery: string;
+  let message: string;
+  if (!blockMatches && orphanOutside.size > 0) {
+    recovery = "reset and migrated from line-by-line";
+    message = `${filePath} managed block drifted and orphan canonical lines were present outside it; reset block and removed orphans.`;
+  } else if (!blockMatches) {
+    recovery = "reset";
+    message = `${filePath} managed block content drifted from canonical; reset in place.`;
+  } else {
+    recovery = "migrated from line-by-line";
+    message = `${filePath} had orphan canonical lines outside the managed block; removed.`;
   }
-
-  // Prefix with a blank line if the existing file doesn't end with one, so
-  // appended sections are visually separated.
-  let prefix = "";
-  if (existed && existing.length > 0 && !existing.endsWith("\n")) prefix = "\n";
-  else if (existed && existing.length > 0 && !existing.endsWith("\n\n"))
-    prefix = "\n";
-
-  const body = `${toAppend.join("\n")}\n`;
-  fs.writeFileSync(filePath, existing + prefix + body);
-  return true;
+  return {
+    changed: true,
+    finding: {
+      kind: "auto-recovered",
+      invariant: INVARIANT_GITIGNORE_BLOCK,
+      message,
+      recovery,
+    },
+  };
 }
 
 /**
@@ -332,7 +544,14 @@ export function ensureVaultReadyForDistill(
 
   try {
     const giPath = path.join(vaultPath, ".gitignore");
-    if (mergeLines(giPath, GITIGNORE_LINES)) scaffolded.push(".gitignore");
+    const blockResult = mergeManagedBlock(
+      giPath,
+      BLOCK_MARKER_BEGIN,
+      BLOCK_MARKER_END,
+      BLOCK_CONTENT,
+    );
+    if (blockResult.changed) scaffolded.push(".gitignore");
+    if (blockResult.finding) findings.push(blockResult.finding);
     // PR #12: no `.gitattributes` scaffolding. Pre-PR-12 we wrote an
     // `*.md merge=napkin-distill-merge` line; the agent-driven merge
     // architecture has no driver to register.
