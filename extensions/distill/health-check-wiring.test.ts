@@ -539,4 +539,98 @@ describe("per-spawn health-check wiring", () => {
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
+
+  // --- session_start handler ---------------------------------------------
+  //
+  // Fast-level error invariants surface at session_start: the handler
+  // calls `surfaceHealthFindings` so that malformed managed-block
+  // markers and invalid `config.json` fire an error notify and disarm
+  // auto-distill (`autoDistillSuppressed = true`) instead of waiting
+  // ~`intervalMinutes` for the next tick to surface the same finding.
+
+  test("session_start on vault with malformed gitignore markers: error notify, autoDistillSuppressed", async () => {
+    const vault = createSubdirVault();
+    try {
+      // Pre-corrupt `.gitignore` BEFORE session_start so the fast-level
+      // check fires the error finding on the first call.
+      const giPath = path.join(vault, ".gitignore");
+      fs.writeFileSync(
+        giPath,
+        "# BEGIN NAPKIN-DISTILL MANAGED\n.napkin/distill/\n# missing END marker\n",
+      );
+
+      const sm = createSession(vault);
+      const { ui, notifyCalls } = makeFakeUI();
+      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+
+      const { api, captured } = makeMockExtensionAPI();
+      distillExtension(api as never);
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.handlers.session_start({ reason: "new" }, ctx as any);
+
+      const errors = notifyCalls.filter((n) => n.severity === "error");
+      expect(errors.length).toBe(1);
+      expect(errors[0].msg).toContain("malformed");
+
+      // setupFailed -> autoDistillSuppressed=true: a subsequent interval
+      // tick MUST NOT spawn a worktree. Indirect observation of the
+      // suppression flag through the runtime path that consumes it.
+      capturedInterval?.();
+      expect(worktreeCount(vault)).toBe(0);
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  test("session_start on healthy subdir vault: no error notify, auto-distill armed", async () => {
+    // Counterfactual to the malformed-markers test above: when the vault
+    // is in a healthy state, session_start fires no error notify and the
+    // next interval tick proceeds to spawn. The fresh-vault first-pass
+    // notifies are deliberately drained from the buffer before the second
+    // assertion so this pins the `setupFailed = false` branch.
+    const vault = createSubdirVault();
+    try {
+      const sm = createSession(vault);
+      const { ui, notifyCalls } = makeFakeUI();
+      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+
+      const { api, captured } = makeMockExtensionAPI();
+      distillExtension(api as never);
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.handlers.session_start({ reason: "new" }, ctx as any);
+
+      // First-pass session_start installed the managed block, so it
+      // emits the auto-recovered info notify. No error notify on a
+      // healthy fresh vault.
+      const errors = notifyCalls.filter((n) => n.severity === "error");
+      expect(errors).toEqual([]);
+
+      // Drain the install notify and confirm the next interval finds a
+      // healthy vault: zero notifies, worktree spawned.
+      notifyCalls.length = 0;
+      capturedInterval?.();
+      expect(notifyCalls.filter((n) => n.severity === "error")).toEqual([]);
+      expect(notifyCalls.filter((n) => n.severity === "info")).toEqual([]);
+      expect(worktreeCount(vault)).toBe(1);
+    } finally {
+      const dir = resolveCacheRoot(vault);
+      if (fs.existsSync(dir)) {
+        for (const entry of fs.readdirSync(dir)) {
+          spawnSync(
+            "git",
+            [
+              "-C",
+              vault,
+              "worktree",
+              "remove",
+              "--force",
+              path.join(dir, entry),
+            ],
+            { encoding: "utf-8" },
+          );
+        }
+      }
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
 });
