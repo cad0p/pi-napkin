@@ -6,7 +6,11 @@ import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
-import { makeFakeUI, makeMockExtensionAPI } from "./_test-helpers";
+import {
+  makeFakeUI,
+  makeMockExtensionAPI,
+  withNapkinOnPath,
+} from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -158,6 +162,7 @@ function createSession(dir: string): SessionManager {
 
 describe("per-spawn health-check wiring", () => {
   let xdgCacheDir: string;
+  let pathRestore: { restore: () => void } | null = null;
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
   const _savedXdgCache = process.env.XDG_CACHE_HOME;
   const _savedPiBin = process.env.NAPKIN_DISTILL_PI_BIN;
@@ -173,6 +178,14 @@ describe("per-spawn health-check wiring", () => {
     // of a worktree dir) before the wrapper has a chance to do anything
     // meaningful.
     process.env.NAPKIN_DISTILL_PI_BIN = "true";
+    // Put `napkin` on PATH so the detached wrapper passes its --version
+    // smoke check and proceeds along the same code path as routing tests.
+    // Without this, the wrapper fails earlier than the routing tests,
+    // narrowing the race window between `git worktree add` and the
+    // wrapper's cleanup trap (per the spec-blind test-architecture
+    // review's note that the worktree-on-disk observation is racy when
+    // the wrapper exits faster than the test asserts).
+    pathRestore = withNapkinOnPath();
 
     // Capture the distill interval (the > 10s one) so the test can
     // invoke runAutoDistill deterministically.
@@ -192,6 +205,10 @@ describe("per-spawn health-check wiring", () => {
   });
 
   afterEach(() => {
+    if (pathRestore) {
+      pathRestore.restore();
+      pathRestore = null;
+    }
     if (_savedRecurse !== undefined)
       process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
@@ -209,6 +226,23 @@ describe("per-spawn health-check wiring", () => {
     const dir = resolveCacheRoot(vault);
     if (!fs.existsSync(dir)) return 0;
     return fs.readdirSync(dir).length;
+  }
+
+  /**
+   * Remove every worktree the wrapper may have created for `vault`
+   * before `fs.rmSync(vault)` runs. Idempotent: a no-op when no
+   * worktrees were created (the spawn-aborted tests).
+   */
+  function cleanupWorktrees(vault: string): void {
+    const dir = resolveCacheRoot(vault);
+    if (!fs.existsSync(dir)) return;
+    for (const entry of fs.readdirSync(dir)) {
+      spawnSync(
+        "git",
+        ["-C", vault, "worktree", "remove", "--force", path.join(dir, entry)],
+        { encoding: "utf-8" },
+      );
+    }
   }
 
   // --- runAutoDistill (interval tick) ------------------------------------
@@ -236,24 +270,7 @@ describe("per-spawn health-check wiring", () => {
       expect(notifyCalls.filter((n) => n.severity === "info")).toEqual([]);
       expect(worktreeCount(vault)).toBe(1);
     } finally {
-      // Cleanup any worktrees the wrapper may have created
-      const dir = resolveCacheRoot(vault);
-      if (fs.existsSync(dir)) {
-        for (const entry of fs.readdirSync(dir)) {
-          spawnSync(
-            "git",
-            [
-              "-C",
-              vault,
-              "worktree",
-              "remove",
-              "--force",
-              path.join(dir, entry),
-            ],
-            { encoding: "utf-8" },
-          );
-        }
-      }
+      cleanupWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
@@ -285,7 +302,14 @@ describe("per-spawn health-check wiring", () => {
       capturedInterval?.();
 
       const errors = notifyCalls.filter((n) => n.severity === "error");
-      expect(errors.length).toBe(1);
+      expect(errors).toHaveLength(1);
+      // The user-visible prefix and per-finding text are part of the
+      // public contract; pin them by exact-prefix + path + invariant
+      // keyword rather than a single substring match.
+      expect(errors[0].msg.startsWith("Auto-distill cannot proceed: ")).toBe(
+        true,
+      );
+      expect(errors[0].msg).toContain(giPath);
       expect(errors[0].msg).toContain("malformed");
       expect(worktreeCount(vault)).toBe(0);
     } finally {
@@ -307,6 +331,8 @@ describe("per-spawn health-check wiring", () => {
 
       // Wipe the managed-block content from .gitignore so the next
       // full-level call detects drift and reinstalls (auto-recovered).
+      // mergeManagedBlock treats this as markersAbsent + zero orphans,
+      // so the recovery label is `installed`.
       fs.writeFileSync(path.join(vault, ".gitignore"), "# user-only\n");
       notifyCalls.length = 0;
 
@@ -315,27 +341,12 @@ describe("per-spawn health-check wiring", () => {
       const errors = notifyCalls.filter((n) => n.severity === "error");
       const infos = notifyCalls.filter((n) => n.severity === "info");
       expect(errors).toEqual([]);
-      expect(infos.length).toBe(1);
-      expect(infos[0].msg).toContain("recovered");
+      expect(infos).toHaveLength(1);
+      expect(infos[0].msg.startsWith("Auto-distill recovered: ")).toBe(true);
+      expect(infos[0].msg).toContain("(installed)");
       expect(worktreeCount(vault)).toBe(1);
     } finally {
-      const dir = resolveCacheRoot(vault);
-      if (fs.existsSync(dir)) {
-        for (const entry of fs.readdirSync(dir)) {
-          spawnSync(
-            "git",
-            [
-              "-C",
-              vault,
-              "worktree",
-              "remove",
-              "--force",
-              path.join(dir, entry),
-            ],
-            { encoding: "utf-8" },
-          );
-        }
-      }
+      cleanupWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
@@ -380,30 +391,15 @@ describe("per-spawn health-check wiring", () => {
       );
       expect(lsAfter.status).toBe(0);
 
-      // Worktree was created (spawn proceeded).
+      // Worktree spawn fired (the auto-recovery is auto-recovered, not
+      // an error, so the spawn was not aborted).
       expect(worktreeCount(vault)).toBe(1);
 
       // No error notify fired (the recovery is auto-recovered).
       const errors = notifyCalls.filter((n) => n.severity === "error");
       expect(errors).toEqual([]);
     } finally {
-      const dir = resolveCacheRoot(vault);
-      if (fs.existsSync(dir)) {
-        for (const entry of fs.readdirSync(dir)) {
-          spawnSync(
-            "git",
-            [
-              "-C",
-              vault,
-              "worktree",
-              "remove",
-              "--force",
-              path.join(dir, entry),
-            ],
-            { encoding: "utf-8" },
-          );
-        }
-      }
+      cleanupWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
@@ -436,7 +432,11 @@ describe("per-spawn health-check wiring", () => {
       await captured.commands.distill.handler("", ctx as any);
 
       const errors = notifyCalls.filter((n) => n.severity === "error");
-      expect(errors.length).toBe(1);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].msg.startsWith("Auto-distill cannot proceed: ")).toBe(
+        true,
+      );
+      expect(errors[0].msg).toContain(giPath);
       expect(errors[0].msg).toContain("malformed");
       expect(worktreeCount(vault)).toBe(0);
     } finally {
@@ -487,7 +487,8 @@ describe("per-spawn health-check wiring", () => {
         .filter((n) => n.startsWith("napkin-distill-"));
       const newTmp = tmpAfter.filter((n) => !tmpBefore.has(n));
       expect(newTmp.length).toBe(1);
-      // No worktree was created.
+      // No worktree was created (legacy-embedded routing took the
+      // legacy tmpdir path; the worktree-spawn path was bypassed).
       expect(worktreeCount(legacyContent)).toBe(0);
 
       for (const d of newTmp) {
@@ -532,7 +533,11 @@ describe("per-spawn health-check wiring", () => {
       );
 
       const errors = notifyCalls.filter((n) => n.severity === "error");
-      expect(errors.length).toBe(1);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].msg.startsWith("Auto-distill cannot proceed: ")).toBe(
+        true,
+      );
+      expect(errors[0].msg).toContain(giPath);
       expect(errors[0].msg).toContain("malformed");
       expect(worktreeCount(vault)).toBe(0);
     } finally {
@@ -569,7 +574,11 @@ describe("per-spawn health-check wiring", () => {
       await captured.handlers.session_start({ reason: "new" }, ctx as any);
 
       const errors = notifyCalls.filter((n) => n.severity === "error");
-      expect(errors.length).toBe(1);
+      expect(errors).toHaveLength(1);
+      expect(errors[0].msg.startsWith("Auto-distill cannot proceed: ")).toBe(
+        true,
+      );
+      expect(errors[0].msg).toContain(giPath);
       expect(errors[0].msg).toContain("malformed");
 
       // setupFailed -> autoDistillSuppressed=true: a subsequent interval
@@ -606,30 +615,14 @@ describe("per-spawn health-check wiring", () => {
       expect(errors).toEqual([]);
 
       // Drain the install notify and confirm the next interval finds a
-      // healthy vault: zero notifies, worktree spawned.
+      // healthy vault: zero notifies, worktree created.
       notifyCalls.length = 0;
       capturedInterval?.();
       expect(notifyCalls.filter((n) => n.severity === "error")).toEqual([]);
       expect(notifyCalls.filter((n) => n.severity === "info")).toEqual([]);
       expect(worktreeCount(vault)).toBe(1);
     } finally {
-      const dir = resolveCacheRoot(vault);
-      if (fs.existsSync(dir)) {
-        for (const entry of fs.readdirSync(dir)) {
-          spawnSync(
-            "git",
-            [
-              "-C",
-              vault,
-              "worktree",
-              "remove",
-              "--force",
-              path.join(dir, entry),
-            ],
-            { encoding: "utf-8" },
-          );
-        }
-      }
+      cleanupWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
