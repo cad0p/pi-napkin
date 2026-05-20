@@ -445,12 +445,13 @@ describe("ensureVaultReadyForDistill", () => {
     expect(r.legacyLayout).toBeUndefined();
   });
 
-  test("both 'fast' and 'full' levels return the same shape on a healthy fresh vault", () => {
-    // Structural pin: the level parameter is wired through to the
-    // function but does not yet branch behaviour. Subsequent commits
-    // attach extra invariants to `"full"`; pinning the parity at the
-    // happy-path baseline catches accidental divergence at the wiring
-    // layer.
+  test("on a healthy vault, both 'fast' and 'full' levels produce empty findings", () => {
+    // Structural pin at the happy-path baseline. The two levels diverge
+    // on the `config.json-tracked` invariant (full only); on a vault
+    // where config.json is already tracked, both levels see no
+    // outstanding work and return `findings: []`. Catches accidental
+    // wiring-layer divergence (e.g. a stray finding firing at fast
+    // level that was supposed to be full-only).
     fs.writeFileSync(path.join(vault, "f.md"), "# f\n");
     const fast = runSetup("fast");
     expect(fast.error).toBeUndefined();

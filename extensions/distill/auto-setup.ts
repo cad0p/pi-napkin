@@ -1,28 +1,42 @@
 /**
- * First-run auto-setup for auto-distill.
+ * Auto-distill health check + first-run setup for vaults.
  *
- * Auto-distill needs the vault to be a git repo with a `.gitignore` that
- * excludes its ephemeral state (distill worktrees, Obsidian workspace-local
- * caches). Vaults typically ship without any of this — we scaffold it at
- * `session_start` when `distill.enabled` is true.
+ * Auto-distill needs the vault to be a git repo with a `.gitignore`
+ * that excludes its ephemeral state (distill worktrees, Obsidian
+ * workspace-local caches) and (at full level) a `.napkin/config.json`
+ * that is parseable and tracked by git. The same function runs at
+ * `session_start` (`level: "fast"`) to enforce the cheap invariants
+ * once per session, and again before every worktree-based spawn
+ * (`level: "full"`) to enforce the full set including the slower
+ * git probes. See {@link ensureVaultReadyForDistill} for the per-level
+ * invariant matrix.
  *
- * PR #12 (agent-driven merge): pre-PR-12 auto-distill also installed an
- * `*.md merge=napkin-distill-merge` rule in `.gitattributes` to route
- * concurrent-distill conflicts through an LLM merge driver. PR #12 deleted
- * that driver — the distill agent now resolves merges itself in its
- * worktree, so the rule is no longer needed. New vaults never get the rule
- * installed. Existing vaults that already have it are left alone (manual
- * cleanup; the rule becomes inert once the driver script is gone — git
- * silently falls back to its built-in merge driver). See design.md
- * "Migration" for rationale.
+ * PR #12 (agent-driven merge): pre-PR-12 auto-distill also installed
+ * an `*.md merge=napkin-distill-merge` rule in `.gitattributes` to
+ * route concurrent-distill conflicts through an LLM merge driver. PR
+ * #12 deleted that driver — the distill agent now resolves merges
+ * itself in its worktree, so the rule is no longer needed. New vaults
+ * never get the rule installed. Existing vaults that already have it
+ * are left alone (manual cleanup; the rule becomes inert once the
+ * driver script is gone — git silently falls back to its built-in
+ * merge driver). See design.md "Migration" for rationale.
  *
  * Design contract:
- *   - Idempotent: re-running on an already-set-up vault is a no-op (returns
- *     `{ initialized: false, scaffolded: [] }`).
- *   - Non-destructive: never clobbers existing `.gitignore` content; only
- *     appends missing lines.
- *   - Fail-soft: returns `{ error }` instead of throwing so the caller can
- *     surface a notify() and keep the session alive.
+ *   - Idempotent: re-running on a healthy vault returns
+ *     `{ initialized: false, scaffolded: [], findings: [] }` and
+ *     touches nothing on disk.
+ *   - In-place block reconciliation: `.gitignore` is rewritten as a
+ *     `# BEGIN NAPKIN-DISTILL MANAGED` / `# END NAPKIN-DISTILL
+ *     MANAGED` block. User content outside the markers is preserved
+ *     byte-identically. Drift inside the markers is auto-recovered
+ *     (`installed` / `reset` / `migrated from line-by-line`). Malformed
+ *     markers refuse auto-fix and emit a loud-error finding.
+ *   - Fail-soft: returns `{ error }` instead of throwing on
+ *     filesystem-write or git-subprocess failures so the caller can
+ *     surface a notify and keep the session alive. Structured
+ *     per-invariant findings are returned in `findings`; the legacy
+ *     `error` field is preserved for one release for callers that
+ *     branch on the collapsed string.
  */
 
 import { spawnSync } from "node:child_process";
@@ -493,31 +507,43 @@ function mergeManagedBlock(
 
 /**
  * Ensure `<vaultPath>` is a git repo with a `.gitignore` that covers
- * distill's needs. Called at `session_start` (`level: "fast"`) and again
- * before every worktree-based spawn (`level: "full"`).
+ * distill's needs and (at full level) tracks `<configPath>/config.json`.
+ * Called at `session_start` (`level: "fast"`) and again before every
+ * worktree-based spawn (`level: "full"`).
  *
- * Both levels share the layout-shaping lifecycle below; the `level`
- * parameter is reserved for the additional invariants that subsequent
- * commits attach to the `"full"` branch (git-state probes, filesystem
- * probes, orphan cleanup). At this point both calls behave identically.
+ * Lifecycle (in execution order; per-step level scope noted):
+ *   0. fast + full: refuse if the vault uses napkin's legacy embedded
+ *      layout (`configPath === contentPath`). Worktree-based concurrency
+ *      doesn't work on legacy layouts because the branch can't track a
+ *      `.napkin/` subdir that findVault could resolve to. Returns
+ *      `{ error: "legacy-embedded-layout", legacyLayout, findings:
+ *      [subdir-layout error] }` without touching git.
+ *   1. fast + full: validate `<configPath>/config.json` is parseable
+ *      (`config.json-valid-json`). On parse failure, push a loud-error
+ *      finding and continue (the file is the user's hand-edit; we can
+ *      neither auto-correct nor proceed past the smoke check).
+ *   2. fast + full: if `.git/` is missing, run `git init -q -b main`
+ *      (`vault-is-git-repo`, auto-recovered). Failure here aborts with
+ *      `error`.
+ *   3. fast + full: reconcile `.gitignore` against the canonical managed
+ *      block (`gitignore-block-correct`). Auto-recovered for
+ *      install / reset / migration; loud-error for malformed markers.
+ *   4. full only: if `<configPath>/config.json` is untracked, stage it
+ *      (`config.json-tracked`, auto-recovered) so the next
+ *      `git worktree add HEAD` copies it into the worktree. Closes
+ *      Issue #14. Skipped at fast level to keep session_start latency
+ *      under the ~10 ms target.
+ *   5. fast + full: if anything in steps 2–4 changed:
+ *      - fresh init -> `git add .` + commit `"napkin: initial vault
+ *        commit (auto-distill setup)"`
+ *      - existing repo with scaffolded changes -> `git add ...scaffolded`
+ *        + commit `"napkin: scaffold auto-distill git config"`
+ *   6. fast + full: ensure HEAD resolves to a commit; seed an empty
+ *      initial commit when an existing-but-empty repo would leave
+ *      `git worktree add HEAD` unable to pin a ref.
  *
- * Lifecycle:
- *   0. Refuse if the vault uses napkin's legacy embedded layout
- *      (`configPath === contentPath`). Worktree-based concurrency doesn't
- *      work on legacy layouts because the branch can't track a `.napkin/`
- *      subdir that findVault could resolve to. Returns `{ error:
- *      "legacy-embedded-layout", legacyLayout }` without touching git.
- *   1. If `.git/` is missing → `git init`. Failure here aborts with `error`.
- *   2. Merge scaffolding lines into `.gitignore` (idempotent; no-op if
- *      already present).
- *   3. If anything changed:
- *      - fresh init → `git add .` + commit `"napkin: initial vault commit
- *        (auto-distill setup)"`
- *      - existing repo → `git add .gitignore` + commit
- *        `"napkin: scaffold auto-distill git config"`
- *
- * Returned `scaffolded` always uses vault-relative paths so notify messages
- * are compact and portable.
+ * Returned `scaffolded` always uses vault-relative paths so notify
+ * messages are compact and portable.
  */
 export function ensureVaultReadyForDistill(
   vault: SetupVault,

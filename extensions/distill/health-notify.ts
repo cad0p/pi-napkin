@@ -16,9 +16,11 @@ import type { HealthFinding } from "./auto-setup";
 /**
  * Subset of `ExtensionContext` the helper needs: a `hasUI` flag plus a
  * minimal `ui.notify` surface. Kept narrow so test stubs don't have to
- * implement the full pi UI contract.
+ * implement the full pi UI contract. Internal to this module — no
+ * out-of-file consumer; tests use structural typing on the helper's
+ * parameter rather than importing the interface.
  */
-export interface HealthNotifyCtx {
+interface HealthNotifyCtx {
   hasUI: boolean;
   ui: {
     notify: (message: string, severity: "info" | "warning" | "error") => void;
