@@ -626,4 +626,129 @@ describe("per-spawn health-check wiring", () => {
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
+
+  // --- setup.error surfacing at full-level call sites --------------------
+  //
+  // `setup.error` (populated on fail-soft paths: failed git init/add/commit
+  // or scaffolding-write errors) is a separate channel from
+  // `setup.findings`. Each full-level call site (runAutoDistill,
+  // runDistill, session_shutdown) must surface it via an error notify and
+  // abort the spawn — mirroring session_start's symmetric handling.
+  //
+  // The fixture trick: replace the just-installed `.gitignore` file with
+  // a directory of the same name AFTER session_start. The next full-level
+  // call's `mergeManagedBlock` then hits an EISDIR on `fs.writeFileSync`,
+  // which auto-setup's try/catch translates to `setup.error = "failed to
+  // write scaffolding: ..."` with `findings = []`.
+
+  /**
+   * Replace the file at `giPath` with an empty directory. Forces the
+   * next `mergeManagedBlock` call to throw EISDIR on writeFileSync,
+   * which auto-setup translates to `setup.error = "failed to write
+   * scaffolding: ..."` with no corresponding finding.
+   */
+  function replaceGitignoreWithDirectory(giPath: string): void {
+    if (fs.existsSync(giPath)) fs.rmSync(giPath, { force: true });
+    fs.mkdirSync(giPath, { recursive: true });
+  }
+
+  test("runAutoDistill with setup.error (no findings): error notify, no worktree", async () => {
+    const vault = createSubdirVault();
+    try {
+      const sm = createSession(vault);
+      const { ui, notifyCalls } = makeFakeUI();
+      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+
+      const { api, captured } = makeMockExtensionAPI();
+      distillExtension(api as never);
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.handlers.session_start({ reason: "new" }, ctx as any);
+      expect(capturedInterval).not.toBeNull();
+
+      // Replace the just-installed .gitignore with a directory so the
+      // next full-level mergeManagedBlock fails with EISDIR. findings
+      // remain empty; only `setup.error` carries the failure signal.
+      replaceGitignoreWithDirectory(path.join(vault, ".gitignore"));
+      notifyCalls.length = 0;
+
+      capturedInterval?.();
+
+      const errors = notifyCalls.filter((n) => n.severity === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0].msg.startsWith("Auto-distill setup failed: ")).toBe(
+        true,
+      );
+      expect(errors[0].msg).toContain("failed to write scaffolding");
+      expect(worktreeCount(vault)).toBe(0);
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  test("/distill with setup.error (no findings): error notify, no worktree", async () => {
+    const vault = createSubdirVault();
+    try {
+      const sm = createSession(vault);
+      const { ui, notifyCalls } = makeFakeUI();
+      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+
+      const { api, captured } = makeMockExtensionAPI();
+      distillExtension(api as never);
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.handlers.session_start({ reason: "new" }, ctx as any);
+
+      replaceGitignoreWithDirectory(path.join(vault, ".gitignore"));
+      notifyCalls.length = 0;
+
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.commands.distill.handler("", ctx as any);
+
+      const errors = notifyCalls.filter((n) => n.severity === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0].msg.startsWith("Auto-distill setup failed: ")).toBe(
+        true,
+      );
+      expect(errors[0].msg).toContain("failed to write scaffolding");
+      expect(worktreeCount(vault)).toBe(0);
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  test("session_shutdown with setup.error (no findings): error notify, no worktree", async () => {
+    const vault = createSubdirVault();
+    try {
+      const sm = createSession(vault);
+      const { ui, notifyCalls } = makeFakeUI();
+      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+
+      const { api, captured } = makeMockExtensionAPI();
+      distillExtension(api as never);
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.handlers.session_start({ reason: "new" }, ctx as any);
+
+      // Make a session-file change so the size-dedup guard does not
+      // short-circuit before the health check runs.
+      sm.appendMessage({ role: "user", content: "more content" });
+
+      replaceGitignoreWithDirectory(path.join(vault, ".gitignore"));
+      notifyCalls.length = 0;
+
+      await captured.handlers.session_shutdown(
+        { reason: "user-quit" },
+        // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+        ctx as any,
+      );
+
+      const errors = notifyCalls.filter((n) => n.severity === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0].msg.startsWith("Auto-distill setup failed: ")).toBe(
+        true,
+      );
+      expect(errors[0].msg).toContain("failed to write scaffolding");
+      expect(worktreeCount(vault)).toBe(0);
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
 });

@@ -671,10 +671,18 @@ export default function (pi: ExtensionAPI) {
               "full",
             );
             const { hasErrors } = surfaceHealthFindings(ctx, setup.findings);
-            if (hasErrors) {
-              // Skip spawn; do not advance lastSpawnedSize so a
-              // subsequent recovery attempt can re-fire.
-            } else {
+            // Generic fail-soft errors (git init / add / commit /
+            // scaffolding-write failures) populate `setup.error` but not
+            // `findings`; surface the underlying message so the user
+            // sees why the spawn was aborted instead of a silent skip.
+            // Mirrors the session_start handler's symmetric treatment.
+            if (setup.error && ctx.hasUI) {
+              ctx.ui.notify(
+                `Auto-distill setup failed: ${setup.error}.`,
+                "error",
+              );
+            }
+            if (!hasErrors && !setup.error) {
               const modelStr = config.model
                 ? `${config.model.provider}/${config.model.id}`
                 : undefined;
@@ -691,6 +699,8 @@ export default function (pi: ExtensionAPI) {
               // (unlikely but possible with session switch), we don't duplicate.
               lastSpawnedSize = currentSize;
             }
+            // On error: do not advance lastSpawnedSize so a subsequent
+            // recovery attempt can re-fire.
           }
         }
       }
@@ -1183,7 +1193,17 @@ export default function (pi: ExtensionAPI) {
             "full",
           );
           const { hasErrors } = surfaceHealthFindings(args.ctx, setup.findings);
-          if (hasErrors) return null;
+          // Generic fail-soft errors (git init / add / commit /
+          // scaffolding-write failures) populate `setup.error` but not
+          // `findings`; surface the underlying message and abort, mirroring
+          // session_start's symmetric treatment.
+          if (setup.error && args.ctx.hasUI) {
+            args.ctx.ui.notify(
+              `Auto-distill setup failed: ${setup.error}.`,
+              "error",
+            );
+          }
+          if (hasErrors || setup.error) return null;
           return worktreeSpawnFn(args);
         }
         return legacySpawnFn(args);
@@ -1225,7 +1245,17 @@ export default function (pi: ExtensionAPI) {
           "full",
         );
         const { hasErrors } = surfaceHealthFindings(args.ctx, setup.findings);
-        if (hasErrors) return null;
+        // Generic fail-soft errors (git init / add / commit /
+        // scaffolding-write failures) populate `setup.error` but not
+        // `findings`; surface the underlying message and abort, mirroring
+        // session_start's symmetric treatment.
+        if (setup.error && args.ctx.hasUI) {
+          args.ctx.ui.notify(
+            `Auto-distill setup failed: ${setup.error}.`,
+            "error",
+          );
+        }
+        if (hasErrors || setup.error) return null;
         return worktreeSpawnFn(args);
       },
     });
