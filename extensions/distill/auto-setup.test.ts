@@ -491,7 +491,7 @@ describe("ensureVaultReadyForDistill", () => {
     // Pin the contract from the v0.3.0 → v0.3.1 migration: every
     // line-by-line entry that 0.3.0 vaults relied on must be present in
     // the managed block. A future edit that drops one would break the
-    // SEC-5 belt-and-braces protections silently; this assertion fails
+    // secret-pattern protections silently; this assertion fails
     // loudly instead.
     //
     // The assertion iterates GITIGNORE_LINES and checks each entry

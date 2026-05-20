@@ -51,13 +51,16 @@ import * as path from "node:path";
 import { GIT_SUBCOMMAND_TIMEOUT_MS } from "./distill-workspace";
 
 /**
- * Lines previously appended to `<vault>/.gitignore` (line-by-line, no
- * markers) for vaults at v0.3.0 and earlier. Retained for one release as
- * the source of truth for migration: at v0.3.1 sessions install the
- * managed-block format ({@link BLOCK_CONTENT}) and remove orphan lines
- * matching this list. Test pinning asserts that {@link BLOCK_CONTENT} is
- * a strict superset of {@link GITIGNORE_LINES} so no scaffolding is
- * silently dropped during the migration.
+ * Snapshot of the v0.3.0 line-by-line entries appended to
+ * `<vault>/.gitignore` (no markers) for vaults at v0.3.0 and earlier.
+ * At v0.3.1 sessions install the managed-block format and remove
+ * orphan lines matching this list; the canonical content lives in
+ * {@link BLOCK_CONTENT}, which is the source of truth for the
+ * managed block. This constant is retained as a migration shim for
+ * one release: it is pinned by test as a strict subset of
+ * {@link BLOCK_CONTENT} so a future edit that drops a v0.3.0 entry
+ * from the managed block surfaces as a test failure rather than a
+ * silent migration regression.
  *
  * @deprecated Replaced by {@link BLOCK_CONTENT}; will be removed in a
  *   future release once the migration window has lapsed.
