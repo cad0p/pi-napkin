@@ -263,6 +263,25 @@ function runGit(
 const INVARIANT_GITIGNORE_BLOCK = "gitignore-block-correct";
 
 /**
+ * Stable invariant ID for the layout check. Loud-error finding only;
+ * legacy-embedded vaults require manual migration to the subdir layout.
+ */
+const INVARIANT_SUBDIR_LAYOUT = "subdir-layout";
+
+/**
+ * Stable invariant ID for the git-repo presence check. Auto-recovered
+ * via `git init -q -b main` when `.git/` is absent.
+ */
+const INVARIANT_VAULT_IS_GIT_REPO = "vault-is-git-repo";
+
+/**
+ * Stable invariant ID for `<configPath>/config.json` JSON validity.
+ * Loud-error finding only — a corrupt config is the user's hand-edit and
+ * we can't guess the intended content.
+ */
+const INVARIANT_CONFIG_JSON_VALID = "config.json-valid-json";
+
+/**
  * Internal result of {@link mergeManagedBlock}.
  *
  * - `changed`: whether the file was created or modified. Callers append
@@ -515,6 +534,11 @@ export function ensureVaultReadyForDistill(
   // while legacy embedded layout has no `vault.root` and defaults both to
   // the `.napkin/` dir. See `@cad0p/napkin` `dist/utils/vault.js`.
   if (vault.configPath === vault.contentPath) {
+    findings.push({
+      kind: "error",
+      invariant: INVARIANT_SUBDIR_LAYOUT,
+      message: `Vault at ${vaultPath} uses the legacy embedded layout (configPath === contentPath); auto-distill requires the subdir layout.`,
+    });
     return {
       initialized: false,
       scaffolded: [],
@@ -522,6 +546,27 @@ export function ensureVaultReadyForDistill(
       legacyLayout: { configPath: vault.configPath },
       findings,
     };
+  }
+
+  // `<configPath>/config.json` JSON validity. The file is the user's
+  // hand-edited (or napkin-generated) source of truth for vault config;
+  // a parse failure means later napkin operations will silently fall
+  // back to defaults or crash. Skip the check if the file doesn't
+  // exist — the missing-file case is handled at scaffold time, not
+  // here. We probe it before `git init` so a corrupt config doesn't get
+  // smuggled into the initial commit.
+  const configJsonPath = path.join(vault.configPath, "config.json");
+  if (fs.existsSync(configJsonPath)) {
+    try {
+      JSON.parse(fs.readFileSync(configJsonPath, "utf-8"));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      findings.push({
+        kind: "error",
+        invariant: INVARIANT_CONFIG_JSON_VALID,
+        message: `${configJsonPath} is not valid JSON: ${msg}`,
+      });
+    }
   }
 
   const gitDir = path.join(vaultPath, ".git");
@@ -538,6 +583,12 @@ export function ensureVaultReadyForDistill(
       };
     }
     initialized = true;
+    findings.push({
+      kind: "auto-recovered",
+      invariant: INVARIANT_VAULT_IS_GIT_REPO,
+      message: `Initialized git repo at ${vaultPath}.`,
+      recovery: "ran git init",
+    });
   }
 
   const scaffolded: string[] = [];
