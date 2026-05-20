@@ -32,11 +32,13 @@
  *     (`installed` / `reset` / `migrated from line-by-line`). Malformed
  *     markers refuse auto-fix and emit a loud-error finding.
  *   - Fail-soft: returns `{ error }` instead of throwing on
- *     filesystem-write or git-subprocess failures so the caller can
- *     surface a notify and keep the session alive. Structured
- *     per-invariant findings are returned in `findings`; the legacy
- *     `error` field is preserved for one release for callers that
- *     branch on the collapsed string.
+ *     filesystem-write or git-subprocess failures so callers can
+ *     surface a notify and abort the spawn while keeping the session
+ *     alive. Structured per-invariant findings live in `findings`;
+ *     `error` is reserved for the fail-soft generic-failure channel
+ *     that has no corresponding finding (e.g. `git init` / `git add`
+ *     / `git commit` failures, EISDIR on `.gitignore` write, and the
+ *     {@link LEGACY_EMBEDDED_LAYOUT_ERROR} sentinel).
  */
 
 import { spawnSync } from "node:child_process";
