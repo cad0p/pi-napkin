@@ -449,50 +449,63 @@ export default function (pi: ExtensionAPI) {
         },
         "fast",
       );
-      if (setup.error) {
+      if (setup.error === LEGACY_EMBEDDED_LAYOUT_ERROR) {
+        // Legacy embedded layout (`~/.napkin/` with `config.json`
+        // alongside notes, no `.napkin/` subdir). Worktree-based
+        // concurrency requires the subdir layout so napkin's
+        // `findVault` resolves cwd=worktree to the worktree itself.
+        // README has the migration steps; point there instead of
+        // duplicating them in the notify (keeps the notification
+        // short enough to render cleanly in every UI surface). Skip
+        // the structured per-finding render below so the same
+        // condition doesn't fire two error notifies.
         setupFailed = true;
         if (ctx.hasUI) {
-          if (setup.error === LEGACY_EMBEDDED_LAYOUT_ERROR) {
-            // Legacy embedded layout (`~/.napkin/` with `config.json`
-            // alongside notes, no `.napkin/` subdir). Worktree-based
-            // concurrency requires the subdir layout so napkin's
-            // `findVault` resolves cwd=worktree to the worktree itself.
-            // README has the migration steps; point there instead of
-            // duplicating them in the notify (keeps the notification
-            // short enough to render cleanly in every UI surface).
-            ctx.ui.notify(
-              "Auto-distill requires the subdir vault layout. See README for migration, or set distill.enabled: false in vault config.json.",
-              "error",
-            );
-          } else {
-            ctx.ui.notify(
-              `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
-              "error",
-            );
-          }
+          ctx.ui.notify(
+            "Auto-distill requires the subdir vault layout. See README for migration, or set distill.enabled: false in vault config.json.",
+            "error",
+          );
         }
-      } else if (setup.initialized) {
+      } else {
+        // Surface every non-legacy finding through the structured
+        // helper so fast-level error invariants (malformed gitignore
+        // markers, invalid `config.json`) get the same notify
+        // treatment as the full-level call sites and so auto-recovered
+        // findings (gitignore install / migrate / reset) reach the user
+        // here at session_start instead of at the first interval tick.
+        const { hasErrors } = surfaceHealthFindings(ctx, setup.findings);
+        setupFailed = !!setup.error || hasErrors;
+
+        // Generic fail-soft errors (git init / add / commit /
+        // scaffolding-write failures) populate `setup.error` but not
+        // `findings`; surface the underlying message so the user knows
+        // why setup aborted on this session.
+        if (setup.error && ctx.hasUI) {
+          ctx.ui.notify(
+            `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
+            "error",
+          );
+        }
+      }
+
+      // Initial-run onboarding notify carries scope context (file
+      // count, undo command, opt-out hint) that the structured
+      // per-finding render can't. Fires alongside
+      // `surfaceHealthFindings`'s info notify on the first session in a
+      // fresh vault.
+      if (setup.initialized && ctx.hasUI) {
         const tracked = countTrackedFiles(vaultContentPath);
         const files = tracked >= 0 ? tracked : setup.scaffolded.length;
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            [
-              "Initialized git repo in your vault for auto-distill.",
-              `Commit: 'napkin: initial vault commit (auto-distill setup)'`,
-              `Files tracked: ${files}`,
-              `To undo: rm -rf ${path.join(vaultContentPath, ".git")} (removes history, keeps files)`,
-              "To opt out: set distill.enabled: false in vault config.json",
-            ].join("\n"),
-            "info",
-          );
-        }
-      } else if (setup.scaffolded.length > 0) {
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `Added ${setup.scaffolded.join(", ")} for auto-distill.`,
-            "info",
-          );
-        }
+        ctx.ui.notify(
+          [
+            "Initialized git repo in your vault for auto-distill.",
+            `Commit: 'napkin: initial vault commit (auto-distill setup)'`,
+            `Files tracked: ${files}`,
+            `To undo: rm -rf ${path.join(vaultContentPath, ".git")} (removes history, keeps files)`,
+            "To opt out: set distill.enabled: false in vault config.json",
+          ].join("\n"),
+          "info",
+        );
       }
     } catch (err) {
       // Truly unexpected (ensureVaultReadyForDistill is supposed to not
