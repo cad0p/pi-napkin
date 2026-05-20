@@ -185,7 +185,10 @@ export interface HealthFinding {
  *   this to decide whether to surface a first-run notify to the user.
  * - `error`: populated on fail-soft paths (git init failed, filesystem
  *   errors writing the scaffolding, legacy-layout refusal). If set, other
- *   fields reflect partial progress.
+ *   fields reflect partial progress. Consumed at all extension call sites
+ *   (session_start, runDistill, runAutoDistill, session_shutdown handler)
+ *   to surface a `notify("error")` and abort the spawn; the legacy-embedded
+ *   path additionally compares against {@link LEGACY_EMBEDDED_LAYOUT_ERROR}.
  * - `legacyLayout`: populated when auto-setup refused to scaffold because
  *   the vault is using napkin's legacy embedded layout (`configPath ===
  *   contentPath`). The worktree-based concurrency architecture relies on
@@ -216,7 +219,7 @@ export interface SetupResult {
    * motivated FB-2.
    */
   seededCommit?: boolean;
-  findings: HealthFinding[];
+  findings: readonly HealthFinding[];
 }
 
 /**
@@ -693,7 +696,7 @@ export function ensureVaultReadyForDistill(
     // Fresh init: commit the entire vault so auto-distill has a HEAD to
     // branch from. `git add .` respects the just-written .gitignore so we
     // don't accidentally stage `.napkin/distill/` (the per-worktree
-    // session fork) or common secret files (see GITIGNORE_LINES). Distill
+    // session fork) or common secret files (see BLOCK_CONTENT). Distill
     // worktrees themselves live OUTSIDE the vault now (XDG cache), so
     // there's no in-vault worktrees/ path to exclude.
     const add = runGit(vaultPath, ["add", "."]);
