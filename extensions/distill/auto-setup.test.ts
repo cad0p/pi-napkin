@@ -114,13 +114,13 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "auto-recovered",
         invariant: "vault-is-git-repo",
-        message: expect.any(String),
+        message: expect.stringContaining("Initialized git repo"),
         recovery: "ran git init",
       },
       {
         kind: "auto-recovered",
         invariant: "gitignore-block-correct",
-        message: expect.any(String),
+        message: expect.stringContaining("did not contain"),
         recovery: "installed",
       },
     ]);
@@ -210,7 +210,7 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "auto-recovered",
         invariant: "gitignore-block-correct",
-        message: expect.any(String),
+        message: expect.stringContaining("did not contain"),
         recovery: "installed",
       },
     ]);
@@ -261,7 +261,7 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "auto-recovered",
         invariant: "gitignore-block-correct",
-        message: expect.any(String),
+        message: expect.stringContaining("did not contain"),
         recovery: "installed",
       },
     ]);
@@ -370,7 +370,7 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "auto-recovered",
         invariant: "gitignore-block-correct",
-        message: expect.any(String),
+        message: expect.stringContaining("did not contain"),
         recovery: "installed",
       },
     ]);
@@ -412,7 +412,7 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "error",
         invariant: "subdir-layout",
-        message: expect.any(String),
+        message: expect.stringContaining("legacy embedded layout"),
       },
     ]);
     // Must not have attempted git init — no `.git` dir in the vault.
@@ -461,13 +461,13 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "auto-recovered",
         invariant: "vault-is-git-repo",
-        message: expect.any(String),
+        message: expect.stringContaining("Initialized git repo"),
         recovery: "ran git init",
       },
       {
         kind: "auto-recovered",
         invariant: "gitignore-block-correct",
-        message: expect.any(String),
+        message: expect.stringContaining("did not contain"),
         recovery: "installed",
       },
     ]);
@@ -493,13 +493,27 @@ describe("ensureVaultReadyForDistill", () => {
     // the managed block. A future edit that drops one would break the
     // SEC-5 belt-and-braces protections silently; this assertion fails
     // loudly instead.
+    //
+    // The assertion iterates GITIGNORE_LINES and checks each entry
+    // literally appears as a (post-trim) line in BLOCK_CONTENT. This
+    // pin is structurally tighter than a set-membership check: a future
+    // divergence (typo on one side, drop on the other) will surface a
+    // per-line mismatch rather than slipping through a cardinality
+    // assertion.
     const meaningful = (xs: readonly string[]) =>
       xs.map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#"));
     const oldEntries = meaningful(GITIGNORE_LINES);
-    const newEntries = new Set(meaningful(BLOCK_CONTENT));
+    const blockTrimmed = BLOCK_CONTENT.map((l) => l.trim());
     for (const entry of oldEntries) {
-      expect(newEntries.has(entry)).toBe(true);
+      // Iterate; each entry must literally be one of the lines in the
+      // canonical block array (post-trim, to tolerate trailing-whitespace
+      // edits in either constant).
+      expect(blockTrimmed).toContain(entry);
     }
+    // Backstop: BLOCK_CONTENT must be at least as large as the legacy
+    // line-by-line list (it can grow with new canonical entries; it
+    // cannot shrink without breaking the migration contract).
+    expect(BLOCK_CONTENT.length).toBeGreaterThanOrEqual(GITIGNORE_LINES.length);
   });
 
   test("v0.3.0-shaped line-by-line .gitignore migrates to managed block", () => {
@@ -523,7 +537,7 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "auto-recovered",
         invariant: "gitignore-block-correct",
-        message: expect.any(String),
+        message: expect.stringContaining("had unmanaged"),
         recovery: "migrated from line-by-line",
       },
     ]);
@@ -562,7 +576,7 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "auto-recovered",
         invariant: "gitignore-block-correct",
-        message: expect.any(String),
+        message: expect.stringContaining("drifted"),
         recovery: "reset",
       },
     ]);
@@ -635,7 +649,7 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "auto-recovered",
         invariant: "gitignore-block-correct",
-        message: expect.any(String),
+        message: expect.stringContaining("drifted"),
         recovery: "reset",
       },
     ]);
@@ -829,7 +843,7 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "auto-recovered",
         invariant: "gitignore-block-correct",
-        message: expect.any(String),
+        message: expect.stringContaining("did not contain"),
         recovery: "installed",
       },
     ]);
@@ -859,7 +873,7 @@ describe("ensureVaultReadyForDistill", () => {
       {
         kind: "auto-recovered",
         invariant: "gitignore-block-correct",
-        message: expect.any(String),
+        message: expect.stringContaining("orphan canonical lines outside"),
         recovery: "migrated from line-by-line",
       },
     ]);
@@ -954,7 +968,7 @@ describe("ensureVaultReadyForDistill", () => {
     expect(r.findings).toContainEqual({
       kind: "auto-recovered",
       invariant: "config.json-tracked",
-      message: expect.any(String),
+      message: expect.stringContaining("untracked"),
       recovery: "git add .napkin/config.json",
     });
 

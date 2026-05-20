@@ -183,12 +183,27 @@ describe("surfaceHealthFindings", () => {
     expect(okResult).toEqual({ hasErrors: false });
   });
 
-  test("hasErrors return type is boolean", () => {
+  test("hasErrors return shape is exactly { hasErrors: boolean } — no extra fields", () => {
     // Pin the return shape so a future refactor that returns the
     // error-finding count or array doesn't slip through type-narrowing.
-    const { ctx } = makeCtx(true);
-    const result = surfaceHealthFindings(ctx, []);
-    expect(typeof result.hasErrors).toBe("boolean");
-    expect(result.hasErrors).toBe(false);
+    // Object.keys + toBe(true)/toBe(false) is stricter than `typeof ===
+    // "boolean"` (which would also accept a wrapped Boolean object) and
+    // tighter than the rest of the file's existing per-finding shape
+    // assertions, since it pins the absence of additional fields.
+    const { ctx: emptyCtx } = makeCtx(true);
+    const empty = surfaceHealthFindings(emptyCtx, []);
+    expect(Object.keys(empty)).toEqual(["hasErrors"]);
+    expect(empty.hasErrors).toBe(false);
+
+    const { ctx: errCtx } = makeCtx(true);
+    const err = surfaceHealthFindings(errCtx, [
+      {
+        kind: "error",
+        invariant: "subdir-layout",
+        message: "err",
+      },
+    ]);
+    expect(Object.keys(err)).toEqual(["hasErrors"]);
+    expect(err.hasErrors).toBe(true);
   });
 });

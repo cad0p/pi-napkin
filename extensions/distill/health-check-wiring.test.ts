@@ -582,10 +582,23 @@ describe("per-spawn health-check wiring", () => {
       expect(errors[0].msg).toContain("malformed");
 
       // setupFailed -> autoDistillSuppressed=true: a subsequent interval
-      // tick MUST NOT spawn a worktree. Indirect observation of the
-      // suppression flag through the runtime path that consumes it.
+      // tick MUST NOT spawn a worktree. To pin this assertion to the
+      // suppression flag specifically (and not the recurrence of the
+      // same error finding inside the interval-tick health check), we
+      // repair the .gitignore between session_start and the tick. With
+      // the file healthy at tick time, the only mechanism keeping the
+      // worktree count at 0 is `autoDistillSuppressed = true`; if the
+      // flag were broken, the interval callback would proceed to
+      // spawn.
+      fs.unlinkSync(giPath);
+      notifyCalls.length = 0;
+
       capturedInterval?.();
       expect(worktreeCount(vault)).toBe(0);
+      // Defensive: no fresh notify on the tick — the callback short-
+      // circuited on the suppression flag, so neither the health
+      // check nor any spawn ran.
+      expect(notifyCalls).toEqual([]);
     } finally {
       fs.rmSync(vault, { recursive: true, force: true });
     }
