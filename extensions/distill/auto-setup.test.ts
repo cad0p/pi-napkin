@@ -634,6 +634,85 @@ describe("ensureVaultReadyForDistill", () => {
     expect(after).toBe(original);
   });
 
+  test("END marker before BEGIN marker is malformed: error finding, file untouched", () => {
+    // The wellFormed predicate requires beginIndices[0] < endIndices[0].
+    // A file where the END marker appears earlier in the file than the
+    // BEGIN marker (e.g. a user shuffled the block) hits the malformed
+    // branch even though the count of each marker is exactly 1.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const original = `${BLOCK_MARKER_END}\n.napkin/distill/\n${BLOCK_MARKER_BEGIN}\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), original);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "end-before-begin"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("malformed"),
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(original);
+  });
+
+  test("END marker without any BEGIN is malformed: error finding, file untouched", () => {
+    // markersAbsent is `beginIndices.length === 0 && endIndices.length
+    // === 0`. An END marker on its own (zero BEGINs, one or more ENDs)
+    // fails markersAbsent and the wellFormed-pair predicate, so it hits
+    // the malformed branch instead of being silently ignored.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const original = `# user-only\n${BLOCK_MARKER_END}\nlogs/\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), original);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "orphan-end"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("malformed"),
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(original);
+  });
+
+  test("asymmetric markers (2 BEGIN, 1 END) are malformed: error finding, file untouched", () => {
+    // Distinct from the existing "multiple BEGIN markers" test (2 BEGIN
+    // + 2 END = two complete blocks): here the marker counts disagree
+    // (2 BEGIN + 1 END), which also fails the wellFormed predicate
+    // (length === 1 on both sides) without being a complete-block
+    // duplicate.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const original = `${BLOCK_MARKER_BEGIN}\n.napkin/distill/\n${BLOCK_MARKER_END}\n${BLOCK_MARKER_BEGIN}\n.env\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), original);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "asymmetric markers"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("malformed"),
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(original);
+  });
+
   test("unrelated user '# BEGIN ...' markers do not collide with detection", () => {
     // The marker match requires the exact `NAPKIN-DISTILL MANAGED`
     // suffix. A user marker like `# BEGIN MY-OWN-SECTION` must not be
