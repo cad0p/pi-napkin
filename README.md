@@ -213,7 +213,7 @@ Or edit `<vault>/.napkin/config.json` directly:
 
 When enabled, on session start the extension:
 
-1. Runs `ensureVaultReadyForAutoDistill` on the vault (see below) — git-inits if needed and scaffolds `.gitignore`.
+1. Runs `ensureVaultReadyForDistill` on the vault (see below) — git-inits if needed and scaffolds `.gitignore`.
 2. Sweeps stale distill worktrees left by crashed pi instances (`cleanupStaleWorktrees`).
 3. Arms a timer (`intervalMinutes`) that spawns a detached `pi -p` subprocess on tick.
 4. On shutdown (unless `distill.onShutdown` is false or the session file is already captured), spawns one final distill.

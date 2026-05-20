@@ -6,8 +6,9 @@ import * as path from "node:path";
 
 import {
   countTrackedFiles,
-  ensureVaultReadyForAutoDistill,
+  ensureVaultReadyForDistill,
   GITIGNORE_LINES,
+  type HealthLevel,
   LEGACY_EMBEDDED_LAYOUT_ERROR,
 } from "./auto-setup";
 
@@ -26,7 +27,7 @@ function git(cwd: string, args: string[]) {
   return spawnSync("git", args, { cwd, env, encoding: "utf-8" });
 }
 
-describe("ensureVaultReadyForAutoDistill", () => {
+describe("ensureVaultReadyForDistill", () => {
   let vault: string;
 
   beforeEach(() => {
@@ -43,7 +44,9 @@ describe("ensureVaultReadyForAutoDistill", () => {
    * Helper: run setup under a git identity env so the initial commit succeeds
    * even when the CI runner has no default author configured.
    */
-  function runSetup(): ReturnType<typeof ensureVaultReadyForAutoDistill> {
+  function runSetup(
+    level: HealthLevel = "fast",
+  ): ReturnType<typeof ensureVaultReadyForDistill> {
     const saved = {
       name: process.env.GIT_AUTHOR_NAME,
       email: process.env.GIT_AUTHOR_EMAIL,
@@ -64,10 +67,13 @@ describe("ensureVaultReadyForAutoDistill", () => {
       // Subdir layout: configPath is a distinct path from contentPath.
       // The legacy-embedded-layout check compares string equality only;
       // the path doesn't need to exist on disk for the happy-path tests.
-      return ensureVaultReadyForAutoDistill({
-        contentPath: vault,
-        configPath: path.join(vault, ".napkin"),
-      });
+      return ensureVaultReadyForDistill(
+        {
+          contentPath: vault,
+          configPath: path.join(vault, ".napkin"),
+        },
+        level,
+      );
     } finally {
       if (saved.name === undefined) delete process.env.GIT_AUTHOR_NAME;
       else process.env.GIT_AUTHOR_NAME = saved.name;
@@ -92,6 +98,7 @@ describe("ensureVaultReadyForAutoDistill", () => {
 
     expect(r.initialized).toBe(true);
     expect(r.error).toBeUndefined();
+    expect(r.findings).toEqual([]);
     expect(r.scaffolded).toContain(".gitignore");
     // PR #12: no `.gitattributes` is written by auto-setup any more (the
     // merge driver was removed; the agent owns merge resolution in its
@@ -174,6 +181,7 @@ describe("ensureVaultReadyForAutoDistill", () => {
 
     expect(r.initialized).toBe(false);
     expect(r.error).toBeUndefined();
+    expect(r.findings).toEqual([]);
     // PR #12: only `.gitignore` is scaffolded (no `.gitattributes`).
     expect(r.scaffolded).toEqual([".gitignore"]);
 
@@ -194,6 +202,7 @@ describe("ensureVaultReadyForAutoDistill", () => {
     expect(second.initialized).toBe(false);
     expect(second.scaffolded).toEqual([]);
     expect(second.error).toBeUndefined();
+    expect(second.findings).toEqual([]);
 
     const headAfterSecond = git(vault, ["rev-parse", "HEAD"]).stdout.trim();
     expect(headAfterSecond).toBe(headAfterFirst);
@@ -243,10 +252,13 @@ describe("ensureVaultReadyForAutoDistill", () => {
       const savedName = process.env.GIT_AUTHOR_NAME;
       process.env.GIT_AUTHOR_NAME = "test";
       try {
-        const r = ensureVaultReadyForAutoDistill({
-          contentPath: ro,
-          configPath: path.join(ro, ".napkin"),
-        });
+        const r = ensureVaultReadyForDistill(
+          {
+            contentPath: ro,
+            configPath: path.join(ro, ".napkin"),
+          },
+          "fast",
+        );
         // If the kernel didn't enforce the read-only (common under root /
         // bind mounts), the setup may actually succeed. Either way, the
         // contract is: no throw.
@@ -338,14 +350,18 @@ describe("ensureVaultReadyForAutoDistill", () => {
   test("legacy-embedded layout (configPath === contentPath) \u2192 refuses, returns legacyLayout", () => {
     // Legacy vault: config.json lives alongside notes at the vault root,
     // no `.napkin/` subdir. napkin resolves contentPath = configPath.
-    const r = ensureVaultReadyForAutoDistill({
-      contentPath: vault,
-      configPath: vault,
-    });
+    const r = ensureVaultReadyForDistill(
+      {
+        contentPath: vault,
+        configPath: vault,
+      },
+      "fast",
+    );
     expect(r.error).toBe(LEGACY_EMBEDDED_LAYOUT_ERROR);
     expect(r.legacyLayout).toEqual({ configPath: vault });
     expect(r.initialized).toBe(false);
     expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([]);
     // Must not have attempted git init — no `.git` dir in the vault.
     expect(fs.existsSync(path.join(vault, ".git"))).toBe(false);
   });
@@ -355,10 +371,13 @@ describe("ensureVaultReadyForAutoDistill", () => {
     // even if the caller later ignores the error. Otherwise a stale
     // `.gitignore` would be the only artifact the user sees after a
     // failed migration attempt.
-    const r = ensureVaultReadyForAutoDistill({
-      contentPath: vault,
-      configPath: vault,
-    });
+    const r = ensureVaultReadyForDistill(
+      {
+        contentPath: vault,
+        configPath: vault,
+      },
+      "fast",
+    );
     expect(r.error).toBe(LEGACY_EMBEDDED_LAYOUT_ERROR);
     expect(fs.existsSync(path.join(vault, ".gitignore"))).toBe(false);
     expect(fs.existsSync(path.join(vault, ".gitattributes"))).toBe(false);
@@ -371,6 +390,27 @@ describe("ensureVaultReadyForAutoDistill", () => {
     const r = runSetup();
     expect(r.error).toBeUndefined();
     expect(r.legacyLayout).toBeUndefined();
+    expect(r.findings).toEqual([]);
+  });
+
+  test("both 'fast' and 'full' levels return the same shape on a healthy fresh vault", () => {
+    // Structural pin: the level parameter is wired through to the
+    // function but does not yet branch behaviour. Subsequent commits
+    // attach extra invariants to `"full"`; pinning the parity at the
+    // happy-path baseline catches accidental divergence at the wiring
+    // layer.
+    fs.writeFileSync(path.join(vault, "f.md"), "# f\n");
+    const fast = runSetup("fast");
+    expect(fast.error).toBeUndefined();
+    expect(fast.findings).toEqual([]);
+    expect(fast.initialized).toBe(true);
+
+    // Run again at full level on the now-set-up vault: idempotent.
+    const full = runSetup("full");
+    expect(full.error).toBeUndefined();
+    expect(full.findings).toEqual([]);
+    expect(full.initialized).toBe(false);
+    expect(full.scaffolded).toEqual([]);
   });
 });
 

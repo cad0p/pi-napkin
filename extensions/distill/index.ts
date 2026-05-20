@@ -15,7 +15,7 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import {
   countTrackedFiles,
-  ensureVaultReadyForAutoDistill,
+  ensureVaultReadyForDistill,
   LEGACY_EMBEDDED_LAYOUT_ERROR,
 } from "./auto-setup";
 import {
@@ -441,10 +441,13 @@ export default function (pi: ExtensionAPI) {
     const vaultContentPath = napkinVault.contentPath;
     let setupFailed = false;
     try {
-      const setup = ensureVaultReadyForAutoDistill({
-        contentPath: vaultContentPath,
-        configPath: napkinVault.configPath,
-      });
+      const setup = ensureVaultReadyForDistill(
+        {
+          contentPath: vaultContentPath,
+          configPath: napkinVault.configPath,
+        },
+        "fast",
+      );
       if (setup.error) {
         setupFailed = true;
         if (ctx.hasUI) {
@@ -491,7 +494,7 @@ export default function (pi: ExtensionAPI) {
         }
       }
     } catch (err) {
-      // Truly unexpected (ensureVaultReadyForAutoDistill is supposed to not
+      // Truly unexpected (ensureVaultReadyForDistill is supposed to not
       // throw). Log + continue, worst case later operations fail gracefully.
       console.error("[napkin-distill] auto-setup threw:", err);
     }
@@ -1132,7 +1135,7 @@ export default function (pi: ExtensionAPI) {
           path.join(args.vaultContentPath, ".git"),
         );
         // Legacy-embedded detection matches the predicate in
-        // `ensureVaultReadyForAutoDistill` (keep the two gates in lockstep).
+        // `ensureVaultReadyForDistill` (keep the two gates in lockstep).
         const isLegacyEmbedded = args.vaultConfigPath === args.vaultContentPath;
         if (gitPresent && args.config.enabled && !isLegacyEmbedded) {
           return worktreeSpawnFn(args);

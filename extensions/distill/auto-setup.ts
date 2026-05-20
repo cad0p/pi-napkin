@@ -67,7 +67,44 @@ export const GITIGNORE_LINES: readonly string[] = [
 ];
 
 /**
- * Result of {@link ensureVaultReadyForAutoDistill}.
+ * Depth of the health check run. Each call site explicitly chooses one;
+ * there is no default.
+ *
+ * - `"fast"`: file-only invariants and the cheapest necessary git
+ *   invocations. Suitable for `session_start`, where added latency is
+ *   user-visible. Target ~10 ms.
+ * - `"full"`: superset of `"fast"` plus git-state probes, filesystem
+ *   probes, and orphan cleanup. Suitable for the moments immediately
+ *   before a worktree-based distill is spawned, where the LLM prelude
+ *   masks tens of milliseconds. Target ~50–100 ms.
+ */
+export type HealthLevel = "fast" | "full";
+
+/**
+ * Outcome of a single named health-check invariant.
+ *
+ * - `kind: "auto-recovered"`: the invariant was violated but `auto-setup`
+ *   restored the expected state in place. Surface as an info notify; the
+ *   caller proceeds with the distill spawn.
+ * - `kind: "error"`: the invariant was violated and recovery is owned by
+ *   the user (e.g. legacy layout migration, malformed JSON). Surface as
+ *   an error notify; the caller aborts the distill spawn.
+ * - `invariant`: stable identifier for the check. One ID per check; the
+ *   per-flavor recovery messaging lives in `recovery`.
+ * - `message`: human-readable description, suitable for notify text.
+ * - `recovery`: populated for `auto-recovered` findings; describes what
+ *   was done (e.g. `"git add .napkin/config.json"`,
+ *   `"installed managed gitignore block"`).
+ */
+export interface HealthFinding {
+  kind: "auto-recovered" | "error";
+  invariant: string;
+  message: string;
+  recovery?: string;
+}
+
+/**
+ * Result of {@link ensureVaultReadyForDistill}.
  *
  * - `initialized`: a brand-new `git init` ran (vault had no `.git/` before).
  * - `scaffolded`: files whose contents were created or modified. Callers use
@@ -82,6 +119,9 @@ export const GITIGNORE_LINES: readonly string[] = [
  *   which only works for subdir-layout vaults (those that track a
  *   `.napkin/config.json`). `error` is set to `"legacy-embedded-layout"`
  *   so callers can branch on it.
+ * - `findings`: structured per-invariant outcomes. Always present (empty
+ *   array means "all invariants passed"). Callers iterate to surface
+ *   notifications and decide whether to abort spawning.
  */
 export interface SetupResult {
   initialized: boolean;
@@ -102,6 +142,7 @@ export interface SetupResult {
    * motivated FB-2.
    */
   seededCommit?: boolean;
+  findings: HealthFinding[];
 }
 
 /**
@@ -210,8 +251,13 @@ function mergeLines(filePath: string, newLines: readonly string[]): boolean {
 
 /**
  * Ensure `<vaultPath>` is a git repo with a `.gitignore` that covers
- * auto-distill's needs. Called once per `session_start` when
- * `distill.enabled` is true.
+ * distill's needs. Called at `session_start` (`level: "fast"`) and again
+ * before every worktree-based spawn (`level: "full"`).
+ *
+ * Both levels share the layout-shaping lifecycle below; the `level`
+ * parameter is reserved for the additional invariants that subsequent
+ * commits attach to the `"full"` branch (git-state probes, filesystem
+ * probes, orphan cleanup). At this point both calls behave identically.
  *
  * Lifecycle:
  *   0. Refuse if the vault uses napkin's legacy embedded layout
@@ -231,8 +277,13 @@ function mergeLines(filePath: string, newLines: readonly string[]): boolean {
  * Returned `scaffolded` always uses vault-relative paths so notify messages
  * are compact and portable.
  */
-export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
+export function ensureVaultReadyForDistill(
+  vault: SetupVault,
+  // biome-ignore lint/correctness/noUnusedFunctionParameters: required to make every call site explicit; the parameter is consumed by full-level invariants attached in subsequent commits.
+  level: HealthLevel,
+): SetupResult {
   const vaultPath = vault.contentPath;
+  const findings: HealthFinding[] = [];
 
   // Legacy-embedded layout is incompatible with the worktree-based
   // concurrency architecture. In a legacy vault (`~/.napkin/`), the
@@ -257,6 +308,7 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
       scaffolded: [],
       error: LEGACY_EMBEDDED_LAYOUT_ERROR,
       legacyLayout: { configPath: vault.configPath },
+      findings,
     };
   }
 
@@ -270,6 +322,7 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
         initialized: false,
         scaffolded: [],
         error: `git init failed: ${init.stderr.trim() || "unknown error"}`,
+        findings,
       };
     }
     initialized = true;
@@ -289,6 +342,7 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
       initialized,
       scaffolded,
       error: `failed to write scaffolding: ${msg}`,
+      findings,
     };
   }
 
@@ -305,6 +359,7 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
         initialized,
         scaffolded,
         error: `git add failed: ${add.stderr.trim() || "unknown error"}`,
+        findings,
       };
     }
     const commit = runGit(vaultPath, [
@@ -318,6 +373,7 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
         initialized,
         scaffolded,
         error: `git commit failed: ${commit.stderr.trim() || "unknown error"}`,
+        findings,
       };
     }
   } else if (scaffolded.length > 0) {
@@ -329,6 +385,7 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
         initialized,
         scaffolded,
         error: `git add failed: ${add.stderr.trim() || "unknown error"}`,
+        findings,
       };
     }
     const commit = runGit(vaultPath, [
@@ -342,6 +399,7 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
         initialized,
         scaffolded,
         error: `git commit failed: ${commit.stderr.trim() || "unknown error"}`,
+        findings,
       };
     }
   }
@@ -371,12 +429,13 @@ export function ensureVaultReadyForAutoDistill(vault: SetupVault): SetupResult {
         initialized,
         scaffolded,
         error: `git seed commit failed: ${seed.stderr.trim() || "unknown error"}`,
+        findings,
       };
     }
     seededCommit = true;
   }
 
-  return { initialized, scaffolded, seededCommit };
+  return { initialized, scaffolded, seededCommit, findings };
 }
 
 /**

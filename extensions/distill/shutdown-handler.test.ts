@@ -435,7 +435,7 @@ describe("session_shutdown handler (Item 8)", () => {
 
   test("setup failure: suppresses shutdown distill AND overrides persisted suppression=false (C1)", async () => {
     // Simulate a vault-level setup failure: create a directory where
-    // `.gitignore` is supposed to be a file. `ensureVaultReadyForAutoDistill`
+    // `.gitignore` is supposed to be a file. `ensureVaultReadyForDistill`
     // tries `fs.writeFileSync(.gitignore, ...)` which fails with EISDIR —
     // the function returns `{ error: ... }`.
     //
