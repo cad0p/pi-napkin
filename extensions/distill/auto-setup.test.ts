@@ -1379,6 +1379,16 @@ describe("ensureVaultReadyForDistill", () => {
     if (r.status !== 0) throw new Error(`worktree add failed: ${r.stderr}`);
   }
 
+  /**
+   * One hour, in ms. Used to push the injected `now` past
+   * STALE_DISTILL_BRANCH_GRACE_MS by a comfortable margin in tests
+   * that pin the "branch IS deleted past grace" semantics. Wide
+   * enough that filesystem timestamp jitter and the seconds-precision
+   * floor on `committerdate:unix` (vs millisecond-precision
+   * `Date.now()`) can't sneak the boundary tests below the grace.
+   */
+  const STALE_BRANCH_TEST_PADDING_MS = 60 * 60 * 1000;
+
   test("orphaned worktree (registered, dir deleted): prune emits + auto-recovered finding", () => {
     setupExistingRepoWithBlock();
     const wtRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-wt-"));
@@ -1423,7 +1433,8 @@ describe("ensureVaultReadyForDistill", () => {
     // commit at real-now; the injected clock makes it look
     // grace-plus-one-hour old.
     const realNow = Date.now();
-    const fakeNow = realNow + STALE_DISTILL_BRANCH_GRACE_MS + 3_600_000;
+    const fakeNow =
+      realNow + STALE_DISTILL_BRANCH_GRACE_MS + STALE_BRANCH_TEST_PADDING_MS;
 
     const r = runSetup("full", { now: () => fakeNow });
     const finding = r.findings.find(
@@ -1444,7 +1455,8 @@ describe("ensureVaultReadyForDistill", () => {
     try {
       addWorktreeWithBranch(vault, wtPath, "distill/live");
       const realNow = Date.now();
-      const fakeNow = realNow + STALE_DISTILL_BRANCH_GRACE_MS + 3_600_000;
+      const fakeNow =
+        realNow + STALE_DISTILL_BRANCH_GRACE_MS + STALE_BRANCH_TEST_PADDING_MS;
 
       const r = runSetup("full", { now: () => fakeNow });
       for (const f of r.findings) {
@@ -1484,11 +1496,63 @@ describe("ensureVaultReadyForDistill", () => {
     expect(exists.status).toBe(0);
   });
 
+  // Boundary companions: the "exactly at grace" test above asserts a
+  // property the test setup makes true by construction (ageMs ===
+  // grace, then ageMs > grace is false). It does NOT distinguish a
+  // strict `>` comparison from a `>=` one, nor does it pin the
+  // "branch IS deleted past the boundary" semantics with a tight
+  // margin. The two companions below close that gap with 1 ms
+  // either side of the grace.
+  test("distill branch 1 ms past grace: deleted with auto-recovered finding", () => {
+    setupExistingRepoWithBlock();
+    git(vault, ["branch", "distill/edge-over"]);
+    const tsLine = git(vault, [
+      "for-each-ref",
+      "refs/heads/distill/edge-over",
+      "--format=%(committerdate:unix)",
+    ]).stdout.trim();
+    const tsSec = parseInt(tsLine, 10);
+    expect(Number.isFinite(tsSec)).toBe(true);
+    // 1 ms past the boundary — the strict `>` comparison fires.
+    const fakeNow = tsSec * 1000 + STALE_DISTILL_BRANCH_GRACE_MS + 1;
+
+    const r = runSetup("full", { now: () => fakeNow });
+    const finding = r.findings.find(
+      (f) => f.invariant === "no-stale-distill-branches-over-grace",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("auto-recovered");
+    const exists = git(vault, ["rev-parse", "--verify", "distill/edge-over"]);
+    expect(exists.status).not.toBe(0);
+  });
+
+  test("distill branch 1 ms under grace: not deleted, no finding", () => {
+    setupExistingRepoWithBlock();
+    git(vault, ["branch", "distill/edge-under"]);
+    const tsLine = git(vault, [
+      "for-each-ref",
+      "refs/heads/distill/edge-under",
+      "--format=%(committerdate:unix)",
+    ]).stdout.trim();
+    const tsSec = parseInt(tsLine, 10);
+    expect(Number.isFinite(tsSec)).toBe(true);
+    // 1 ms before the boundary — the branch is still inside grace.
+    const fakeNow = tsSec * 1000 + STALE_DISTILL_BRANCH_GRACE_MS - 1;
+
+    const r = runSetup("full", { now: () => fakeNow });
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("no-stale-distill-branches-over-grace");
+    }
+    const exists = git(vault, ["rev-parse", "--verify", "distill/edge-under"]);
+    expect(exists.status).toBe(0);
+  });
+
   test("fast-level does NOT run orphan or stale-branch cleanup", () => {
     setupExistingRepoWithBlock();
     git(vault, ["branch", "distill/old"]);
     const realNow = Date.now();
-    const fakeNow = realNow + STALE_DISTILL_BRANCH_GRACE_MS + 3_600_000;
+    const fakeNow =
+      realNow + STALE_DISTILL_BRANCH_GRACE_MS + STALE_BRANCH_TEST_PADDING_MS;
 
     const r = runSetup("fast", { now: () => fakeNow });
     for (const f of r.findings) {
