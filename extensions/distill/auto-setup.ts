@@ -347,13 +347,6 @@ const INVARIANT_SUBDIR_LAYOUT = "subdir-layout";
 const INVARIANT_VAULT_IS_GIT_REPO = "vault-is-git-repo";
 
 /**
- * Stable invariant ID for `<configPath>/config.json` JSON validity.
- * Loud-error finding only — a corrupt config is the user's hand-edit and
- * we can't guess the intended content.
- */
-const INVARIANT_CONFIG_JSON_VALID = "config.json-valid-json";
-
-/**
  * Stable invariant ID for `<configPath>/config.json` being tracked by
  * git. Auto-recovered via `git add <configRel>`; the existing
  * scaffolded[] consumption stages and commits the file on the same
@@ -904,29 +897,58 @@ function mergeManagedBlock(
  *      `.napkin/` subdir that findVault could resolve to. Returns
  *      `{ error: "legacy-embedded-layout", legacyLayout, findings:
  *      [subdir-layout error] }` without touching git.
- *   1. fast + full: validate `<configPath>/config.json` is parseable
- *      (`config.json-valid-json`). On parse failure, push a loud-error
- *      finding and continue (the file is the user's hand-edit; we can
- *      neither auto-correct nor proceed past the smoke check).
- *   2. fast + full: if `.git/` is missing, run `git init -q -b main`
+ *   1. fast + full: if `.git/` is missing, run `git init -q -b main`
  *      (`vault-is-git-repo`, auto-recovered). Failure here aborts with
- *      `error`.
- *   3. fast + full: reconcile `.gitignore` against the canonical managed
+ *      `error`. (JSON validity is checked earlier by
+ *      {@link loadVaultConfig} and is not re-checked here.)
+ *   2. fast + full: reconcile `.gitignore` against the canonical managed
  *      block (`gitignore-block-correct`). Auto-recovered for
  *      install / reset / migration; loud-error for malformed markers.
- *   4. full only: if `<configPath>/config.json` is untracked, stage it
+ *   3. full only: if `<configPath>/config.json` is untracked, stage it
  *      (`config.json-tracked`, auto-recovered) so the next
  *      `git worktree add HEAD` copies it into the worktree. Closes
  *      Issue #14. Skipped at fast level to keep session_start latency
  *      under the ~10 ms target.
- *   5. fast + full: if anything in steps 2–4 changed:
+ *   4. full only: refuse to spawn if `<configPath>/config.json` is
+ *      gitignored by a rule outside the managed block
+ *      (`config.json-not-gitignored-outside-block`, loud-error).
+ *      User-territory ignore rules are explicit user choices that we
+ *      can't auto-rewrite without losing intent.
+ *   5. full only: refuse to spawn if `<configPath>/distill/` contains
+ *      tracked files (`napkin-distill-not-tracked`, loud-error). The
+ *      canonical {@link BLOCK_CONTENT} gitignores the directory; a
+ *      tracked entry is either a stale pre-block commit or an
+ *      explicit `git add -f`, both of which we surface for the user
+ *      to resolve manually.
+ *   6. full only: probe the cache root parent for write access via
+ *      {@link probeWritable} (`cache-root-writable`, loud-error). A
+ *      read-only cache root would fail the worktree spawn at
+ *      `mkdir -p`; surfacing here gives the user a fixable error
+ *      before any git work commits to a worktree.
+ *   7. fast + full: if anything in steps 1–3 changed:
  *      - fresh init -> `git add .` + commit `"napkin: initial vault
  *        commit (auto-distill setup)"`
  *      - existing repo with scaffolded changes -> `git add ...scaffolded`
  *        + commit `"napkin: scaffold auto-distill git config"`
- *   6. fast + full: ensure HEAD resolves to a commit; seed an empty
+ *   8. full only: ensure HEAD resolves to a commit; seed an empty
  *      initial commit when an existing-but-empty repo would leave
- *      `git worktree add HEAD` unable to pin a ref.
+ *      `git worktree add HEAD` unable to pin a ref
+ *      (`vault-head-on-branch`, auto-recovered). Fast-level skips
+ *      so a `session_start` on a hand-bootstrapped repo doesn't
+ *      seed an unsolicited commit; the next full-level call (tick,
+ *      shutdown, or manual `/distill`) seeds lazily when a worktree
+ *      spawn is imminent.
+ *   9. full only: prune orphaned distill worktree registry entries
+ *      via `git worktree prune --expire=now`
+ *      (`no-orphaned-distill-worktrees`, auto-recovered). Cleans up
+ *      registry entries whose worktree directories were removed
+ *      (typically a crashed pi session) so they don't accumulate.
+ *  10. full only: delete `distill/*` branches whose committerdate is
+ *      older than {@link STALE_DISTILL_BRANCH_GRACE_MS} AND have no
+ *      live worktree (`no-stale-distill-branches-over-grace`,
+ *      auto-recovered). The grace gives the user a `git reflog`
+ *      window to recover content from a failed distill before the
+ *      branch tip is collected.
  *
  * Returned `scaffolded` always uses vault-relative paths so notify
  * messages are compact and portable.
@@ -969,27 +991,6 @@ export function ensureVaultReadyForDistill(
       legacyLayout: { configPath: vault.configPath },
       findings,
     };
-  }
-
-  // `<configPath>/config.json` JSON validity. The file is the user's
-  // hand-edited (or napkin-generated) source of truth for vault config;
-  // a parse failure means later napkin operations will silently fall
-  // back to defaults or crash. Skip the check if the file doesn't
-  // exist — the missing-file case is handled at scaffold time, not
-  // here. We probe it before `git init` so a corrupt config doesn't get
-  // smuggled into the initial commit.
-  const configJsonPath = path.join(vault.configPath, "config.json");
-  if (fs.existsSync(configJsonPath)) {
-    try {
-      JSON.parse(fs.readFileSync(configJsonPath, "utf-8"));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      findings.push({
-        kind: "error",
-        invariant: INVARIANT_CONFIG_JSON_VALID,
-        message: `${configJsonPath} is not valid JSON: ${msg}`,
-      });
-    }
   }
 
   const gitDir = path.join(vaultPath, ".git");

@@ -966,47 +966,6 @@ describe("ensureVaultReadyForDistill", () => {
     expect(before).not.toContain(".env");
   });
 
-  // --- config.json validity ----------------------------------------------
-  //
-  // The vault's config.json is the user's hand-edited (or napkin-
-  // generated) source of truth for vault config. A parse failure means
-  // later napkin operations will silently fall back to defaults or
-  // crash; we surface a loud error so the user can fix the file.
-
-  test("invalid JSON in config.json: error finding, no auto-recovery", () => {
-    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
-    fs.writeFileSync(
-      path.join(vault, ".napkin", "config.json"),
-      "{ this is not valid json",
-    );
-    fs.writeFileSync(path.join(vault, "notes.md"), "# n\n");
-
-    const r = runSetup();
-    expect(r.error).toBeUndefined();
-    expect(r.findings).toContainEqual({
-      kind: "error",
-      invariant: "config.json-valid-json",
-      message: expect.stringContaining("is not valid JSON"),
-    });
-    // The corrupt file is left in place — user must repair it.
-    expect(
-      fs.readFileSync(path.join(vault, ".napkin", "config.json"), "utf-8"),
-    ).toBe("{ this is not valid json");
-  });
-
-  test("missing config.json: no config.json-valid-json finding (skip silently)", () => {
-    // Subdir-layout vault with no config.json yet (the typical fresh-
-    // setup state before `napkin init` runs). The valid-JSON check is
-    // file-existence-gated so we don't false-positive on this.
-    fs.writeFileSync(path.join(vault, "notes.md"), "# n\n");
-
-    const r = runSetup();
-    expect(r.error).toBeUndefined();
-    for (const f of r.findings) {
-      expect(f.invariant).not.toBe("config.json-valid-json");
-    }
-  });
-
   // --- config.json tracked (full-level only; closes Issue #14) ----------
   //
   // Distill worktrees are checked out via `git worktree add HEAD`, which
