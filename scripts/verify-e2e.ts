@@ -18,15 +18,19 @@
  *
  * Fixture shape: mirrors the production user-onboarding flow rather
  * than pre-bootstrapping a healthy vault. The user has run
- * `napkin init` (which writes `.napkin/config.json` and any vault
- * content) and then launches `pi`; from there the extension's
+ * `napkin init` and then launches `pi`; from there the extension's
  * session_start handler does the git init + scaffold + commit. The
- * fixture therefore writes ONLY the artefacts a real user genuinely
- * brings — `.napkin/config.json` and a content file — and lets the
- * production code do the rest. Fast-level health-check regressions
- * (auto-init failure, gitignore install regression, commit failure)
- * surface here; the previous fixture pre-bootstrapped git and could
- * not see them.
+ * fixture therefore actually invokes the real `napkin init` CLI from
+ * the `@cad0p/napkin` dependency to produce `.napkin/config.json`
+ * (with napkin's default schema) plus the canonical `.obsidian/*`
+ * files, then patches `distill.*` into the config to model the
+ * user-edits-config step, then writes a `note.md` content file —
+ * and lets the production code do the rest. Fast-level health-check
+ * regressions (auto-init failure, gitignore install regression,
+ * commit failure) surface here; the previous fixture
+ * pre-bootstrapped git and could not see them, AND synthesized
+ * `.napkin/config.json` directly so it could not see regressions in
+ * napkin init's default schema either.
  *
  * Trade-off: gate wall time grows by the local git work auto-init
  * does (a few seconds at most); cost stays near $0.50/run because
@@ -53,11 +57,13 @@
  * What it does:
  *
  *   1. Creates a tmpdir at `${TMPDIR:-/tmp}/napkin-verify-e2e-XXXXXX`.
- *   2. Builds a vault that simulates the post-`napkin init` state:
- *      writes a sibling-layout `.napkin/config.json` (`vault.root:
- *      ".."`, `distill.enabled = true`) and a `note.md` content file.
- *      Does NOT run `git init`, does NOT scaffold `.gitignore`, does
- *      NOT commit — those are session_start's job.
+ *   2. Builds the post-`napkin init` vault state by INVOKING the real
+ *      `napkin init --path <vault>` CLI (production code, not
+ *      synthesized), then patching `distill.*` into the resulting
+ *      `.napkin/config.json` to model the user-edits-config step,
+ *      then writing a `note.md` content file. Does NOT run `git
+ *      init`, does NOT scaffold `.gitignore`, does NOT commit —
+ *      those are session_start's job.
  *   3. Builds a mock `ExtensionAPI` and calls `distillExtension(api)`
  *      so the production handlers and `/distill` command are
  *      registered against the captured spy.
@@ -167,6 +173,22 @@ const DEFAULT_MODEL = "kiro/claude-sonnet-4-6";
 
 /** Vault-config `distill.maxDurationMinutes`. */
 const DISTILL_MAX_DURATION_MINUTES = 10;
+
+/**
+ * Path to the `napkin` CLI shipped via the `@cad0p/napkin` dependency.
+ * Resolved relative to the script's location so this works both in
+ * local dev (`bun run verify:e2e`) and on a GitHub Actions runner that
+ * has done `bun install` — both populate `node_modules/.bin/napkin`
+ * with a shim pointing at `dist/main.js`. Avoids depending on the
+ * caller's PATH being augmented with `node_modules/.bin/`.
+ */
+const NAPKIN_BIN = path.resolve(
+  import.meta.dir,
+  "..",
+  "node_modules",
+  ".bin",
+  "napkin",
+);
 
 /** Slack added to maxDurationMinutes when waiting for the JS poller dispatch. */
 const POLLER_DISPATCH_SLACK_SECS = 30;
@@ -326,11 +348,28 @@ function installGitEnvOnProcess(): { restore: () => void } {
 
 /**
  * Build the on-disk shape that a real user brings to a fresh
- * `pi`-on-vault session: `.napkin/config.json` (sibling layout +
- * distill enabled) and a single `note.md` content file. Deliberately
- * does NOT run `git init` and does NOT commit — auto-init owns those
- * steps. Bare origin and remote wiring also live elsewhere because
- * they aren't part of `napkin init`'s footprint.
+ * `pi`-on-vault session by mirroring the user-onboarding flow:
+ *
+ *   1. `napkin init --path <vault>` — invokes the real `@cad0p/napkin`
+ *      CLI dependency to produce `.napkin/config.json` (with napkin's
+ *      default schema, including `vault.root: ".."` for sibling
+ *      layout) and the canonical `.obsidian/{app,templates,daily-
+ *      notes}.json` files. Synthesising the config in-process would
+ *      mask regressions in napkin init's default schema; running the
+ *      real CLI catches them.
+ *   2. Patches `distill.*` into the resulting config — models the
+ *      "user enables auto-distill in their config" step. Merges into
+ *      the existing config rather than overwriting so napkin's other
+ *      sections (overview/search/daily/templates/graph/vault) survive.
+ *   3. Writes a `note.md` content file. Done AFTER `napkin init`
+ *      because `napkin init` doesn't touch the vault root for content
+ *      files; auto-init's later `git add .` will pick this up in the
+ *      initial commit, mirroring the production sequence where notes
+ *      typically pre-exist the first session_start.
+ *
+ * Deliberately does NOT run `git init` and does NOT commit — auto-init
+ * owns those steps. Bare origin and remote wiring also live elsewhere
+ * because they aren't part of `napkin init`'s footprint.
  *
  * Returns the partial fixture without `startSha` / `originStartSha`;
  * the caller fills those in after auto-init + bare-origin wiring.
@@ -346,29 +385,45 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
   fs.mkdirSync(parentCwd);
   fs.mkdirSync(sessionsDir);
 
-  // `napkin init` produces `.napkin/config.json`; `vault.root: ".."`
-  // marks the vault as sibling-layout so napkin resolves
-  // contentPath=<vault>, and `distill.enabled=true` opts into the
-  // worktree-backed path (instead of the legacy tmpdir spawn that
-  // would bypass the wrapper).
-  fs.mkdirSync(path.join(vaultPath, ".napkin"), { recursive: true });
-  fs.writeFileSync(
-    path.join(vaultPath, ".napkin", "config.json"),
-    JSON.stringify({
-      vault: { root: ".." },
-      distill: {
-        enabled: true,
-        intervalMinutes: 60,
-        maxDurationMinutes: DISTILL_MAX_DURATION_MINUTES,
-        onShutdown: false,
-      },
-    }),
-  );
+  // Step 1: invoke the real napkin init CLI. Sanity-check the canonical
+  // "Initialized vault at <path>/.napkin" stdout banner so a future
+  // CLI redesign that silently changes the contract surfaces here.
+  const initRc = spawnSync(NAPKIN_BIN, ["init", "--path", vaultPath], {
+    env: process.env,
+    encoding: "utf-8",
+  });
+  if (initRc.status !== 0) {
+    throw new Error(
+      `napkin init failed in ${vaultPath} (rc=${initRc.status}): ${
+        initRc.stderr || initRc.stdout
+      }`,
+    );
+  }
+  const expectedBanner = `Initialized vault at ${path.join(vaultPath, ".napkin")}`;
+  if (!initRc.stdout.includes(expectedBanner)) {
+    throw new Error(
+      `napkin init stdout sanity check failed: expected ${JSON.stringify(
+        expectedBanner,
+      )}, got ${JSON.stringify(initRc.stdout)}`,
+    );
+  }
 
-  // User content present at the moment `pi` launches. Auto-init's
-  // `git add .` will pick this up in the initial commit, mirroring
-  // the production sequence where notes typically pre-exist the
-  // first session_start.
+  // Step 2: patch `distill.*` into napkin's default config. Models the
+  // "user enables auto-distill in their config" step. Read-modify-
+  // write so napkin's other sections (overview/search/daily/templates/
+  // graph/vault) survive — overwriting would silently drop them and
+  // mask regressions in the default schema.
+  const configPath = path.join(vaultPath, ".napkin", "config.json");
+  const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+  config.distill = {
+    enabled: true,
+    intervalMinutes: 60,
+    maxDurationMinutes: DISTILL_MAX_DURATION_MINUTES,
+    onShutdown: false,
+  };
+  fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+
+  // Step 3: user content present at the moment `pi` launches.
   fs.writeFileSync(
     path.join(vaultPath, "note.md"),
     "---\ntitle: x\n---\n# baseline\n",
@@ -594,6 +649,105 @@ function describeBlockBodyDrift(actual: readonly string[]): string {
   throw new Error(
     "describeBlockBodyDrift: unreachable — actual matches BLOCK_CONTENT (caller gate broken)",
   );
+}
+
+/**
+ * Assert the filesystem artifacts that `napkin init` is contracted to
+ * leave behind on a fresh vault. Asserted right after `setupFixture()`
+ * so a regression in napkin init's default schema or the set of files
+ * it produces surfaces before the gate spends time on the auto-init or
+ * LLM-driven distill phases.
+ *
+ * Pinned shape (from the @cad0p/napkin v0.8.x contract):
+ *   - `<vault>/.napkin/config.json` exists and has napkin's default
+ *     schema sections (overview/search/daily/templates/graph/vault).
+ *     The fixture has ALSO patched `distill.*` into it (the
+ *     "user-edits-config" step); both must coexist after the patch.
+ *   - `<vault>/.obsidian/app.json` exists.
+ *   - `<vault>/.obsidian/templates.json` exists.
+ *   - `<vault>/.obsidian/daily-notes.json` exists.
+ */
+function assertNapkinInitPostConditions(
+  vaultPath: string,
+): PostConditionResult[] {
+  const results: PostConditionResult[] = [];
+
+  // Config exists, parses, has napkin's default sections AND the
+  // fixture-patched `distill.*` block. Pinning the section names
+  // catches a default-schema regression that the previous synthetic-
+  // config fixture would have masked.
+  const configPath = path.join(vaultPath, ".napkin", "config.json");
+  const configExists = fs.existsSync(configPath);
+  // biome-ignore lint/suspicious/noExplicitAny: opaque parsed config
+  let config: any = null;
+  let parseError: string | null = null;
+  if (configExists) {
+    try {
+      config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    } catch (e) {
+      parseError = (e as Error).message;
+    }
+  }
+  const requiredSections = [
+    "overview",
+    "search",
+    "daily",
+    "templates",
+    "graph",
+    "vault",
+  ];
+  const missingSections = config
+    ? requiredSections.filter((s) => !(s in config))
+    : requiredSections;
+  results.push({
+    name: "napkin init produced .napkin/config.json with default schema",
+    passed:
+      configExists &&
+      !parseError &&
+      missingSections.length === 0 &&
+      config?.vault?.root === "..",
+    detail: !configExists
+      ? ".napkin/config.json missing"
+      : parseError
+        ? `parse error: ${parseError}`
+        : missingSections.length > 0
+          ? `missing default sections: ${missingSections.join(", ")}`
+          : config?.vault?.root !== ".."
+            ? `vault.root=${JSON.stringify(config?.vault?.root)} (expected "..")`
+            : `sections present: ${requiredSections.join(", ")}, vault.root=".."`,
+  });
+
+  // Fixture-patched `distill.enabled=true` survives the read-modify-
+  // write merge (regression guard for an accidental overwrite that
+  // would drop napkin's default sections).
+  results.push({
+    name: "fixture-patched distill.enabled=true present alongside default schema",
+    passed: config?.distill?.enabled === true,
+    detail:
+      config?.distill?.enabled === true
+        ? "distill.enabled=true"
+        : `distill=${JSON.stringify(config?.distill)}`,
+  });
+
+  // The .obsidian/* files napkin init seeds. Pinning each individually
+  // so a future napkin release that drops one of them surfaces with
+  // the dropped file in the gate output rather than "some obsidian
+  // file missing" alone.
+  for (const rel of [
+    ".obsidian/app.json",
+    ".obsidian/templates.json",
+    ".obsidian/daily-notes.json",
+  ]) {
+    const p = path.join(vaultPath, rel);
+    const exists = fs.existsSync(p);
+    results.push({
+      name: `napkin init produced ${rel}`,
+      passed: exists,
+      detail: exists ? "present" : "missing",
+    });
+  }
+
+  return results;
 }
 
 /**
@@ -1050,6 +1204,23 @@ async function main(): Promise<number> {
     console.log(`  origin:  ${fixturePartial.originPath}`);
     console.log("");
 
+    // Assert napkin init's filesystem artifacts before any further
+    // setup. Fail-fast here means a regression in `napkin init`'s
+    // default schema or its set of seeded files surfaces in seconds
+    // rather than minutes (auto-init phase) or ~$0.50 (LLM phase).
+    const napkinInitResults = assertNapkinInitPostConditions(
+      fixturePartial.vaultPath,
+    );
+    const napkinInitAllPassed = napkinInitResults.every((r) => r.passed);
+    if (!napkinInitAllPassed) {
+      console.log("napkin init phase failed; skipping later phases.");
+      for (const r of napkinInitResults) {
+        console.log(`  ${r.passed ? "\u2713" : "\u2717"} ${r.name}`);
+        if (!r.passed) console.log(`      ${r.detail}`);
+      }
+      return 1;
+    }
+
     // Wire the extension BEFORE driving the auto-init: distillExtension
     // registers handlers + the /distill command against the captured
     // spy. Tighter ordering than the previous fixture (which built the
@@ -1168,13 +1339,15 @@ async function main(): Promise<number> {
     const outcome = readOutcomeSidecar(fixture.vaultPath);
     const gate = classifyGate(notify, outcome);
 
-    // Combined summary: auto-init's invariants (captured at phase 1) +
-    // the distill phase's notify / outcome / filesystem invariants.
-    // The auto-init results are re-included here from the phase-1
-    // capture so the final summary lists every checked invariant in
-    // one PASS/FAIL block, even though auto-init was already asserted
+    // Combined summary: napkin-init's invariants (asserted right
+    // after `setupFixture`) + auto-init's invariants (captured at
+    // phase 1) + the distill phase's notify / outcome / filesystem
+    // invariants. Earlier-asserted results are re-included here so
+    // the final summary lists every checked invariant in one
+    // PASS/FAIL block, even though they were already asserted
     // earlier for fail-fast.
     const results = [
+      ...napkinInitResults,
       ...autoInitResults,
       ...assertGreenPostConditions(fixture, notify),
     ];
