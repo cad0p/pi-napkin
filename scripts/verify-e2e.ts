@@ -511,6 +511,81 @@ function readOutcomeSidecar(vaultPath: string): OutcomeSidecar | null {
   };
 }
 
+type BlockBodyExtraction =
+  | { ok: true; lines: string[] }
+  | { ok: false; reason: string };
+
+/**
+ * Extract the lines strictly BETWEEN `BLOCK_MARKER_BEGIN` and
+ * `BLOCK_MARKER_END` in the given `.gitignore` content, normalised to
+ * LF for line splitting (CRLF input round-trips byte-for-byte through
+ * `mergeManagedBlock`, but the managed-body comparison is a content
+ * check, not a line-ending check). Tolerates trailing whitespace on
+ * marker lines (`mergeManagedBlock` does the same when reading) but
+ * rejects indented markers — those aren't ours and shouldn't match.
+ *
+ * Returns `{ ok: true, lines }` with the body lines in document order,
+ * or `{ ok: false, reason }` describing exactly which marker invariant
+ * failed (missing, duplicated, mis-ordered).
+ */
+function extractManagedBlockBody(content: string): BlockBodyExtraction {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const beginIndices: number[] = [];
+  const endIndices: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const rtrimmed = lines[i].replace(/\s+$/, "");
+    if (rtrimmed === BLOCK_MARKER_BEGIN) beginIndices.push(i);
+    else if (rtrimmed === BLOCK_MARKER_END) endIndices.push(i);
+  }
+  if (beginIndices.length === 0)
+    return { ok: false, reason: "BEGIN marker missing" };
+  if (endIndices.length === 0)
+    return { ok: false, reason: "END marker missing" };
+  if (beginIndices.length > 1) {
+    return {
+      ok: false,
+      reason: `${beginIndices.length} BEGIN markers (expected 1)`,
+    };
+  }
+  if (endIndices.length > 1) {
+    return {
+      ok: false,
+      reason: `${endIndices.length} END markers (expected 1)`,
+    };
+  }
+  if (beginIndices[0] >= endIndices[0]) {
+    return {
+      ok: false,
+      reason: `END marker (line ${endIndices[0] + 1}) precedes BEGIN marker (line ${beginIndices[0] + 1})`,
+    };
+  }
+  return {
+    ok: true,
+    lines: lines.slice(beginIndices[0] + 1, endIndices[0]),
+  };
+}
+
+/**
+ * Render a useful diagnostic when a `.gitignore` managed block exists
+ * but its body diverges from `BLOCK_CONTENT`. Reports the first
+ * structural mismatch (length differs, line at index N differs) so a
+ * fixture-format change that drops one line surfaces with the dropped
+ * line in the gate output rather than "drift" alone.
+ */
+function describeBlockBodyDrift(actual: readonly string[]): string {
+  if (actual.length !== BLOCK_CONTENT.length) {
+    return `block body length=${actual.length}, expected ${BLOCK_CONTENT.length}`;
+  }
+  for (let i = 0; i < BLOCK_CONTENT.length; i++) {
+    if (actual[i] !== BLOCK_CONTENT[i]) {
+      return `block body line ${i + 1} differs: got ${JSON.stringify(actual[i])}, expected ${JSON.stringify(BLOCK_CONTENT[i])}`;
+    }
+  }
+  // Defensive fallback: callers only reach this helper when the body
+  // diverged, but a hypothetical equality bug shouldn't print empty.
+  return "block body drift (no specific mismatch located)";
+}
+
 /**
  * Assert the filesystem effects of session_start's auto-init pass.
  * These are the cheap fast-level invariants that
@@ -548,29 +623,36 @@ function assertAutoInitPostConditions(
       : "missing — auto-init's git init step did not run or failed silently",
   });
 
-  // .gitignore managed block — markers AND every canonical line.
-  // Failing this means `mergeManagedBlock` regressed (didn't install,
-  // misformatted markers, dropped lines).
+  // .gitignore managed block — extract the body BETWEEN the BEGIN/END
+  // markers and compare ordered against `BLOCK_CONTENT`. A whole-file
+  // substring check (`giContent.includes(line)`) is partly tautological
+  // (the canonical content includes blank-line separators, and
+  // `String.includes("")` is unconditionally true) AND not
+  // locality-anchored (a regression that drops the markers but leaks
+  // canonical lines into user territory would pass). Failing this
+  // means `mergeManagedBlock` regressed (didn't install, misformatted
+  // markers, dropped lines, reordered lines, or moved lines outside
+  // the markers).
   const giPath = path.join(vaultPath, ".gitignore");
   const giExists = fs.existsSync(giPath);
   const giContent = giExists ? fs.readFileSync(giPath, "utf-8") : "";
-  const giHasBegin = giContent.includes(BLOCK_MARKER_BEGIN);
-  const giHasEnd = giContent.includes(BLOCK_MARKER_END);
-  const giHasAllCanonical = BLOCK_CONTENT.every((line) =>
-    giContent.includes(line),
-  );
+  const giBlockBody = giExists
+    ? extractManagedBlockBody(giContent)
+    : { ok: false as const, reason: ".gitignore missing" };
+  const giBlockMatches =
+    giBlockBody.ok &&
+    giBlockBody.lines.length === BLOCK_CONTENT.length &&
+    giBlockBody.lines.every((l, i) => l === BLOCK_CONTENT[i]);
   results.push({
     name: "auto-init wrote .gitignore with the managed block + canonical content",
-    passed: giExists && giHasBegin && giHasEnd && giHasAllCanonical,
+    passed: giExists && giBlockBody.ok && giBlockMatches,
     detail: !giExists
       ? ".gitignore missing"
-      : !giHasBegin
-        ? "BEGIN marker missing"
-        : !giHasEnd
-          ? "END marker missing"
-          : !giHasAllCanonical
-            ? "canonical block content drift (missing one or more BLOCK_CONTENT lines)"
-            : "markers + canonical content present",
+      : !giBlockBody.ok
+        ? giBlockBody.reason
+        : giBlockMatches
+          ? "markers + canonical body present (ordered match)"
+          : describeBlockBodyDrift(giBlockBody.lines),
   });
 
   // .napkin/config.json tracked — the full-level invariant that
