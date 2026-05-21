@@ -586,9 +586,14 @@ function describeBlockBodyDrift(actual: readonly string[]): string {
       return `block body line ${i + 1} differs: got ${JSON.stringify(actual[i])}, expected ${JSON.stringify(BLOCK_CONTENT[i])}`;
     }
   }
-  // Defensive fallback: callers only reach this helper when the body
-  // diverged, but a hypothetical equality bug shouldn't print empty.
-  return "block body drift (no specific mismatch located)";
+  // Unreachable: callers gate on `!giBlockMatches`, which is exactly
+  // the disjunction of the two return branches above (length mismatch
+  // OR some line mismatch). Reaching this throw means the caller-side
+  // guard regressed — surface that loudly rather than printing a
+  // generic "drift" string that hides the bug.
+  throw new Error(
+    "describeBlockBodyDrift: unreachable — actual matches BLOCK_CONTENT (caller gate broken)",
+  );
 }
 
 /**
@@ -1163,10 +1168,12 @@ async function main(): Promise<number> {
     const outcome = readOutcomeSidecar(fixture.vaultPath);
     const gate = classifyGate(notify, outcome);
 
-    // Combined post-conditions: auto-init's filesystem invariants + the
-    // distill phase's notify / outcome / filesystem invariants. The
-    // auto-init block is re-run here so the summary contains every
-    // checked invariant in one place — a single PASS/FAIL decision.
+    // Combined summary: auto-init's invariants (captured at phase 1) +
+    // the distill phase's notify / outcome / filesystem invariants.
+    // The auto-init results are re-included here from the phase-1
+    // capture so the final summary lists every checked invariant in
+    // one PASS/FAIL block, even though auto-init was already asserted
+    // earlier for fail-fast.
     const results = [
       ...autoInitResults,
       ...assertGreenPostConditions(fixture, notify),
