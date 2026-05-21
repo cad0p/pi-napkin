@@ -16,6 +16,9 @@ import {
   LEGACY_EMBEDDED_LAYOUT_ERROR,
   parseCheckIgnoreVerbose,
   parseManagedBlockRange,
+  probeWritable,
+  type SetupOptions,
+  walkToFirstExistingAncestor,
 } from "./auto-setup";
 
 /**
@@ -61,6 +64,7 @@ describe("ensureVaultReadyForDistill", () => {
    */
   function runSetup(
     level: HealthLevel = "fast",
+    options: SetupOptions = {},
   ): ReturnType<typeof ensureVaultReadyForDistill> {
     const saved = {
       name: process.env.GIT_AUTHOR_NAME,
@@ -88,6 +92,7 @@ describe("ensureVaultReadyForDistill", () => {
           configPath: path.join(vault, ".napkin"),
         },
         level,
+        options,
       );
     } finally {
       if (saved.name === undefined) delete process.env.GIT_AUTHOR_NAME;
@@ -1180,6 +1185,135 @@ describe("ensureVaultReadyForDistill", () => {
       expect(f.invariant).not.toBe("config.json-not-gitignored-outside-block");
     }
   });
+
+  // --- napkin-distill-not-tracked (full-level only) ----------------------
+  //
+  // The canonical {@link BLOCK_CONTENT} gitignores `.napkin/distill/`,
+  // so a tracked entry there means a stale commit (predates the
+  // gitignore block) or a deliberate `git add -f`. Auto-untrack would
+  // discard the user's staged changes; refuse to spawn instead.
+
+  test(".napkin/distill/ contains tracked files: error finding with sample paths", () => {
+    const { configRel } = setupExistingRepoWithBlock();
+    // Synthesize a tracked entry under .napkin/distill/. The canonical
+    // gitignore block excludes the directory, so we have to use
+    // `git add -f` to force-stage.
+    const distillDir = path.join(vault, ".napkin", "distill");
+    fs.mkdirSync(distillDir, { recursive: true });
+    fs.writeFileSync(path.join(distillDir, "orphan.txt"), "old content");
+    git(vault, ["add", "-f", ".napkin/distill/orphan.txt"]);
+    git(vault, ["commit", "-q", "-m", "force-stage orphan"]);
+    expect(configRel).toBeDefined(); // silence unused-binding lint
+
+    const r = runSetup("full");
+    const finding = r.findings.find(
+      (f) => f.invariant === "napkin-distill-not-tracked",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("error");
+    expect(finding?.message).toContain(".napkin/distill/orphan.txt");
+    expect(finding?.message).toContain("git rm --cached");
+  });
+
+  test("empty .napkin/distill/ (no tracked files): no finding", () => {
+    setupExistingRepoWithBlock();
+    const r = runSetup("full");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("napkin-distill-not-tracked");
+    }
+  });
+
+  test("fast-level does NOT run the napkin-distill-not-tracked check", () => {
+    setupExistingRepoWithBlock();
+    const distillDir = path.join(vault, ".napkin", "distill");
+    fs.mkdirSync(distillDir, { recursive: true });
+    fs.writeFileSync(path.join(distillDir, "orphan.txt"), "old");
+    git(vault, ["add", "-f", ".napkin/distill/orphan.txt"]);
+    git(vault, ["commit", "-q", "-m", "force"]);
+
+    const r = runSetup("fast");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("napkin-distill-not-tracked");
+    }
+  });
+
+  // --- cache-root-writable (full-level only) -----------------------------
+  //
+  // The probe walks UP from `resolveCacheRoot(vault)`'s parent to the
+  // first existing ancestor so a fresh box where
+  // `~/.cache/napkin-distill/` does not yet exist does not
+  // false-error. Tests inject `probeWritable` via SetupOptions to
+  // exercise the unwritable path without `chmod 0500` (which
+  // false-passes under root in CI) or platform-specific read-only
+  // mounts.
+
+  test("injected probeWritable returns writable=false: error finding", () => {
+    setupExistingRepoWithBlock();
+    const r = runSetup("full", {
+      probeWritable: (_dir) => ({ writable: false, error: "EACCES" }),
+    });
+    const finding = r.findings.find(
+      (f) => f.invariant === "cache-root-writable",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("error");
+    expect(finding?.message).toContain("EACCES");
+    expect(finding?.message).toContain("XDG_CACHE_HOME");
+  });
+
+  test("default probe on a writable tmpdir: no finding (regression check)", () => {
+    // Re-direct XDG_CACHE_HOME to the test's own tmpdir so the probe
+    // lands on a writable directory we know exists. Restored in the
+    // finally to avoid leaking process state across tests.
+    setupExistingRepoWithBlock();
+    const cacheTmp = fs.mkdtempSync(path.join(os.tmpdir(), "cache-probe-"));
+    const saved = process.env.XDG_CACHE_HOME;
+    process.env.XDG_CACHE_HOME = cacheTmp;
+    try {
+      const r = runSetup("full");
+      for (const f of r.findings) {
+        expect(f.invariant).not.toBe("cache-root-writable");
+      }
+    } finally {
+      if (saved === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = saved;
+      fs.rmSync(cacheTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("fresh-box default probe: walks up to ~/.cache when napkin-distill/ does not yet exist", () => {
+    // The fresh-vault scenario: XDG_CACHE_HOME points at a real
+    // writable directory but `<XDG_CACHE_HOME>/napkin-distill/<hash>/`
+    // does not exist yet. The probe walks up from
+    // `<XDG_CACHE_HOME>/napkin-distill/` to `<XDG_CACHE_HOME>` (the
+    // first existing ancestor) and reports writable=true. Without
+    // the walk-up, this would false-error on every fresh box.
+    setupExistingRepoWithBlock();
+    const cacheTmp = fs.mkdtempSync(path.join(os.tmpdir(), "cache-fresh-"));
+    expect(fs.existsSync(path.join(cacheTmp, "napkin-distill"))).toBe(false);
+    const saved = process.env.XDG_CACHE_HOME;
+    process.env.XDG_CACHE_HOME = cacheTmp;
+    try {
+      const r = runSetup("full");
+      for (const f of r.findings) {
+        expect(f.invariant).not.toBe("cache-root-writable");
+      }
+    } finally {
+      if (saved === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = saved;
+      fs.rmSync(cacheTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("fast-level does NOT run the cache-root-writable check", () => {
+    setupExistingRepoWithBlock();
+    const r = runSetup("fast", {
+      probeWritable: (_dir) => ({ writable: false, error: "EACCES" }),
+    });
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("cache-root-writable");
+    }
+  });
 });
 
 // --- helper unit tests ---------------------------------------------------
@@ -1319,6 +1453,65 @@ describe("parseCheckIgnoreVerbose", () => {
     expect(
       parseCheckIgnoreVerbose("just-a-pathname\tjust-a-pathname"),
     ).toBeNull();
+  });
+});
+
+describe("walkToFirstExistingAncestor", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "walk-ancestor-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("existing dir: returns it unchanged", () => {
+    expect(walkToFirstExistingAncestor(dir)).toBe(dir);
+  });
+
+  test("non-existent leaf with existing parent: walks up one level", () => {
+    expect(walkToFirstExistingAncestor(path.join(dir, "missing"))).toBe(dir);
+  });
+
+  test("chain of non-existent dirs: walks up until first existing", () => {
+    expect(walkToFirstExistingAncestor(path.join(dir, "a", "b", "c"))).toBe(
+      dir,
+    );
+  });
+
+  test("root path: returns root (terminates at filesystem boundary)", () => {
+    // path.dirname('/') === '/' on POSIX, so the loop exits.
+    const r = walkToFirstExistingAncestor("/");
+    expect(r).toBe("/");
+  });
+});
+
+describe("probeWritable", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "probe-writable-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("writable tmpdir: writable=true, no error", () => {
+    const r = probeWritable(dir);
+    expect(r.writable).toBe(true);
+    expect(r.error).toBeUndefined();
+    // Probe file is cleaned up.
+    const leftover = fs
+      .readdirSync(dir)
+      .filter((n) => n.startsWith(".napkin-write-probe-"));
+    expect(leftover).toEqual([]);
+  });
+
+  test("non-existent dir: writable=false, error carries underlying message", () => {
+    const missing = path.join(dir, "does-not-exist");
+    const r = probeWritable(missing);
+    expect(r.writable).toBe(false);
+    expect(r.error).toBeDefined();
+    expect(r.error?.length).toBeGreaterThan(0);
   });
 });
 

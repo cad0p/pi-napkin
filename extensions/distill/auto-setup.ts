@@ -48,7 +48,10 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { GIT_SUBCOMMAND_TIMEOUT_MS } from "./distill-workspace";
+import {
+  GIT_SUBCOMMAND_TIMEOUT_MS,
+  resolveCacheRoot,
+} from "./distill-workspace";
 
 /**
  * Snapshot of the v0.3.0 line-by-line entries appended to
@@ -254,6 +257,26 @@ export interface SetupVault {
 }
 
 /**
+ * Optional dependency-injection seam for {@link
+ * ensureVaultReadyForDistill}. All fields are optional; production
+ * call sites pass `undefined` (or omit the argument) and get the
+ * default behavior. Tests inject stubs to exercise paths that are
+ * impractical to reproduce on real filesystems (notably an unwritable
+ * cache root: `chmod 0500` would false-pass under root in CI, and a
+ * read-only mount is platform-specific).
+ */
+export interface SetupOptions {
+  /**
+   * Probe whether `dir` is writable. Defaults to {@link probeWritable},
+   * which writes and removes a temporary file. Tests substitute a
+   * stub that returns `{ writable: false, error }` to exercise the
+   * `cache-root-writable` loud-error path without touching the real
+   * filesystem.
+   */
+  probeWritable?: (dir: string) => WritableProbeResult;
+}
+
+/**
  * Run `git` in `cwd` and return `{ status, stdout, stderr }`. Does not throw
  * on non-zero exit — we translate failures to `SetupResult.error`.
  */
@@ -333,6 +356,34 @@ const INVARIANT_CONFIG_JSON_TRACKED = "config.json-tracked";
  */
 const INVARIANT_CONFIG_JSON_NOT_GITIGNORED_OUTSIDE_BLOCK =
   "config.json-not-gitignored-outside-block";
+
+/**
+ * Stable invariant ID for `<configPath>/distill/` NOT containing tracked
+ * files. Loud-error finding only — auto-untrack via `git rm --cached -r`
+ * could lose user data the user staged on purpose. The user resolves
+ * manually after we've surfaced the offending paths.
+ *
+ * `<configPath>/distill/` is napkin-distill's ephemeral worktree-fork
+ * registry; the canonical {@link BLOCK_CONTENT} gitignores it so it
+ * should never be tracked. A tracked entry typically means a stale
+ * commit from before the gitignore block was installed, OR a user
+ * who explicitly ran `git add -f` on the directory.
+ */
+const INVARIANT_NAPKIN_DISTILL_NOT_TRACKED = "napkin-distill-not-tracked";
+
+/**
+ * Stable invariant ID for the cache root being writable. Loud-error
+ * finding only — a read-only home directory or misconfigured
+ * `XDG_CACHE_HOME` is the user's environment problem; auto-recovery
+ * (e.g. fall back to a different cache home) would mask the real
+ * cause and produce surprising state.
+ *
+ * The probe walks UP from `resolveCacheRoot(vault.contentPath)`'s
+ * parent to the first existing ancestor (so a fresh box where
+ * `~/.cache/napkin-distill/` does not yet exist does not
+ * false-error — the probe lands on `~/.cache` instead).
+ */
+const INVARIANT_CACHE_ROOT_WRITABLE = "cache-root-writable";
 
 /**
  * Range of the napkin-distill managed block within `<vault>/.gitignore`,
@@ -451,6 +502,83 @@ export function parseCheckIgnoreVerbose(
     pattern: m[3],
     pathname,
   };
+}
+
+/**
+ * Walk upward from `dir` until we find an existing ancestor. The
+ * `cache-root-writable` probe fires on a fresh box where
+ * `~/.cache/napkin-distill/` doesn't exist yet, so a literal probe
+ * against the cache root would always fail with ENOENT — a false
+ * positive. Walking up to the first existing ancestor (typically
+ * `~/.cache`, occasionally `~`) probes a directory that's actually
+ * present and reflects the real writability state.
+ *
+ * Stops at the filesystem root (`path.dirname("/") === "/"`).
+ * Returns `"/"` if every path component along the way is missing,
+ * which is impossible in practice (root always exists) but the
+ * deterministic shape keeps the helper's contract total.
+ */
+export function walkToFirstExistingAncestor(dir: string): string {
+  let current = dir;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
+
+/**
+ * Result of {@link probeWritable}. `writable: true` is the healthy
+ * path; `writable: false` carries the underlying error message so
+ * the loud-error finding can include the platform-specific reason
+ * (EACCES, EROFS, ENOSPC, etc.).
+ */
+export interface WritableProbeResult {
+  writable: boolean;
+  error?: string;
+}
+
+/**
+ * Probe whether `dir` is writable by writing and removing a
+ * temporary file. The filename embeds `Date.now()` plus a random
+ * suffix so concurrent probes from parallel pi sessions or test
+ * workers on the same directory don't collide.
+ *
+ * Failures are translated to `{ writable: false, error }` rather than
+ * thrown so callers can surface the message in a structured
+ * finding. Cleanup of the probe file is best-effort: if writeFileSync
+ * succeeds but unlink fails, we still report `writable: true` (the
+ * write proves the directory is writable) but the temp file leaks.
+ * The leak window is bounded — a subsequent probe on the same path
+ * would overwrite if the random suffixes collide; otherwise the OS's
+ * tmp-cleanup or a manual `rm` resolves it. We accept that trade-
+ * off rather than reporting a false-negative on writability.
+ */
+export function probeWritable(dir: string): WritableProbeResult {
+  // Filename embeds Date.now() AND a random suffix so concurrent
+  // probes from parallel pi sessions or test workers on the same
+  // vault don't collide. The suffix is large enough that a same-ms
+  // collision across realistic concurrency is statistically
+  // negligible.
+  const probePath = path.join(
+    dir,
+    `.napkin-write-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+  );
+  try {
+    fs.writeFileSync(probePath, "");
+  } catch (err) {
+    return {
+      writable: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  try {
+    fs.unlinkSync(probePath);
+  } catch {
+    // ignore — see JSDoc.
+  }
+  return { writable: true };
 }
 
 /**
@@ -712,6 +840,7 @@ function mergeManagedBlock(
 export function ensureVaultReadyForDistill(
   vault: SetupVault,
   level: HealthLevel,
+  options: SetupOptions = {},
 ): SetupResult {
   const vaultPath = vault.contentPath;
   const findings: HealthFinding[] = [];
@@ -883,6 +1012,59 @@ export function ensureVaultReadyForDistill(
           }
         }
       }
+    }
+
+    // Refuse to spawn if `<configPath>/distill/` contains tracked
+    // files. The canonical {@link BLOCK_CONTENT} gitignores this
+    // directory — a tracked entry typically means a stale commit
+    // from before the gitignore block was installed, OR a user who
+    // explicitly ran `git add -f`. Auto-untracking via `git rm
+    // --cached -r` could discard staged changes, so we surface a
+    // loud error and let the user resolve manually.
+    const distillRel = path.relative(
+      vaultPath,
+      path.join(vault.configPath, "distill"),
+    );
+    const distillTracked = runGit(vaultPath, [
+      "ls-files",
+      "--",
+      `${distillRel}/`,
+    ]);
+    const trackedDistillPaths = distillTracked.stdout
+      .split("\n")
+      .filter((l) => l.length > 0);
+    if (trackedDistillPaths.length > 0) {
+      // Cap the list embedded in the message so a runaway commit
+      // doesn't bloat the notify text. Three is enough to be
+      // diagnostic; the rest are summarised by count.
+      const sample = trackedDistillPaths.slice(0, 3);
+      const remainder = trackedDistillPaths.length - sample.length;
+      const tail = remainder > 0 ? ` (+${remainder} more)` : "";
+      findings.push({
+        kind: "error",
+        invariant: INVARIANT_NAPKIN_DISTILL_NOT_TRACKED,
+        message: `${distillRel}/ contains tracked files [${sample.join(", ")}]${tail}; auto-untrack would risk data loss. Run \`git rm --cached -r ${distillRel}/\` manually.`,
+      });
+    }
+
+    // Probe writability of the cache root's first existing ancestor.
+    // Walking up handles the fresh-box case where
+    // `~/.cache/napkin-distill/` does not yet exist; the probe lands
+    // on `~/.cache` (typically) and reflects the real writability
+    // state. The probe is injectable via `options.probeWritable` so
+    // tests can exercise the unwritable path without touching
+    // `chmod 0500` (which false-passes under root in CI) or
+    // platform-specific read-only mounts.
+    const probe = options.probeWritable ?? probeWritable;
+    const cacheRoot = resolveCacheRoot(vault.contentPath);
+    const probeDir = walkToFirstExistingAncestor(path.dirname(cacheRoot));
+    const probeResult = probe(probeDir);
+    if (!probeResult.writable) {
+      findings.push({
+        kind: "error",
+        invariant: INVARIANT_CACHE_ROOT_WRITABLE,
+        message: `Cache root parent ${probeDir} is not writable: ${probeResult.error ?? "unknown error"}. Set XDG_CACHE_HOME to a writable directory or fix the permissions.`,
+      });
     }
   }
 
