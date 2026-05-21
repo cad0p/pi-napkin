@@ -1010,189 +1010,178 @@ async function main(): Promise<number> {
   // shells out via `runGit` with `env: process.env`, so identity must
   // live there for auto-init's `git commit` to succeed under a CI
   // runner whose global `commit.gpgsign=true` would otherwise refuse
-  // to commit unsigned. Restore on every exit path below.
+  // to commit unsigned. Restored in the bottom-of-main `finally` so
+  // every exit path — happy, fail-fast, exception — leaves the
+  // process env clean.
   const gitEnv = installGitEnvOnProcess();
 
-  let fixturePartial: Omit<Fixture, "startSha" | "originStartSha">;
+  // Tracked here so the bottom-of-main `finally` can clean up the
+  // tmpdir even when an early-exit branch returns before the fixture
+  // is fully built. `null` until `setupFixture` succeeds.
+  let tmpdir: string | null = null;
+
   try {
-    fixturePartial = setupFixture();
-  } catch (e) {
-    gitEnv.restore();
-    console.error(`error: fixture setup failed: ${(e as Error).message}`);
-    return 2;
-  }
-
-  console.log(`  tmpdir:  ${fixturePartial.tmpdir}`);
-  console.log(`  vault:   ${fixturePartial.vaultPath}`);
-  console.log(`  origin:  ${fixturePartial.originPath}`);
-  console.log("");
-
-  // Wire the extension BEFORE driving the auto-init: distillExtension
-  // registers handlers + the /distill command against the captured
-  // spy. Tighter ordering than the previous fixture (which built the
-  // mock API only at the /distill trigger): the auto-init now runs
-  // through `captured.handlers.session_start`, which has to exist
-  // before we fire it.
-  const { api, captured } = makeMockExtensionAPI();
-  // biome-ignore lint/suspicious/noExplicitAny: opaque ExtensionAPI shape
-  distillExtension(api as any);
-  if (!captured.handlers.session_start) {
-    gitEnv.restore();
-    if (!args.keepTmpdir) {
-      fs.rmSync(fixturePartial.tmpdir, { recursive: true, force: true });
+    let fixturePartial: Omit<Fixture, "startSha" | "originStartSha">;
+    try {
+      fixturePartial = setupFixture();
+    } catch (e) {
+      console.error(`error: fixture setup failed: ${(e as Error).message}`);
+      return 2;
     }
-    console.error("error: session_start handler not registered by extension");
-    return 2;
-  }
-  if (!captured.commands.distill) {
-    gitEnv.restore();
-    if (!args.keepTmpdir) {
-      fs.rmSync(fixturePartial.tmpdir, { recursive: true, force: true });
-    }
-    console.error("error: /distill command not registered by extension");
-    return 2;
-  }
+    tmpdir = fixturePartial.tmpdir;
 
-  // Allow the wrapper subprocess to inherit the model selection.
-  process.env.NAPKIN_DISTILL_MODEL = model;
-
-  // Allocate session via SessionManager (path allocation only) and
-  // overwrite via writeSyntheticSession (raw JSONL content). Order is
-  // unambiguous: SessionManager owns the path, writeSyntheticSession
-  // owns the content, the wrapper subprocess later reads from disk.
-  const sm = SessionManager.create(
-    fixturePartial.parentCwd,
-    fixturePartial.sessionsDir,
-  );
-  const sessionFile = sm.getSessionFile();
-  if (!sessionFile) {
-    gitEnv.restore();
-    if (!args.keepTmpdir) {
-      fs.rmSync(fixturePartial.tmpdir, { recursive: true, force: true });
-    }
-    console.error("error: SessionManager allocated no session file");
-    return 2;
-  }
-  writeSyntheticSession(sessionFile, fixturePartial.vaultPath);
-
-  const { ui, notifyCalls } = makeFakeUI();
-  // biome-ignore lint/suspicious/noExplicitAny: minimal RunCtx
-  const ctx: any = {
-    cwd: fixturePartial.vaultPath,
-    sessionManager: sm,
-    hasUI: true,
-    ui,
-  };
-
-  // ----- Phase 1: drive auto-init through session_start ----------------------
-  //
-  // Mirrors production: a fresh `pi` invocation in a vault that has
-  // `.napkin/config.json` but no `.git/`. session_start calls
-  // `ensureVaultReadyForDistill(vault, "fast")` which performs
-  // `git init -q -b main`, installs the managed gitignore block,
-  // runs `git add . && git commit`, and (via the index.ts handler)
-  // pushes an info notify announcing the init.
-  console.log("Triggering session_start (auto-init phase)...");
-  const autoInitStart = Date.now();
-  await captured.handlers.session_start({ reason: "new" }, ctx);
-  const autoInitWallMs = Date.now() - autoInitStart;
-  console.log(
-    `  auto-init wall: ${(autoInitWallMs / 1000).toFixed(2)}s ` +
-      `(notify spy captured ${notifyCalls.length} call(s))`,
-  );
-
-  const autoInitResults = assertAutoInitPostConditions(
-    fixturePartial.vaultPath,
-    notifyCalls,
-  );
-  const autoInitAllPassed = autoInitResults.every((r) => r.passed);
-  if (!autoInitAllPassed) {
-    // Auto-init regressed — fail fast instead of waiting on a wrapper
-    // run that's now guaranteed to misbehave.
+    console.log(`  tmpdir:  ${fixturePartial.tmpdir}`);
+    console.log(`  vault:   ${fixturePartial.vaultPath}`);
+    console.log(`  origin:  ${fixturePartial.originPath}`);
     console.log("");
-    console.log("Auto-init phase failed; skipping /distill trigger.");
-    for (const r of autoInitResults) {
-      console.log(`  ${r.passed ? "✓" : "✗"} ${r.name}`);
-      if (!r.passed) console.log(`      ${r.detail}`);
+
+    // Wire the extension BEFORE driving the auto-init: distillExtension
+    // registers handlers + the /distill command against the captured
+    // spy. Tighter ordering than the previous fixture (which built the
+    // mock API only at the /distill trigger): the auto-init now runs
+    // through `captured.handlers.session_start`, which has to exist
+    // before we fire it.
+    const { api, captured } = makeMockExtensionAPI();
+    // biome-ignore lint/suspicious/noExplicitAny: opaque ExtensionAPI shape
+    distillExtension(api as any);
+    if (!captured.handlers.session_start) {
+      console.error("error: session_start handler not registered by extension");
+      return 2;
     }
-    gitEnv.restore();
-    if (!args.keepTmpdir) {
-      fs.rmSync(fixturePartial.tmpdir, { recursive: true, force: true });
-    } else {
-      console.log(
-        `  --keep-tmpdir: leaving ${fixturePartial.tmpdir} for inspection.`,
+    if (!captured.commands.distill) {
+      console.error("error: /distill command not registered by extension");
+      return 2;
+    }
+
+    // Allow the wrapper subprocess to inherit the model selection.
+    process.env.NAPKIN_DISTILL_MODEL = model;
+
+    // Allocate session via SessionManager (path allocation only) and
+    // overwrite via writeSyntheticSession (raw JSONL content). Order is
+    // unambiguous: SessionManager owns the path, writeSyntheticSession
+    // owns the content, the wrapper subprocess later reads from disk.
+    const sm = SessionManager.create(
+      fixturePartial.parentCwd,
+      fixturePartial.sessionsDir,
+    );
+    const sessionFile = sm.getSessionFile();
+    if (!sessionFile) {
+      console.error("error: SessionManager allocated no session file");
+      return 2;
+    }
+    writeSyntheticSession(sessionFile, fixturePartial.vaultPath);
+
+    const { ui, notifyCalls } = makeFakeUI();
+    // biome-ignore lint/suspicious/noExplicitAny: minimal RunCtx
+    const ctx: any = {
+      cwd: fixturePartial.vaultPath,
+      sessionManager: sm,
+      hasUI: true,
+      ui,
+    };
+
+    // ----- Phase 1: drive auto-init through session_start ----------------------
+    //
+    // Mirrors production: a fresh `pi` invocation in a vault that has
+    // `.napkin/config.json` but no `.git/`. session_start calls
+    // `ensureVaultReadyForDistill(vault, "fast")` which performs
+    // `git init -q -b main`, installs the managed gitignore block,
+    // runs `git add . && git commit`, and (via the index.ts handler)
+    // pushes an info notify announcing the init.
+    console.log("Triggering session_start (auto-init phase)...");
+    const autoInitStart = Date.now();
+    await captured.handlers.session_start({ reason: "new" }, ctx);
+    const autoInitWallMs = Date.now() - autoInitStart;
+    console.log(
+      `  auto-init wall: ${(autoInitWallMs / 1000).toFixed(2)}s ` +
+        `(notify spy captured ${notifyCalls.length} call(s))`,
+    );
+
+    const autoInitResults = assertAutoInitPostConditions(
+      fixturePartial.vaultPath,
+      notifyCalls,
+    );
+    const autoInitAllPassed = autoInitResults.every((r) => r.passed);
+    if (!autoInitAllPassed) {
+      // Auto-init regressed — fail fast instead of waiting on a wrapper
+      // run that's now guaranteed to misbehave.
+      console.log("");
+      console.log("Auto-init phase failed; skipping /distill trigger.");
+      for (const r of autoInitResults) {
+        console.log(`  ${r.passed ? "✓" : "✗"} ${r.name}`);
+        if (!r.passed) console.log(`      ${r.detail}`);
+      }
+      return 1;
+    }
+
+    // ----- Phase 2: bare origin (test scaffolding only) ------------------------
+    //
+    // Auto-init produced `main` with the initial commit; now we wire a
+    // bare origin so the wrapper's `git push origin <branch>` later has
+    // a parent commit to fast-forward from. This is the only piece of
+    // setup that is NOT user-flow — wrappers need a remote.
+    let originRefs: { startSha: string; originStartSha: string };
+    try {
+      originRefs = wireBareOrigin(fixturePartial);
+    } catch (e) {
+      console.error(
+        `error: bare-origin wiring failed: ${(e as Error).message}`,
       );
+      return 2;
     }
-    return 1;
-  }
+    const fixture: Fixture = { ...fixturePartial, ...originRefs };
 
-  // ----- Phase 2: bare origin (test scaffolding only) ------------------------
-  //
-  // Auto-init produced `main` with the initial commit; now we wire a
-  // bare origin so the wrapper's `git push origin <branch>` later has
-  // a parent commit to fast-forward from. This is the only piece of
-  // setup that is NOT user-flow — wrappers need a remote.
-  let originRefs: { startSha: string; originStartSha: string };
-  try {
-    originRefs = wireBareOrigin(fixturePartial);
-  } catch (e) {
+    // ----- Phase 3: drive /distill -------------------------------------------
+    const triggerStart = Date.now();
+    console.log(
+      `Triggering /distill (timeout ${DISTILL_MAX_DURATION_MINUTES}m + ${POLLER_DISPATCH_SLACK_SECS}s slack)...`,
+    );
+    await captured.commands.distill.handler("", ctx);
+
+    // Wait for the JS poller to fire its dispatch.
+    const timeoutMs =
+      DISTILL_MAX_DURATION_MINUTES * 60 * 1000 +
+      POLLER_DISPATCH_SLACK_SECS * 1000;
+    const notify = await waitForOutcomeNotify(notifyCalls, timeoutMs);
+    const triggerWallMs = Date.now() - triggerStart;
+    console.log(
+      `Notify dispatch wall: ${(triggerWallMs / 1000).toFixed(1)}s (poll loop tick is 2s)`,
+    );
+
+    // Read the outcome sidecar (filesystem evidence — independent of the
+    // notification dispatch path).
+    const outcome = readOutcomeSidecar(fixture.vaultPath);
+    const gate = classifyGate(notify, outcome);
+
+    // Combined post-conditions: auto-init's filesystem invariants + the
+    // distill phase's notify / outcome / filesystem invariants. The
+    // auto-init block is re-run here so the summary contains every
+    // checked invariant in one place — a single PASS/FAIL decision.
+    const results = [
+      ...autoInitResults,
+      ...assertGreenPostConditions(fixture, notify),
+    ];
+    const passed = printSummary(
+      results,
+      notify,
+      outcome,
+      gate,
+      fixture,
+      model,
+      startMs,
+    );
+
+    return passed ? 0 : 1;
+  } finally {
     gitEnv.restore();
-    if (!args.keepTmpdir) {
-      fs.rmSync(fixturePartial.tmpdir, { recursive: true, force: true });
+    if (tmpdir) {
+      if (args.keepTmpdir) {
+        console.log(`  --keep-tmpdir: leaving ${tmpdir} for inspection.`);
+      } else {
+        fs.rmSync(tmpdir, { recursive: true, force: true });
+      }
     }
-    console.error(`error: bare-origin wiring failed: ${(e as Error).message}`);
-    return 2;
   }
-  const fixture: Fixture = { ...fixturePartial, ...originRefs };
-
-  // ----- Phase 3: drive /distill -------------------------------------------
-  const triggerStart = Date.now();
-  console.log(
-    `Triggering /distill (timeout ${DISTILL_MAX_DURATION_MINUTES}m + ${POLLER_DISPATCH_SLACK_SECS}s slack)...`,
-  );
-  await captured.commands.distill.handler("", ctx);
-
-  // Wait for the JS poller to fire its dispatch.
-  const timeoutMs =
-    DISTILL_MAX_DURATION_MINUTES * 60 * 1000 +
-    POLLER_DISPATCH_SLACK_SECS * 1000;
-  const notify = await waitForOutcomeNotify(notifyCalls, timeoutMs);
-  const triggerWallMs = Date.now() - triggerStart;
-  console.log(
-    `Notify dispatch wall: ${(triggerWallMs / 1000).toFixed(1)}s (poll loop tick is 2s)`,
-  );
-
-  // Read the outcome sidecar (filesystem evidence — independent of the
-  // notification dispatch path).
-  const outcome = readOutcomeSidecar(fixture.vaultPath);
-  const gate = classifyGate(notify, outcome);
-
-  // Combined post-conditions: auto-init's filesystem invariants + the
-  // distill phase's notify / outcome / filesystem invariants. The
-  // auto-init block is re-run here so the summary contains every
-  // checked invariant in one place — a single PASS/FAIL decision.
-  const results = [
-    ...autoInitResults,
-    ...assertGreenPostConditions(fixture, notify),
-  ];
-  const passed = printSummary(
-    results,
-    notify,
-    outcome,
-    gate,
-    fixture,
-    model,
-    startMs,
-  );
-
-  gitEnv.restore();
-  if (args.keepTmpdir) {
-    console.log(`  --keep-tmpdir: leaving ${fixture.tmpdir} for inspection.`);
-  } else {
-    fs.rmSync(fixture.tmpdir, { recursive: true, force: true });
-  }
-
-  return passed ? 0 : 1;
 }
 
 main()
