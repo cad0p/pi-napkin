@@ -217,11 +217,58 @@ const POLLER_DISPATCH_SLACK_SECS = 30;
 /** Polling interval for the assertion-side wait loop. */
 const ASSERTION_POLL_INTERVAL_MS = 250;
 
+/**
+ * Wait cap for variants that abort the spawn before LLM dispatch (e.g.
+ * `config-outside-block`, where the full-level health check fails
+ * before `runDistillWith` ever spawns a wrapper). Set to 5 seconds
+ * because the abort decision is taken synchronously inside
+ * `ensureVaultReadyForDistill(vault, "full")` plus a notify dispatch —
+ * everything happens within a single JS tick and a few git probes,
+ * so a short cap is enough to confirm "no wrapper outcome ever
+ * fires" without paying the full {@link DISTILL_MAX_DURATION_MINUTES}
+ * timeout. Picked an order-of-magnitude longer than the observed
+ * wall time of an abort path (sub-second on a healthy disk) to
+ * absorb CI runner jitter.
+ */
+const VARIANT_ABORT_NOTIFY_WAIT_MS = 5_000;
+
+/**
+ * Health-check fixture variant exercised by this run. The default
+ * `"healthy"` variant matches the original gate: post-`napkin init`
+ * vault, no health-check drift, full distill cycle. The other
+ * variants pre-condition the fixture so a single full-level health-
+ * check invariant fires:
+ *
+ * - `"config-outside-block"`: between session_start and /distill,
+ *   appends `.napkin/config.json` to .gitignore OUTSIDE the managed
+ *   block. /distill's full-level check fires the
+ *   `config.json-not-gitignored-outside-block` error finding and
+ *   aborts the spawn (no LLM cost).
+ * - `"orphaned-worktree"`: between session_start and /distill,
+ *   registers a fake distill worktree then `rm -rf`s its directory.
+ *   /distill's full-level check prunes the orphan (auto-recovered
+ *   info finding) and proceeds with the spawn (full LLM cost).
+ *
+ * Each variant exercises a different production-runtime decision
+ * point covered by the full-level invariants — one loud-error path
+ * (gitignore-outside-managed-block) and one auto-recover path
+ * (orphaned worktree pruning).
+ */
+export type Variant = "healthy" | "config-outside-block" | "orphaned-worktree";
+
 interface Args {
   model: string;
   keepTmpdir: boolean;
   help: boolean;
+  variant: Variant;
+  all: boolean;
 }
+
+const VARIANT_VALUES: readonly Variant[] = [
+  "healthy",
+  "config-outside-block",
+  "orphaned-worktree",
+];
 
 const HELP = `verify-e2e — full-runtime gate for the distill flow
 
@@ -231,6 +278,15 @@ Flags:
   --model <provider>/<id>   Model to invoke (default: ${DEFAULT_MODEL}, or
                             read from ~/.config/napkin/config.json's vault
                             if set there).
+  --variant <name>          Health-check fixture variant. Values:
+                            healthy (default; original gate),
+                            config-outside-block (loud-error path:
+                            full check aborts spawn; no LLM cost),
+                            orphaned-worktree (auto-recover path:
+                            full check prunes orphan, distill runs;
+                            full LLM cost).
+  --all                     Run every variant sequentially. Aggregated
+                            cost: 2 × LLM run + 1 zero-cost variant.
   --keep-tmpdir             Don't rm the tmpdir on exit (forensic).
   --help, -h                Print this and exit 0.
 
@@ -238,8 +294,10 @@ Notes:
   - Single-run policy: no --runs N. The natural test must reliably
     reproduce the race on buggy code; if it doesn't, iterate the
     synthetic fixture or escalate.
-  - Cost: ~$0.50 per run at Anthropic API rates. Kiro provider bills via
-    seat (reports $0).
+  - Cost: ~$0.50 per LLM-driven run at Anthropic API rates. Kiro
+    provider bills via seat (reports $0). The
+    config-outside-block variant aborts before LLM dispatch and
+    costs $0.
   - Fixture iteration budget: if a RED-gate run passes against unfixed
     code, iterate the synthetic conversation up to 5 attempts (~$2.50).
     After that, escalate.
@@ -251,11 +309,18 @@ Exit codes:
 `;
 
 function parseArgs(argv: readonly string[]): Args {
-  const args: Args = { model: "", keepTmpdir: false, help: false };
+  const args: Args = {
+    model: "",
+    keepTmpdir: false,
+    help: false,
+    variant: "healthy",
+    all: false,
+  };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--help" || a === "-h") args.help = true;
     else if (a === "--keep-tmpdir") args.keepTmpdir = true;
+    else if (a === "--all") args.all = true;
     else if (a === "--model") {
       const next = argv[i + 1];
       if (!next) throw new Error("--model requires a value");
@@ -263,6 +328,24 @@ function parseArgs(argv: readonly string[]): Args {
       i++;
     } else if (a.startsWith("--model=")) {
       args.model = a.slice("--model=".length);
+    } else if (a === "--variant") {
+      const next = argv[i + 1];
+      if (!next) throw new Error("--variant requires a value");
+      if (!VARIANT_VALUES.includes(next as Variant)) {
+        throw new Error(
+          `unknown variant: ${next}. Known: ${VARIANT_VALUES.join(", ")}`,
+        );
+      }
+      args.variant = next as Variant;
+      i++;
+    } else if (a.startsWith("--variant=")) {
+      const v = a.slice("--variant=".length);
+      if (!VARIANT_VALUES.includes(v as Variant)) {
+        throw new Error(
+          `unknown variant: ${v}. Known: ${VARIANT_VALUES.join(", ")}`,
+        );
+      }
+      args.variant = v as Variant;
     } else {
       throw new Error(`unknown arg: ${a}`);
     }
@@ -952,6 +1035,7 @@ function assertAutoInitPostConditions(
 function assertGreenPostConditions(
   fixture: Fixture,
   notify: NotifyCall | null,
+  expectedLeftoverBranches: readonly string[] = [],
 ): PostConditionResult[] {
   const results: PostConditionResult[] = [];
 
@@ -1034,19 +1118,33 @@ function assertGreenPostConditions(
       : `rev-list failed: ${commitCount.stderr.trim()}`,
   });
 
-  // (5) Distill branches removed (no `distill/*` left in vault).
+  // (5) Distill branches removed (no `distill/*` left in vault
+  // beyond branches the variant pre-condition explicitly injected).
+  // The orphaned-worktree variant creates a `distill/<name>` branch
+  // as part of orphan setup; the orphan-prune invariant removes the
+  // worktree registry entry but not the branch (a separate stale-
+  // branch invariant handles that on its own grace timer). The check
+  // therefore subtracts the variant's known leftovers before pinning
+  // "no surviving distill branches".
   const branchList = spawnSync(
     "git",
     ["-C", fixture.vaultPath, "branch", "--list", "distill/*"],
     { encoding: "utf-8", env: process.env },
   );
+  const remainingBranches = branchList.stdout
+    .split("\n")
+    .map((l) => l.replace(/^[* ]+/, "").trim())
+    .filter((l) => l.length > 0)
+    .filter((b) => !expectedLeftoverBranches.includes(b));
   results.push({
-    name: "all distill/* branches removed",
-    passed: branchList.stdout.trim() === "",
+    name: "all distill/* branches removed (excluding variant leftovers)",
+    passed: remainingBranches.length === 0,
     detail:
-      branchList.stdout.trim() === ""
-        ? "removed"
-        : `still present: ${branchList.stdout.trim()}`,
+      remainingBranches.length === 0
+        ? expectedLeftoverBranches.length > 0
+          ? `removed (variant leftovers tolerated: ${expectedLeftoverBranches.join(", ")})`
+          : "removed"
+        : `still present: ${remainingBranches.join(", ")}`,
   });
 
   // (6) Worktrees pruned.
@@ -1181,52 +1279,168 @@ function printSummary(
 // Main
 // ---------------------------------------------------------------------------
 
-async function main(): Promise<number> {
-  let args: Args;
-  try {
-    args = parseArgs(process.argv.slice(2));
-  } catch (e) {
-    console.error(`error: ${(e as Error).message}\n`);
-    console.error(HELP);
-    return 2;
+/**
+ * Apply a variant's pre-`/distill` fixture mutation. Runs after
+ * session_start has installed the managed gitignore block + made the
+ * initial commit, and before the /distill trigger fires the full-
+ * level health check. Each variant either:
+ *
+ *   - Adds a user-territory rule that exercises a loud-error
+ *     invariant (`config-outside-block`) — /distill aborts before
+ *     LLM dispatch.
+ *   - Adds runtime debris that exercises an auto-recovered invariant
+ *     (`orphaned-worktree`) — /distill cleans up + proceeds normally.
+ *   - Does nothing (`healthy`) — the original gate.
+ *
+ * Helper does not assert. Returns the variant's pre-condition
+ * metadata (a free-form `extraNotes` string for the run log, plus
+ * `expectedLeftoverBranches` listing any `distill/*` branches the
+ * variant injected that legitimately survive the /distill cycle so
+ * the green post-conditions can subtract them); per-variant assertion
+ * on the notify shape lives in {@link assertVariantPostConditions}.
+ */
+function applyVariantPreDistill(
+  variant: Variant,
+  vaultPath: string,
+): { extraNotes?: string; expectedLeftoverBranches?: readonly string[] } {
+  if (variant === "healthy") return {};
+  if (variant === "config-outside-block") {
+    // Append a user-territory rule AFTER session_start so the
+    // managed block has already been installed and `.napkin/
+    // config.json` is tracked. The /distill full-level check
+    // detects the gitignore rule lives outside the managed block
+    // and refuses to spawn (loud error). No LLM cost.
+    const giPath = path.join(vaultPath, ".gitignore");
+    const original = fs.readFileSync(giPath, "utf-8");
+    fs.writeFileSync(
+      giPath,
+      `${original}\n# user-territory rule appended by verify-e2e\n.napkin/config.json\n`,
+    );
+    return {
+      extraNotes:
+        "appended `.napkin/config.json` to .gitignore outside the managed block",
+    };
   }
-  if (args.help) {
-    console.log(HELP);
-    return 0;
+  if (variant === "orphaned-worktree") {
+    // Register a fake distill worktree, then `rm -rf` its directory
+    // without `git worktree remove`. The /distill full-level check
+    // runs `git worktree prune --verbose --expire=now` which
+    // detects the orphan and removes the registry entry. The
+    // distill spawn proceeds normally afterward.
+    //
+    // The branch (`distill/verify-e2e-orphan`) survives the prune —
+    // worktree prune only touches the worktree registry, not refs;
+    // the stale-distill-branch invariant handles ref cleanup on a
+    // separate grace timer (24h by default), so a freshly-created
+    // branch like this is correctly NOT deleted by the full-level
+    // pass. The green post-condition subtracts this branch from its
+    // "no `distill/*` branches survived" check.
+    const wtRoot = fs.mkdtempSync(path.join(os.tmpdir(), "verify-e2e-orphan-"));
+    const wtPath = path.join(wtRoot, "orphan-target");
+    const orphanBranch = "distill/verify-e2e-orphan";
+    const r = spawnSync(
+      "git",
+      ["-C", vaultPath, "worktree", "add", "-b", orphanBranch, wtPath],
+      { encoding: "utf-8", env: process.env },
+    );
+    if (r.status !== 0) {
+      throw new Error(
+        `variant fixture: git worktree add failed: ${r.stderr || r.stdout}`,
+      );
+    }
+    fs.rmSync(wtRoot, { recursive: true, force: true });
+    return {
+      extraNotes:
+        "registered then deleted dir for orphan worktree distill/verify-e2e-orphan",
+      expectedLeftoverBranches: [orphanBranch],
+    };
   }
+  // Exhaustiveness guard — if a new variant lands without a case here,
+  // TypeScript flags the missing branch and the runtime throw catches
+  // it in CI.
+  const _exhaustive: never = variant;
+  throw new Error(`applyVariantPreDistill: unhandled variant ${_exhaustive}`);
+}
 
+/**
+ * Per-variant post-condition assertions appended to the run's
+ * summary. Each variant pins the canonical notify shape it should
+ * produce so a regression in either the invariant's detection
+ * (auto-setup.ts) or its surfacing (health-notify.ts) surfaces here.
+ */
+function assertVariantPostConditions(
+  variant: Variant,
+  notifyCalls: readonly NotifyCall[],
+): readonly PostConditionResult[] {
+  if (variant === "healthy") return [];
+  if (variant === "config-outside-block") {
+    // The surface helper renders the structured finding's `message`
+    // verbatim (prefixed by `Auto-distill cannot proceed: `; see
+    // health-notify.ts), which contains the `is gitignored at` body
+    // produced for the `config.json-not-gitignored-outside-block`
+    // invariant. Match on that body — the invariant ID itself never
+    // appears in the rendered notify.
+    const errorNotifies = notifyCalls.filter((n) => n.severity === "error");
+    const matchingError = errorNotifies.find(
+      (n) =>
+        n.msg.includes("is gitignored at") &&
+        n.msg.includes(".napkin/config.json"),
+    );
+    return [
+      {
+        name: "variant config-outside-block: error notify with outside-block message",
+        passed: matchingError !== undefined,
+        detail: matchingError
+          ? `error notify: ${matchingError.msg.slice(0, 120)}…`
+          : `expected error notify with '.napkin/config.json is gitignored at …'; got ${errorNotifies.length} error notify (msgs: ${errorNotifies
+              .map((n) => n.msg.slice(0, 80))
+              .join(" | ")})`,
+      },
+      {
+        name: "variant config-outside-block: spawn aborted (no outcome notify expected)",
+        // Aborted spawn means waitForOutcomeNotify times out; the
+        // run-orchestration above asserts that with the
+        // `notifyTimedOut` flag.
+        passed: notifyCalls.find((n) => isOutcomeNotify(n)) === undefined,
+        detail: "healthy abort: outcome notify never dispatched",
+      },
+    ];
+  }
+  if (variant === "orphaned-worktree") {
+    const infoNotifies = notifyCalls.filter((n) => n.severity === "info");
+    const pruneInfo = infoNotifies.find(
+      (n) =>
+        n.msg.includes("Pruned orphaned distill worktree") ||
+        (n.msg.includes("Auto-distill recovered") && n.msg.includes("orphan")),
+    );
+    return [
+      {
+        name: "variant orphaned-worktree: info notify with prune recovery",
+        passed: pruneInfo !== undefined,
+        detail: pruneInfo
+          ? `info notify: ${pruneInfo.msg.slice(0, 120)}…`
+          : `expected info notify mentioning 'Pruned orphaned distill worktree'; got ${infoNotifies.length} info notify (msgs: ${infoNotifies
+              .map((n) => n.msg.slice(0, 80))
+              .join(" | ")})`,
+      },
+    ];
+  }
+  const _exhaustive: never = variant;
+  throw new Error(
+    `assertVariantPostConditions: unhandled variant ${_exhaustive}`,
+  );
+}
+
+async function runOnce(args: Args, variant: Variant): Promise<number> {
   const model = resolveModel(args.model);
 
-  // Sanity: pi binary must exist (the wrapper calls it internally).
-  const piCheck = spawnSync(
-    process.env.NAPKIN_DISTILL_PI_BIN || "pi",
-    ["--version"],
-    { encoding: "utf-8", env: process.env },
-  );
-  if (piCheck.error) {
-    console.error(
-      `error: pi binary not found on PATH (NAPKIN_DISTILL_PI_BIN unset). Install pi or set the env var.`,
-    );
-    return 2;
-  }
-
-  console.log(`verify-e2e: model=${model}`);
+  console.log(`verify-e2e: model=${model} variant=${variant}`);
   console.log(
     "Setting up fixture (post-`napkin init` shape: .napkin/config.json + content; no .git/)...",
   );
   const startMs = Date.now();
 
-  // Install the git identity + signing override on `process.env`
-  // BEFORE any subprocess that spawns git — `ensureVaultReadyForDistill`
-  // shells out via `runGit` with `env: process.env`, so identity must
-  // live there for auto-init's `git commit` to succeed under a CI
-  // runner whose global `commit.gpgsign=true` would otherwise refuse
-  // to commit unsigned. Restored in the bottom-of-main `finally` so
-  // every exit path — happy, fail-fast, exception — leaves the
-  // process env clean.
-  const gitEnv = installGitEnvOnProcess();
-
-  // Tracked here so the bottom-of-main `finally` can clean up the
+  // Tracked here so the bottom-of-runOnce `finally` can clean up the
   // tmpdir even when an early-exit branch returns before the fixture
   // is fully built. `null` until `setupFixture` succeeds.
   let tmpdir: string | null = null;
@@ -1359,6 +1573,27 @@ async function main(): Promise<number> {
     }
     const fixture: Fixture = { ...fixturePartial, ...originRefs };
 
+    // ----- Variant pre-condition mutation (between Phase 3 and Phase 4) -------
+    //
+    // For non-healthy variants, mutate the fixture between
+    // session_start and /distill so the full-level health check
+    // surfaces a specific invariant. The healthy variant is a no-op.
+    let variantNotes: string | undefined;
+    let variantLeftoverBranches: readonly string[] = [];
+    try {
+      const r = applyVariantPreDistill(variant, fixture.vaultPath);
+      variantNotes = r.extraNotes;
+      variantLeftoverBranches = r.expectedLeftoverBranches ?? [];
+      if (variantNotes) {
+        console.log(`  variant pre-/distill: ${variantNotes}`);
+      }
+    } catch (e) {
+      console.error(
+        `error: variant pre-condition setup failed: ${(e as Error).message}`,
+      );
+      return 2;
+    }
+
     // ----- Phase 4: drive /distill -------------------------------------------
     const triggerStart = Date.now();
     console.log(
@@ -1366,10 +1601,16 @@ async function main(): Promise<number> {
     );
     await captured.commands.distill.handler("", ctx);
 
-    // Wait for the JS poller to fire its dispatch.
-    const timeoutMs =
-      DISTILL_MAX_DURATION_MINUTES * 60 * 1000 +
-      POLLER_DISPATCH_SLACK_SECS * 1000;
+    // For variants that abort the spawn before LLM dispatch (config-
+    // outside-block) the outcome notify never fires; cap the wait at
+    // {@link VARIANT_ABORT_NOTIFY_WAIT_MS} so the gate doesn't pay
+    // the full LLM timeout. The variant's post-condition asserts the
+    // abort separately.
+    const isAbortVariant = variant === "config-outside-block";
+    const timeoutMs = isAbortVariant
+      ? VARIANT_ABORT_NOTIFY_WAIT_MS
+      : DISTILL_MAX_DURATION_MINUTES * 60 * 1000 +
+        POLLER_DISPATCH_SLACK_SECS * 1000;
     const notify = await waitForOutcomeNotify(notifyCalls, timeoutMs);
     const triggerWallMs = Date.now() - triggerStart;
     console.log(
@@ -1384,14 +1625,19 @@ async function main(): Promise<number> {
     // Combined summary: napkin-init's invariants (asserted right
     // after `setupFixture`) + auto-init's invariants (captured at
     // phase 2) + the distill phase's notify / outcome / filesystem
-    // invariants. Earlier-asserted results are re-included here so
-    // the final summary lists every checked invariant in one
-    // PASS/FAIL block, even though they were already asserted
-    // earlier for fail-fast.
+    // invariants + variant-specific assertions. Earlier-asserted
+    // results are re-included here so the final summary lists every
+    // checked invariant in one PASS/FAIL block, even though they
+    // were already asserted earlier for fail-fast.
+    const greenAssertions = isAbortVariant
+      ? []
+      : assertGreenPostConditions(fixture, notify, variantLeftoverBranches);
+    const variantAssertions = assertVariantPostConditions(variant, notifyCalls);
     const results = [
       ...napkinInitResults,
       ...autoInitResults,
-      ...assertGreenPostConditions(fixture, notify),
+      ...greenAssertions,
+      ...variantAssertions,
     ];
     const passed = printSummary(
       results,
@@ -1405,7 +1651,6 @@ async function main(): Promise<number> {
 
     return passed ? 0 : 1;
   } finally {
-    gitEnv.restore();
     if (tmpdir) {
       if (args.keepTmpdir) {
         console.log(`  --keep-tmpdir: leaving ${tmpdir} for inspection.`);
@@ -1413,6 +1658,72 @@ async function main(): Promise<number> {
         fs.rmSync(tmpdir, { recursive: true, force: true });
       }
     }
+  }
+}
+
+async function main(): Promise<number> {
+  let args: Args;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (e) {
+    console.error(`error: ${(e as Error).message}\n`);
+    console.error(HELP);
+    return 2;
+  }
+  if (args.help) {
+    console.log(HELP);
+    return 0;
+  }
+
+  // Sanity: pi binary must exist (the wrapper calls it internally).
+  const piCheck = spawnSync(
+    process.env.NAPKIN_DISTILL_PI_BIN || "pi",
+    ["--version"],
+    { encoding: "utf-8", env: process.env },
+  );
+  if (piCheck.error) {
+    console.error(
+      `error: pi binary not found on PATH (NAPKIN_DISTILL_PI_BIN unset). Install pi or set the env var.`,
+    );
+    return 2;
+  }
+
+  // Install the git identity + signing override on `process.env`
+  // BEFORE any subprocess that spawns git — `ensureVaultReadyForDistill`
+  // shells out via `runGit` with `env: process.env`, so identity must
+  // live there for auto-init's `git commit` to succeed under a CI
+  // runner whose global `commit.gpgsign=true` would otherwise refuse
+  // to commit unsigned. Restored in the bottom-of-main `finally` so
+  // every exit path — happy, fail-fast, exception — leaves the
+  // process env clean.
+  const gitEnv = installGitEnvOnProcess();
+
+  try {
+    // The variants exercised by the gate are ordered cheapest-first
+    // when `--all` is set: the cost-zero abort variant runs before
+    // the LLM-driven variants so a regression there fails the run
+    // before paying ~$0.50 per LLM variant.
+    const variants: readonly Variant[] = args.all
+      ? ["config-outside-block", "healthy", "orphaned-worktree"]
+      : [args.variant];
+
+    let aggregateExit = 0;
+    for (const v of variants) {
+      if (variants.length > 1) {
+        console.log("");
+        console.log(`========== variant: ${v} ==========`);
+        console.log("");
+      }
+      const code = await runOnce(args, v);
+      // 0=pass, 1=post-conditions failed, 2=setup error.
+      // Aggregate by taking the worst exit code so a setup error in
+      // one variant doesn't get masked by passes elsewhere.
+      if (code > aggregateExit) aggregateExit = code;
+      if (code === 2) break; // bail on setup error
+    }
+    return aggregateExit;
+  } finally {
+    gitEnv.restore();
   }
 }
 
