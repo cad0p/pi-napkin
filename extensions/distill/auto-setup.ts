@@ -321,6 +321,139 @@ const INVARIANT_CONFIG_JSON_VALID = "config.json-valid-json";
 const INVARIANT_CONFIG_JSON_TRACKED = "config.json-tracked";
 
 /**
+ * Stable invariant ID for `<configPath>/config.json` NOT being
+ * gitignored by a rule that lives outside the napkin-distill managed
+ * block. Loud-error finding only — the user added the rule explicitly
+ * and we cannot guess whether removing it would lose track of an
+ * intentional choice. The inside-block flavor is a no-op for this
+ * invariant: the canonical {@link BLOCK_CONTENT} does NOT gitignore
+ * `config.json`, and the {@link INVARIANT_GITIGNORE_BLOCK} reset
+ * automatically removes any drift inside the markers on the next
+ * pass.
+ */
+const INVARIANT_CONFIG_JSON_NOT_GITIGNORED_OUTSIDE_BLOCK =
+  "config.json-not-gitignored-outside-block";
+
+/**
+ * Range of the napkin-distill managed block within `<vault>/.gitignore`,
+ * in 1-indexed line numbers (matching `git check-ignore -v` output).
+ * `beginLine` points at the BEGIN marker; `endLine` at the END marker;
+ * the canonical-content lines live STRICTLY between them.
+ *
+ * `null` when the file is missing or the markers are absent / malformed
+ * — the gitignore-block invariant handles the recovery for those
+ * cases on the next pass.
+ */
+interface ManagedBlockRange {
+  beginLine: number;
+  endLine: number;
+}
+
+/**
+ * Read `<giPath>` and locate the napkin-distill managed-block markers.
+ * Returns `null` if the file is missing, the markers are absent, or
+ * the markers are malformed (multiple BEGINs, BEGIN without matching
+ * END, END before BEGIN). The malformed cases are handled by
+ * {@link mergeManagedBlock}'s loud-error finding on the same pass; this
+ * helper's `null` return signals the caller to skip the inside-block
+ * test (treating the line as outside the block, which is the
+ * conservative default).
+ *
+ * Marker matching mirrors {@link mergeManagedBlock}: right-trimmed
+ * exact match against {@link BLOCK_MARKER_BEGIN} / {@link
+ * BLOCK_MARKER_END}, leading whitespace not tolerated.
+ */
+export function parseManagedBlockRange(
+  giPath: string,
+): ManagedBlockRange | null {
+  if (!fs.existsSync(giPath)) return null;
+  const content = fs.readFileSync(giPath, "utf-8");
+  const eol = content.includes("\r\n") ? "\r\n" : "\n";
+  const lines = content.length > 0 ? content.split(eol) : [];
+  let begin = -1;
+  let end = -1;
+  let beginCount = 0;
+  let endCount = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const rtrimmed = lines[i].replace(/\s+$/, "");
+    if (rtrimmed === BLOCK_MARKER_BEGIN) {
+      begin = i;
+      beginCount++;
+    } else if (rtrimmed === BLOCK_MARKER_END) {
+      end = i;
+      endCount++;
+    }
+  }
+  if (beginCount !== 1 || endCount !== 1 || begin >= end) return null;
+  // Convert to 1-indexed (matches `git check-ignore -v` line numbers).
+  return { beginLine: begin + 1, endLine: end + 1 };
+}
+
+/**
+ * Test whether the gitignore rule at `<source>:<line>` lives strictly
+ * inside the managed block defined by `range`. The block markers
+ * themselves are gitignore comments (no-op as patterns) so they will
+ * not appear in `git check-ignore -v` output; only lines strictly
+ * between the markers can be inside the block.
+ *
+ * `source` is the gitignore source path reported by `git check-ignore
+ * -v`; only matches `.gitignore` (the file the managed block lives
+ * in) are eligible to be inside the block. Other sources — a global
+ * `~/.config/git/ignore`, a parent-directory `.gitignore`, an info/
+ * exclude — are by definition outside our managed block, so we
+ * report them as outside.
+ *
+ * Caller passes `null` for `range` when the markers are missing or
+ * malformed; in that case every gitignore rule is treated as outside
+ * the block (conservative default; the gitignore-block invariant
+ * handles the recovery for those cases on the next pass).
+ */
+export function isLineInsideBlock(
+  source: string,
+  line: number,
+  range: ManagedBlockRange | null,
+): boolean {
+  if (range === null) return false;
+  if (source !== ".gitignore") return false;
+  return line > range.beginLine && line < range.endLine;
+}
+
+/**
+ * Parsed output of `git check-ignore -v`. Format documented in `man
+ * git-check-ignore`: `<source> <COLON> <linenum> <COLON> <pattern> <HT>
+ * <pathname>`. The first separator before the pathname is a TAB; the
+ * source-side fields are colon-separated, with the line number in the
+ * middle anchoring the parse (`source` may itself contain colons on
+ * absolute Windows paths or when sourced from absolute global ignore
+ * files).
+ *
+ * Returns `null` when the line does not match the expected `-v` shape
+ * — conservative, since `git check-ignore` exited 0 so the path IS
+ * ignored; we just can't determine where the rule lives. Caller
+ * should treat as outside-block in that case (loud error).
+ */
+export function parseCheckIgnoreVerbose(
+  stdoutLine: string,
+): { source: string; line: number; pattern: string; pathname: string } | null {
+  const tabIdx = stdoutLine.indexOf("\t");
+  if (tabIdx < 0) return null;
+  const matchInfo = stdoutLine.slice(0, tabIdx);
+  const pathname = stdoutLine.slice(tabIdx + 1);
+  // Greedy `.+` on source so absolute paths with colons match;
+  // anchored on the line-number `\d+` in the middle so the parse
+  // remains unambiguous when source/pattern themselves contain
+  // colons.
+  const m = matchInfo.match(/^(.+):(\d+):(.*)$/);
+  if (!m) return null;
+  return {
+    source: m[1],
+    line: parseInt(m[2], 10),
+    pattern: m[3],
+    pathname,
+  };
+}
+
+/**
  * Internal result of {@link mergeManagedBlock}.
  *
  * - `changed`: whether the file was created or modified. Callers append
@@ -709,6 +842,46 @@ export function ensureVaultReadyForDistill(
           message: `${configRel} was untracked; staged for commit.`,
           recovery: `git add ${configRel}`,
         });
+      }
+
+      // Refuse to spawn if the user gitignored `config.json` outside
+      // the napkin-distill managed block. Inside-block drift is
+      // handled automatically by the gitignore-block reset (the
+      // canonical block does not gitignore `config.json`); outside-
+      // block rules are explicit user choices, so we surface a loud
+      // error and let the user decide. The check fires regardless of
+      // whether the file is currently tracked: a user-added rule is
+      // a hazard either way (a future `git rm --cached` would
+      // silently re-untrack the file and the worktree-copy path
+      // breaks).
+      const ignored = runGit(vaultPath, [
+        "check-ignore",
+        "-v",
+        "--no-index",
+        configRel,
+      ]);
+      if (ignored.status === 0) {
+        const giPathFull = path.join(vaultPath, ".gitignore");
+        const blockRange = parseManagedBlockRange(giPathFull);
+        // `check-ignore -v` may emit one rule per line for paths matched
+        // by multiple ignores (rare; only the last one wins as the
+        // effective rule, but earlier matches are still reported).
+        // Walk every line; if ANY rule is outside the managed block
+        // we surface the error — a user-territory rule is a hazard
+        // even if a managed-block rule also matches.
+        for (const line of ignored.stdout.split("\n")) {
+          if (line.length === 0) continue;
+          const parsed = parseCheckIgnoreVerbose(line);
+          if (!parsed) continue;
+          if (!isLineInsideBlock(parsed.source, parsed.line, blockRange)) {
+            findings.push({
+              kind: "error",
+              invariant: INVARIANT_CONFIG_JSON_NOT_GITIGNORED_OUTSIDE_BLOCK,
+              message: `${configRel} is gitignored at ${parsed.source}:${parsed.line} (outside the napkin-distill managed block); auto-distill cannot track it. Remove the rule from ${parsed.source} or restart pi after fixing it.`,
+            });
+            break;
+          }
+        }
       }
     }
   }

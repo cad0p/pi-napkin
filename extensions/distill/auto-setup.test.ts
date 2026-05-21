@@ -12,7 +12,10 @@ import {
   ensureVaultReadyForDistill,
   GITIGNORE_LINES,
   type HealthLevel,
+  isLineInsideBlock,
   LEGACY_EMBEDDED_LAYOUT_ERROR,
+  parseCheckIgnoreVerbose,
+  parseManagedBlockRange,
 } from "./auto-setup";
 
 /**
@@ -1077,6 +1080,245 @@ describe("ensureVaultReadyForDistill", () => {
       ".napkin/config.json",
     ]);
     expect(ls.status).not.toBe(0);
+  });
+
+  // --- config.json-not-gitignored-outside-block (full-level only) -------
+  //
+  // Inside-block drift is recovered by the `gitignore-block-correct`
+  // reset on the next pass (the canonical {@link BLOCK_CONTENT} does
+  // not gitignore `config.json`). Outside-block rules are explicit
+  // user choices, so we surface a loud error and refuse to spawn:
+  // the rule may be intentional (the user opted out of tracking)
+  // and an auto-untrack would lose the user's choice.
+
+  /**
+   * Build an existing-repo + tracked-config.json fixture and return
+   * the vault paths the tests need. Repo has a seed commit and the
+   * canonical managed block already installed; tests append user-
+   * territory rules to `.gitignore` and re-run setup to assert on
+   * the new finding.
+   */
+  function setupExistingRepoWithBlock(): { giPath: string; configRel: string } {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+    // Run setup once so the managed block is installed and config.json
+    // is tracked. Subsequent test bodies start from a healthy vault.
+    runSetup("full");
+    return {
+      giPath: path.join(vault, ".gitignore"),
+      configRel: ".napkin/config.json",
+    };
+  }
+
+  test("user gitignores config.json outside the managed block: error finding", () => {
+    const { giPath, configRel } = setupExistingRepoWithBlock();
+    // Prepend a user-territory rule above the managed block.
+    const original = fs.readFileSync(giPath, "utf-8");
+    fs.writeFileSync(giPath, `# user territory\n${configRel}\n${original}`);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "user adds rule"]);
+
+    const r = runSetup("full");
+    const finding = r.findings.find(
+      (f) => f.invariant === "config.json-not-gitignored-outside-block",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("error");
+    expect(finding?.message).toContain(configRel);
+    expect(finding?.message).toContain(".gitignore:");
+    // Actionable hint so the user knows where to act.
+    expect(finding?.message.toLowerCase()).toContain("remove");
+  });
+
+  test("managed block contains config.json line (synthetic): no outside-block finding (block reset handles it)", () => {
+    const { giPath, configRel } = setupExistingRepoWithBlock();
+    // Synthetically inject a `config.json` line INSIDE the markers.
+    // The next setup pass first runs the gitignore-block reset (which
+    // removes the drift), so by the time the outside-block check
+    // fires the rule is gone. We assert the absence of the
+    // outside-block finding regardless of whether the reset fires on
+    // this pass or the next.
+    const lines = fs.readFileSync(giPath, "utf-8").split("\n");
+    const endIdx = lines.findIndex((l) =>
+      l.replace(/\s+$/, "").endsWith("END NAPKIN-DISTILL MANAGED"),
+    );
+    expect(endIdx).toBeGreaterThan(0);
+    lines.splice(endIdx, 0, configRel);
+    fs.writeFileSync(giPath, lines.join("\n"));
+
+    const r = runSetup("full");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-not-gitignored-outside-block");
+    }
+  });
+
+  test("config.json not gitignored at all: no finding (regression check)", () => {
+    setupExistingRepoWithBlock();
+    // Healthy vault — no user-territory rule. Subsequent runs are
+    // idempotent.
+    const r = runSetup("full");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-not-gitignored-outside-block");
+    }
+  });
+
+  test("fast-level does NOT run the outside-block check", () => {
+    const { giPath, configRel } = setupExistingRepoWithBlock();
+    const original = fs.readFileSync(giPath, "utf-8");
+    fs.writeFileSync(giPath, `${configRel}\n${original}`);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "user adds rule"]);
+
+    const r = runSetup("fast");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-not-gitignored-outside-block");
+    }
+  });
+});
+
+// --- helper unit tests ---------------------------------------------------
+//
+// `parseManagedBlockRange`, `isLineInsideBlock`, and
+// `parseCheckIgnoreVerbose` underpin the
+// `config.json-not-gitignored-outside-block` invariant. Direct unit
+// tests pin the parsing contract so a regression in any of them surfaces
+// without requiring a full git fixture.
+
+describe("parseManagedBlockRange", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "block-range-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("missing file: null", () => {
+    expect(parseManagedBlockRange(path.join(dir, "nope"))).toBeNull();
+  });
+
+  test("file without markers: null", () => {
+    const p = path.join(dir, ".gitignore");
+    fs.writeFileSync(p, "# user content\n.env\n");
+    expect(parseManagedBlockRange(p)).toBeNull();
+  });
+
+  test("well-formed markers: 1-indexed begin and end lines", () => {
+    const p = path.join(dir, ".gitignore");
+    fs.writeFileSync(
+      p,
+      [
+        "# user content", // line 1
+        ".env", // line 2
+        "", // line 3
+        BLOCK_MARKER_BEGIN, // line 4
+        ".napkin/distill/", // line 5
+        BLOCK_MARKER_END, // line 6
+      ].join("\n"),
+    );
+    expect(parseManagedBlockRange(p)).toEqual({ beginLine: 4, endLine: 6 });
+  });
+
+  test("multiple BEGIN markers: null (malformed)", () => {
+    const p = path.join(dir, ".gitignore");
+    fs.writeFileSync(
+      p,
+      [BLOCK_MARKER_BEGIN, BLOCK_MARKER_BEGIN, BLOCK_MARKER_END].join("\n"),
+    );
+    expect(parseManagedBlockRange(p)).toBeNull();
+  });
+
+  test("END before BEGIN: null (malformed)", () => {
+    const p = path.join(dir, ".gitignore");
+    fs.writeFileSync(p, [BLOCK_MARKER_END, BLOCK_MARKER_BEGIN].join("\n"));
+    expect(parseManagedBlockRange(p)).toBeNull();
+  });
+});
+
+describe("isLineInsideBlock", () => {
+  test("null range: always false (markers absent or malformed)", () => {
+    expect(isLineInsideBlock(".gitignore", 5, null)).toBe(false);
+  });
+
+  test("non-.gitignore source: always false", () => {
+    // Global ignore file or info/exclude — by definition outside the
+    // managed block.
+    expect(
+      isLineInsideBlock("/home/me/.config/git/ignore", 5, {
+        beginLine: 4,
+        endLine: 6,
+      }),
+    ).toBe(false);
+  });
+
+  test("line strictly between markers: true", () => {
+    expect(
+      isLineInsideBlock(".gitignore", 5, { beginLine: 4, endLine: 6 }),
+    ).toBe(true);
+  });
+
+  test("line at BEGIN marker: false (markers are not gitignore patterns)", () => {
+    expect(
+      isLineInsideBlock(".gitignore", 4, { beginLine: 4, endLine: 6 }),
+    ).toBe(false);
+  });
+
+  test("line at END marker: false", () => {
+    expect(
+      isLineInsideBlock(".gitignore", 6, { beginLine: 4, endLine: 6 }),
+    ).toBe(false);
+  });
+
+  test("line above BEGIN: false", () => {
+    expect(
+      isLineInsideBlock(".gitignore", 2, { beginLine: 4, endLine: 6 }),
+    ).toBe(false);
+  });
+
+  test("line below END: false", () => {
+    expect(
+      isLineInsideBlock(".gitignore", 8, { beginLine: 4, endLine: 6 }),
+    ).toBe(false);
+  });
+});
+
+describe("parseCheckIgnoreVerbose", () => {
+  test("canonical line: parses source / line / pattern / pathname", () => {
+    const r = parseCheckIgnoreVerbose(".gitignore:2:.env\t.env");
+    expect(r).toEqual({
+      source: ".gitignore",
+      line: 2,
+      pattern: ".env",
+      pathname: ".env",
+    });
+  });
+
+  test("absolute source with embedded colons: greedy match anchors on line number", () => {
+    // Windows-style absolute paths or sourced global ignore files can
+    // contain colons; the greedy `.+` on source plus the anchored
+    // `\d+` line number recovers the correct split.
+    const r = parseCheckIgnoreVerbose(
+      "C:/Users/me/.gitignore:42:.napkin/config.json\t.napkin/config.json",
+    );
+    expect(r?.source).toBe("C:/Users/me/.gitignore");
+    expect(r?.line).toBe(42);
+    expect(r?.pattern).toBe(".napkin/config.json");
+  });
+
+  test("missing TAB: null (line is not -v output)", () => {
+    expect(parseCheckIgnoreVerbose(".gitignore:2:.env .env")).toBeNull();
+  });
+
+  test("line without colons: null", () => {
+    expect(
+      parseCheckIgnoreVerbose("just-a-pathname\tjust-a-pathname"),
+    ).toBeNull();
   });
 });
 
