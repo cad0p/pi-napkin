@@ -1922,12 +1922,16 @@ describe("parsePorcelainWorktreeBranches", () => {
   });
 
   test("branch line with extra whitespace: ref is trimmed before prefix check", () => {
-    // The parser calls `.trim()` on the ref slice. A regression
-    // that drops the trim would let trailing whitespace bypass the
-    // `refs/heads/` prefix check (no — it'd still match prefix) but
-    // would emit a short name with trailing space, which mismatches
-    // the comparator. Pin the trim with a leading + trailing-space
-    // case.
+    // The parser calls `.trim()` on the ref slice. The test input
+    // below has FOUR spaces after `branch`, so `slice("branch ".length)`
+    // produces `"   refs/heads/main   "` (3 leading + 3 trailing).
+    // Without `.trim()`, the leading whitespace makes
+    // `ref.startsWith("refs/heads/")` return FALSE, so `branches` stays
+    // empty and `r.has("main")` would be false. The test pins the
+    // trim by exercising the leading-whitespace path; trailing-only
+    // whitespace would still match the prefix but emit a name with a
+    // trailing space that mismatches the comparator (also asserted
+    // below via `r.has("main ")`).
     const stdout = [
       "worktree /path/to/main",
       "branch    refs/heads/main   ",

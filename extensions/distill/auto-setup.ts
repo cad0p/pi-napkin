@@ -64,6 +64,15 @@ import {
 export const STALE_DISTILL_BRANCH_GRACE_MS = 24 * 60 * 60 * 1000;
 
 /**
+ * Milliseconds per hour. Used to render branch ages in hours for
+ * human-readable notify messages (e.g. the stale-distill-branch
+ * deletion finding). Independent of
+ * {@link STALE_DISTILL_BRANCH_GRACE_MS} — the relationship between
+ * "24h grace" and "hours" is incidental, not a derived constant.
+ */
+const MS_PER_HOUR = 60 * 60 * 1000;
+
+/**
  * Snapshot of the v0.3.0 line-by-line entries appended to
  * `<vault>/.gitignore` (no markers) for vaults at v0.3.0 and earlier.
  * At v0.3.1 sessions install the managed-block format and remove
@@ -414,10 +423,13 @@ const INVARIANT_VAULT_HEAD_ON_BRANCH = "vault-head-on-branch";
 
 /**
  * Stable invariant ID for orphaned distill worktree-registry
- * entries. Auto-recovered via `git worktree prune --verbose`, which
- * removes registry entries whose worktree directories have been
- * deleted (typically a crashed pi session). Safe: prune only
- * touches entries pointing at missing dirs.
+ * entries. Auto-recovered via `git worktree prune --verbose
+ * --expire=now`, which removes registry entries whose worktree
+ * directories have been deleted (typically a crashed pi session).
+ * Safe: prune only touches entries pointing at missing dirs. The
+ * `--expire=now` flag is required because git's default 3-month
+ * grace would skip recently-orphaned entries; see the call site for
+ * full rationale.
  */
 const INVARIANT_NO_ORPHANED_DISTILL_WORKTREES = "no-orphaned-distill-worktrees";
 
@@ -1104,6 +1116,11 @@ export function ensureVaultReadyForDistill(
       // a hazard either way (a future `git rm --cached` would
       // silently re-untrack the file and the worktree-copy path
       // breaks).
+      // `--no-index` is load-bearing: without it `git check-ignore`
+      // skips paths already in the index, which would silently disable
+      // this finding the moment the auto-recover stages `config.json`
+      // (i.e. on every healthy second-and-later run). The check must
+      // fire regardless of tracked-state — see the comment above.
       const ignored = runGit(vaultPath, [
         "check-ignore",
         "-v",
@@ -1360,7 +1377,7 @@ export function ensureVaultReadyForDistill(
           findings.push({
             kind: "auto-recovered",
             invariant: INVARIANT_NO_STALE_DISTILL_BRANCHES_OVER_GRACE,
-            message: `Deleted stale distill branch ${refname} (${Math.round(ageMs / 3600000)}h old, no live worktree).`,
+            message: `Deleted stale distill branch ${refname} (${Math.round(ageMs / MS_PER_HOUR)}h old, no live worktree).`,
             recovery: `git branch -D ${refname}`,
           });
         }

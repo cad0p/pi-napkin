@@ -1405,7 +1405,7 @@ function assertVariantPostConditions(
         // run-orchestration above asserts that with the
         // `notifyTimedOut` flag.
         passed: notifyCalls.find((n) => isOutcomeNotify(n)) === undefined,
-        detail: "healthy abort: outcome notify never dispatched",
+        detail: "config-outside-block abort: outcome notify never dispatched",
       },
     ];
   }
