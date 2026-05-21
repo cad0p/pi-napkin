@@ -162,6 +162,9 @@
  * Usage:
  *   bun run verify:e2e
  *   bun run verify:e2e -- --model kiro/claude-sonnet-4-6
+ *   bun run verify:e2e -- --variant config-outside-block
+ *   bun run verify:e2e -- --variant orphaned-worktree
+ *   bun run verify:e2e -- --all
  *   bun run verify:e2e -- --keep-tmpdir
  *   bun run verify:e2e -- --help
  */

@@ -434,32 +434,22 @@ const INVARIANT_NO_STALE_DISTILL_BRANCHES_OVER_GRACE =
   "no-stale-distill-branches-over-grace";
 
 /**
- * Parse `git worktree list --porcelain` output and collect the set
- * of branch names that are currently checked out in a live worktree.
- * Used by the {@link INVARIANT_NO_STALE_DISTILL_BRANCHES_OVER_GRACE}
- * check to avoid deleting branches that are still in use.
+ * Pure parser for `git worktree list --porcelain` output. Extracted
+ * from {@link parseLiveWorktreeBranches} so synthetic-input unit tests
+ * can pin the strict-parser behavior (skip unrecognised ref shapes
+ * rather than adding the wrong key) independent of git's runtime
+ * output. Exported for direct test consumption.
  *
  * Porcelain output is a sequence of records separated by blank
  * lines; each record has lines of the form `<key> <value>`. The
  * branch line is `branch refs/heads/<short-name>`; we strip the
  * `refs/heads/` prefix to match the form returned by `git
- * for-each-ref --format=%(refname:short)`.
- *
- * Returns an empty set when `git worktree list` fails or the vault
- * has no worktrees — conservative, since the worst case is that
- * we attempt to delete a branch that has a live worktree, which
- * `git branch -D` will refuse with a clear error.
+ * for-each-ref --format=%(refname:short)`. Detached / bare records
+ * have no `branch` line and contribute nothing to the set.
  */
-export function parseLiveWorktreeBranches(vaultPath: string): Set<string> {
-  const r = spawnSync("git", ["worktree", "list", "--porcelain"], {
-    cwd: vaultPath,
-    encoding: "utf-8",
-    timeout: GIT_SUBCOMMAND_TIMEOUT_MS,
-    env: process.env,
-  });
-  if (r.status !== 0) return new Set();
+export function parsePorcelainWorktreeBranches(stdout: string): Set<string> {
   const branches = new Set<string>();
-  for (const line of (r.stdout || "").split("\n")) {
+  for (const line of stdout.split("\n")) {
     if (line.startsWith("branch ")) {
       const ref = line.slice("branch ".length).trim();
       // `git worktree list --porcelain` documents `branch` lines as
@@ -474,6 +464,28 @@ export function parseLiveWorktreeBranches(vaultPath: string): Set<string> {
     }
   }
   return branches;
+}
+
+/**
+ * Run `git worktree list --porcelain` against `vaultPath` and return
+ * the set of branch names checked out in live worktrees. Used by the
+ * {@link INVARIANT_NO_STALE_DISTILL_BRANCHES_OVER_GRACE} check to
+ * avoid deleting branches that are still in use.
+ *
+ * Returns an empty set when `git worktree list` fails or the vault
+ * has no worktrees — conservative, since the worst case is that we
+ * attempt to delete a branch that has a live worktree, which
+ * `git branch -D` will refuse with a clear error.
+ */
+export function parseLiveWorktreeBranches(vaultPath: string): Set<string> {
+  const r = spawnSync("git", ["worktree", "list", "--porcelain"], {
+    cwd: vaultPath,
+    encoding: "utf-8",
+    timeout: GIT_SUBCOMMAND_TIMEOUT_MS,
+    env: process.env,
+  });
+  if (r.status !== 0) return new Set();
+  return parsePorcelainWorktreeBranches(r.stdout || "");
 }
 
 /**

@@ -17,6 +17,7 @@ import {
   parseCheckIgnoreVerbose,
   parseLiveWorktreeBranches,
   parseManagedBlockRange,
+  parsePorcelainWorktreeBranches,
   probeWritable,
   type SetupOptions,
   STALE_DISTILL_BRANCH_GRACE_MS,
@@ -1823,6 +1824,118 @@ describe("parseLiveWorktreeBranches", () => {
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
+  });
+});
+
+describe("parsePorcelainWorktreeBranches", () => {
+  // Direct unit tests for the strict-parser shape, with synthetic
+  // porcelain input. Pins the contract that any `branch` line whose
+  // ref does NOT start with `refs/heads/` is skipped, NOT added with
+  // the unstripped fallback. A regression that re-introduces a
+  // `branches.add(ref)` else branch would let the wrong-shaped key
+  // leak into the stale-branch comparator and silently mismatch the
+  // short-name set the comparator expects.
+
+  test("standard porcelain output: returns short names with refs/heads/ stripped", () => {
+    // Two records separated by a blank line. Mirrors the shape
+    // `git worktree list --porcelain` actually emits: `worktree`
+    // pointer, `HEAD` sha, `branch` ref.
+    const stdout = [
+      "worktree /path/to/main",
+      "HEAD abc123",
+      "branch refs/heads/main",
+      "",
+      "worktree /path/to/distill-fork",
+      "HEAD def456",
+      "branch refs/heads/distill/2026-05-21",
+      "",
+    ].join("\n");
+    const r = parsePorcelainWorktreeBranches(stdout);
+    expect(r.size).toBe(2);
+    expect(r.has("main")).toBe(true);
+    expect(r.has("distill/2026-05-21")).toBe(true);
+  });
+
+  test("detached worktree (no branch line): contributes nothing", () => {
+    // git emits `detached` instead of a `branch` line for detached
+    // HEAD worktrees. The short-name set should be unaffected.
+    const stdout = [
+      "worktree /path/to/main",
+      "HEAD abc123",
+      "branch refs/heads/main",
+      "",
+      "worktree /path/to/detached",
+      "HEAD def456",
+      "detached",
+      "",
+    ].join("\n");
+    const r = parsePorcelainWorktreeBranches(stdout);
+    expect(r.size).toBe(1);
+    expect(r.has("main")).toBe(true);
+  });
+
+  test("bare-flag record (HEAD-pointer only): contributes nothing", () => {
+    // Bare repos emit a `bare` line and have neither `HEAD` nor
+    // `branch`. A real bare-repo `git worktree list --porcelain`
+    // looks like a single record with `worktree` + `bare`.
+    const stdout = ["worktree /path/to/bare.git", "bare", ""].join("\n");
+    const r = parsePorcelainWorktreeBranches(stdout);
+    expect(r.size).toBe(0);
+  });
+
+  test("empty input: returns empty set without throw", () => {
+    const r = parsePorcelainWorktreeBranches("");
+    expect(r.size).toBe(0);
+  });
+
+  test("malformed input (missing fields, extra blank lines): graceful return", () => {
+    // Stress-test the loop: extra blank lines, a record missing the
+    // `HEAD` field, and a `branch` line whose ref is NOT prefixed
+    // with `refs/heads/`. The strict parser must skip the
+    // unrecognised ref shape (NOT add the unstripped value) and
+    // tolerate the structural noise.
+    const stdout = [
+      "",
+      "",
+      "worktree /path/to/main",
+      "branch refs/heads/main",
+      "",
+      "worktree /path/to/oddity",
+      "branch refs/remotes/origin/feat-x",
+      "",
+      "worktree /path/to/another-oddity",
+      "branch refs/tags/v1.0.0",
+      "",
+    ].join("\n");
+    const r = parsePorcelainWorktreeBranches(stdout);
+    expect(r.size).toBe(1);
+    expect(r.has("main")).toBe(true);
+    // Pin the strict-parser invariant: non-`refs/heads/` shapes are
+    // skipped, NOT added under their full ref name. A regression
+    // that re-introduces an `else { branches.add(ref) }` fallback
+    // would put `refs/remotes/origin/feat-x` (and similar) into
+    // the set; this assertion fails in that case.
+    expect(r.has("refs/remotes/origin/feat-x")).toBe(false);
+    expect(r.has("refs/tags/v1.0.0")).toBe(false);
+    expect(r.has("feat-x")).toBe(false);
+    expect(r.has("v1.0.0")).toBe(false);
+  });
+
+  test("branch line with extra whitespace: ref is trimmed before prefix check", () => {
+    // The parser calls `.trim()` on the ref slice. A regression
+    // that drops the trim would let trailing whitespace bypass the
+    // `refs/heads/` prefix check (no — it'd still match prefix) but
+    // would emit a short name with trailing space, which mismatches
+    // the comparator. Pin the trim with a leading + trailing-space
+    // case.
+    const stdout = [
+      "worktree /path/to/main",
+      "branch    refs/heads/main   ",
+      "",
+    ].join("\n");
+    const r = parsePorcelainWorktreeBranches(stdout);
+    expect(r.has("main")).toBe(true);
+    expect(r.has("main ")).toBe(false);
   });
 });
 

@@ -382,7 +382,7 @@ pi-napkin owns a single contiguous block in the vault's `.gitignore`, delimited 
 
 **Inside the markers:** pi-napkin owns the content. Hand-edits between the markers are reset on the next session start — the auto-init / health-check pass rewrites the block to its canonical content if it has drifted.
 
-**Outside the markers:** user territory. pi-napkin never touches lines outside the block. You can add, remove, or reorder anything else in `.gitignore` and pi-napkin will leave it alone.
+**Outside the markers:** user territory. pi-napkin's only edit outside the block is removing lines that match canonical block content (a one-time migration cleanup from the 0.3.0 line-by-line format, kept on every run as a self-heal). User-written lines that don't match canonical content are never touched. You can add, remove, or reorder anything else in `.gitignore` and pi-napkin will leave it alone.
 
 The block style is the same Ansible-style sentinel pattern Ansible's `blockinfile` module uses (and Homebrew, oh-my-zsh, etc.) so the boundary between managed and unmanaged content is visually obvious.
 
