@@ -191,10 +191,12 @@ const MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN = 200;
  * Long inputs are truncated and suffixed with an ellipsis so the
  * notify line stays readable; short inputs are returned unchanged.
  *
- * Exported for direct use by tests pinning the cap regression. The
- * production callers (the `MalformedVaultConfigError` catch in
- * session_start and runDistillWith) reach this via the
- * notify-text construction below.
+ * Exported for direct use by tests pinning the cap regression.
+ * Every `MalformedVaultConfigError` notify site in this file routes
+ * through this helper so a multi-MB parse error never overflows the
+ * notify surface, regardless of which entry point caught it
+ * (session_start, runDistillWith's pre-flight, or runDistillWith's
+ * setup-failed catch handler).
  */
 export function formatVaultConfigParseError(parseError: string): string {
   if (parseError.length <= MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN) {
@@ -1053,7 +1055,7 @@ export default function (pi: ExtensionAPI) {
         // so the user can fix the file and retry.
         if (ctx.hasUI) {
           ctx.ui.notify(
-            `Distill cannot proceed: ${err.configPath} is not valid JSON (${formatVaultConfigParseError(err.parseError)}). Fix the file by hand and retry.`,
+            `Auto-distill cannot proceed: ${err.configPath} is not valid JSON (${formatVaultConfigParseError(err.parseError)}). Fix the file by hand and retry.`,
             "error",
           );
         }
@@ -1466,7 +1468,7 @@ export default function (pi: ExtensionAPI) {
       } catch (cfgErr) {
         if (cfgErr instanceof MalformedVaultConfigError && c.hasUI) {
           c.ui.notify(
-            `${cfgErr.configPath} is not valid JSON (${cfgErr.parseError}). Fix the file by hand and retry.`,
+            `Auto-distill cannot proceed: ${cfgErr.configPath} is not valid JSON (${formatVaultConfigParseError(cfgErr.parseError)}). Fix the file by hand and retry.`,
             "error",
           );
         }
