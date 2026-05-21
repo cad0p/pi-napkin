@@ -587,10 +587,11 @@ function describeBlockBodyDrift(actual: readonly string[]): string {
 }
 
 /**
- * Assert the filesystem effects of session_start's auto-init pass.
- * These are the cheap fast-level invariants that
- * `ensureVaultReadyForDistill(vault, "fast")` is contracted to leave
- * behind on a vault entering the gate without a `.git/`:
+ * Assert the filesystem AND user-visible-notify effects of
+ * session_start's auto-init pass. These are the cheap fast-level
+ * invariants that `ensureVaultReadyForDistill(vault, "fast")` plus
+ * the index.ts session_start handler are contracted to leave behind
+ * on a vault entering the gate without a `.git/`:
  *
  *   - `<vault>/.git/` exists (auto-init ran `git init -q -b main`).
  *   - `<vault>/.gitignore` contains the BEGIN/END managed-block markers
@@ -600,6 +601,13 @@ function describeBlockBodyDrift(actual: readonly string[]): string {
  *     config file).
  *   - HEAD points to a real commit (auto-init produced "napkin: initial
  *     vault commit (auto-distill setup)").
+ *   - `notifyCalls` contains the canonical "Initialized git repo in
+ *     your vault for auto-distill" info notify dispatched by the
+ *     session_start handler. The notify is the user-visible signal
+ *     that fail-soft branched into the success path; pinning it here
+ *     (rather than after the LLM-driven distill phase) keeps the
+ *     gate's fail-fast promise for the notify-silenced regression
+ *     class.
  *
  * These are asserted BEFORE the bare-origin wiring + `/distill` trigger
  * so a regression in the auto-init path is reported as soon as it
@@ -608,6 +616,7 @@ function describeBlockBodyDrift(actual: readonly string[]): string {
  */
 function assertAutoInitPostConditions(
   vaultPath: string,
+  notifyCalls: readonly NotifyCall[],
 ): PostConditionResult[] {
   const results: PostConditionResult[] = [];
 
@@ -693,25 +702,20 @@ function assertAutoInitPostConditions(
         : `rev-parse failed (rc=${headProbe.status}): ${headProbe.stderr.trim()}`,
   });
 
-  return results;
-}
-
-function assertGreenPostConditions(
-  fixture: Fixture,
-  notify: NotifyCall | null,
-  notifyCalls: readonly NotifyCall[],
-): PostConditionResult[] {
-  const results: PostConditionResult[] = [];
-
-  // (auto-init) Captured notify spy includes the canonical first-run
-  // notification dispatched by session_start once auto-init lands a
-  // fresh `git init` + initial commit. The exact wording lives in
+  // session_start emitted the canonical first-run notify dispatched
+  // by the index.ts handler once auto-init lands a fresh `git init`
+  // + initial commit. The exact wording lives in
   // `extensions/distill/index.ts` (look for "Initialized git repo in
   // your vault for auto-distill"); pin the prefix here so a copy
   // change in the handler surfaces as a gate failure rather than a
   // silent loss of the user-visible signal. Severity must be `info`:
   // an `error` notify here means the auto-init's fail-soft branch
   // fired instead of the success branch.
+  //
+  // Asserted at fast-level so a notify-silenced regression surfaces
+  // before the gate spends ~$0.50 on the LLM-driven distill phase
+  // (the post-LLM `assertGreenPostConditions` has its own notify
+  // pin for the `Distillation complete (...)` dispatch).
   const autoInitNotify = notifyCalls.find((n) =>
     n.msg.startsWith("Initialized git repo in your vault for auto-distill"),
   );
@@ -727,6 +731,23 @@ function assertGreenPostConditions(
       ? `severity=${autoInitNotify.severity}, msg.startsWith("Initialized git repo...")`
       : `not present in ${notifyCalls.length} captured notify call(s)`,
   });
+
+  return results;
+}
+
+/**
+ * Assert the distill-phase post-conditions: the JS poller's outcome
+ * notify, the wrapper's filesystem effects on the vault, the bare
+ * origin's advance from `originStartSha`, and the outcome sidecar
+ * class. Auto-init's filesystem + notify post-conditions live in
+ * {@link assertAutoInitPostConditions} and are asserted before this
+ * function runs (fail-fast before the LLM-driven distill phase).
+ */
+function assertGreenPostConditions(
+  fixture: Fixture,
+  notify: NotifyCall | null,
+): PostConditionResult[] {
+  const results: PostConditionResult[] = [];
 
   // (1) Notification severity + message.
   if (!notify) {
@@ -1082,6 +1103,7 @@ async function main(): Promise<number> {
 
   const autoInitResults = assertAutoInitPostConditions(
     fixturePartial.vaultPath,
+    notifyCalls,
   );
   const autoInitAllPassed = autoInitResults.every((r) => r.passed);
   if (!autoInitAllPassed) {
@@ -1151,7 +1173,7 @@ async function main(): Promise<number> {
   // checked invariant in one place — a single PASS/FAIL decision.
   const results = [
     ...autoInitResults,
-    ...assertGreenPostConditions(fixture, notify, notifyCalls),
+    ...assertGreenPostConditions(fixture, notify),
   ];
   const passed = printSummary(
     results,
