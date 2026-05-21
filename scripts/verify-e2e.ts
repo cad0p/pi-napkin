@@ -409,12 +409,20 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
     );
   }
 
-  // Sanity-check the canonical "Initialized vault at <path>/.napkin"
-  // stdout banner so a future CLI redesign that silently changes the
-  // contract surfaces here. Failure paths surface both `error`
-  // (subprocess never started — ENOENT, EACCES, ENOEXEC) and the
-  // captured streams (subprocess started but exited non-zero) so the
-  // operator can distinguish the two failure modes.
+  // Sanity-check the post-init exit status. The previous fixture
+  // shape also matched a stdout banner substring ("Initialized vault
+  // at <path>/.napkin"), but the substring check breaks under
+  // `FORCE_COLOR=1` (chalk inserts ANSI escape codes around the
+  // banner words, splitting the substring) AND duplicates the
+  // post-condition file-existence checks in `assertNapkinInitPost-
+  // Conditions` — the fresh-tmpdir guarantees napkin's alternative
+  // "Vault already initialized at <path>" path is unreachable, so
+  // "banner present" can't distinguish anything `assertNapkinInit-
+  // PostConditions` doesn't already verify by reading the produced
+  // files. Failure paths surface both `error` (subprocess never
+  // started — ENOENT, EACCES, ENOEXEC) and the captured streams
+  // (subprocess started but exited non-zero) so the operator can
+  // distinguish the two failure modes.
   const initRc = spawnSync(NAPKIN_BIN, ["init", "--path", vaultPath], {
     env: process.env,
     encoding: "utf-8",
@@ -424,14 +432,6 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
       `napkin init failed in ${vaultPath} (rc=${initRc.status}): ${
         initRc.error?.message ?? initRc.stderr ?? initRc.stdout
       }`,
-    );
-  }
-  const expectedBanner = `Initialized vault at ${path.join(vaultPath, ".napkin")}`;
-  if (!initRc.stdout.includes(expectedBanner)) {
-    throw new Error(
-      `napkin init stdout sanity check failed: expected ${JSON.stringify(
-        expectedBanner,
-      )}, got ${JSON.stringify(initRc.stdout)}`,
     );
   }
 
