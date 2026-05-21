@@ -410,13 +410,14 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
 
   // Step 1: invoke the real napkin init CLI. The `--version`
   // preflight runs first so a missing or non-executable binary
-  // fails fast with a banner that names the path and hints at
-  // `bun install` — distinct from the init throw below, which only
-  // fires on a non-zero exit and frames the failure in init terms.
-  // Surfacing the binary-missing case at this earlier, dedicated
-  // step gives the operator a more actionable signal on a fresh
-  // checkout (no `node_modules/.bin/napkin`, broken symlink, or
-  // shebang `node` missing from PATH).
+  // fails fast with an actionable message that names the path and
+  // hints at `bun install` — distinct from the init throw below,
+  // which only fires after the init invocation has been attempted
+  // and frames the failure in init terms. Surfacing the binary-
+  // missing case at this earlier, dedicated step gives the operator
+  // a more actionable signal on a fresh checkout (no
+  // `node_modules/.bin/napkin`, broken symlink, or shebang `node`
+  // missing from PATH).
   const napkinCheck = spawnSync(NAPKIN_BIN, ["--version"], {
     env: process.env,
     encoding: "utf-8",
