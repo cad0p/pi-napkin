@@ -462,10 +462,14 @@ export function parseLiveWorktreeBranches(vaultPath: string): Set<string> {
   for (const line of (r.stdout || "").split("\n")) {
     if (line.startsWith("branch ")) {
       const ref = line.slice("branch ".length).trim();
+      // `git worktree list --porcelain` documents `branch` lines as
+      // always emitting fully-qualified `refs/heads/<name>` refs.
+      // Anything else would be a future git format change; skip
+      // unrecognised shapes rather than adding the wrong key (which
+      // would mismatch the short-name set the stale-branch check
+      // compares against).
       if (ref.startsWith("refs/heads/")) {
         branches.add(ref.slice("refs/heads/".length));
-      } else {
-        branches.add(ref);
       }
     }
   }

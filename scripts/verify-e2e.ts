@@ -1408,10 +1408,13 @@ function assertVariantPostConditions(
   }
   if (variant === "orphaned-worktree") {
     const infoNotifies = notifyCalls.filter((n) => n.severity === "info");
-    const pruneInfo = infoNotifies.find(
-      (n) =>
-        n.msg.includes("Pruned orphaned distill worktree") ||
-        (n.msg.includes("Auto-distill recovered") && n.msg.includes("orphan")),
+    // Match on the canonical message body emitted by the orphan-prune
+    // invariant. The wider `Auto-distill recovered: …orphan…` shape is
+    // a strict superset that would also match unrelated future
+    // findings whose rendered text contains "orphan" — collapse to
+    // the body match (mirrors the other variant matchers).
+    const pruneInfo = infoNotifies.find((n) =>
+      n.msg.includes("Pruned orphaned distill worktree"),
     );
     return [
       {

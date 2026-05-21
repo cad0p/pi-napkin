@@ -173,6 +173,37 @@ export const DEFAULT_DISTILL: DistillConfig = {
 };
 
 /**
+ * Maximum number of characters from a {@link MalformedVaultConfigError}'s
+ * `parseError` to embed in user-facing notify text.
+ *
+ * `JSON.parse` error messages are usually short (e.g. `Unexpected token
+ * } in JSON at position 42`), but a malformed multi-MB `config.json`
+ * can produce a parse error long enough to overflow the notify
+ * surface. Cap to a value that comfortably fits a single notify line
+ * while leaving the unbounded value on the error object for callers
+ * that want to log it for diagnostics.
+ */
+const MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN = 200;
+
+/**
+ * Bound a {@link MalformedVaultConfigError}'s `parseError` to
+ * {@link MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN} characters.
+ * Long inputs are truncated and suffixed with an ellipsis so the
+ * notify line stays readable; short inputs are returned unchanged.
+ *
+ * Exported for direct use by tests pinning the cap regression. The
+ * production callers (the `MalformedVaultConfigError` catch in
+ * session_start and runDistillWith) reach this via the
+ * notify-text construction below.
+ */
+export function formatVaultConfigParseError(parseError: string): string {
+  if (parseError.length <= MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN) {
+    return parseError;
+  }
+  return `${parseError.slice(0, MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN)}… (truncated; full error in console)`;
+}
+
+/**
  * Thrown by {@link loadVaultConfig} when `<configPath>/config.json` exists
  * but is not parseable as JSON. Distinct from the missing-file path, which
  * still returns {@link DEFAULT_DISTILL} (a fresh-vault user has not yet
@@ -473,7 +504,7 @@ export default function (pi: ExtensionAPI) {
         // check could fire.
         if (ctx.hasUI) {
           ctx.ui.notify(
-            `Auto-distill cannot proceed: ${err.configPath} is not valid JSON (${err.parseError}). Fix the file by hand and restart pi.`,
+            `Auto-distill cannot proceed: ${err.configPath} is not valid JSON (${formatVaultConfigParseError(err.parseError)}). Fix the file by hand and restart pi.`,
             "error",
           );
         }
@@ -1022,7 +1053,7 @@ export default function (pi: ExtensionAPI) {
         // so the user can fix the file and retry.
         if (ctx.hasUI) {
           ctx.ui.notify(
-            `Distill cannot proceed: ${err.configPath} is not valid JSON (${err.parseError}). Fix the file by hand and retry.`,
+            `Distill cannot proceed: ${err.configPath} is not valid JSON (${formatVaultConfigParseError(err.parseError)}). Fix the file by hand and retry.`,
             "error",
           );
         }
