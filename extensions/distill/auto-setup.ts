@@ -54,6 +54,16 @@ import {
 } from "./distill-workspace";
 
 /**
+ * Grace period before a stale distill branch is auto-deleted by the
+ * full-level health check. 24 hours is generous enough to cover the
+ * common "user runs another distill the next day" pattern: the user
+ * still has access to the branch tip via `git reflog` for content
+ * recovery if they need it. Tighter would race users who recovered
+ * overnight; looser would let dead branches accumulate without bound.
+ */
+export const STALE_DISTILL_BRANCH_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
  * Snapshot of the v0.3.0 line-by-line entries appended to
  * `<vault>/.gitignore` (no markers) for vaults at v0.3.0 and earlier.
  * At v0.3.1 sessions install the managed-block format and remove
@@ -274,6 +284,17 @@ export interface SetupOptions {
    * filesystem.
    */
   probeWritable?: (dir: string) => WritableProbeResult;
+  /**
+   * Read the current wall-clock time in milliseconds since the
+   * epoch. Defaults to `Date.now`. Tests inject a deterministic
+   * clock to pin boundary cases on the
+   * `no-stale-distill-branches-over-grace` invariant: branches
+   * exactly at {@link STALE_DISTILL_BRANCH_GRACE_MS} age are not
+   * deleted (strict `>` comparison), branches one millisecond past
+   * the boundary are. Without an injectable clock the test would
+   * race the real `Date.now()`.
+   */
+  now?: () => number;
 }
 
 /**
@@ -384,6 +405,79 @@ const INVARIANT_NAPKIN_DISTILL_NOT_TRACKED = "napkin-distill-not-tracked";
  * false-error — the probe lands on `~/.cache` instead).
  */
 const INVARIANT_CACHE_ROOT_WRITABLE = "cache-root-writable";
+
+/**
+ * Stable invariant ID for the vault HEAD pointing at a real commit.
+ * Auto-recovered by seeding an empty initial commit when the vault
+ * has a `.git/` but no commits (e.g. a user who ran `git init` by
+ * hand and never committed). Without this seed, `git worktree add
+ * HEAD` in `createDistillWorktree` would fail with
+ * `fatal: invalid reference: HEAD`. Full-level only — fast-level
+ * skips so a session_start on a fresh-init-but-uncommitted vault
+ * does not seed an unsolicited commit; the seed fires lazily on
+ * the next worktree-based spawn.
+ */
+const INVARIANT_VAULT_HEAD_ON_BRANCH = "vault-head-on-branch";
+
+/**
+ * Stable invariant ID for orphaned distill worktree-registry
+ * entries. Auto-recovered via `git worktree prune --verbose`, which
+ * removes registry entries whose worktree directories have been
+ * deleted (typically a crashed pi session). Safe: prune only
+ * touches entries pointing at missing dirs.
+ */
+const INVARIANT_NO_ORPHANED_DISTILL_WORKTREES = "no-orphaned-distill-worktrees";
+
+/**
+ * Stable invariant ID for stale distill branches with no live
+ * worktree. Auto-recovered via `git branch -D <branch>` for any
+ * `distill/*` branch whose committerdate is older than
+ * {@link STALE_DISTILL_BRANCH_GRACE_MS} AND has no live worktree
+ * pointing at it. The reflog grace gives users a recovery window
+ * for content from a failed distill before the branch tip is
+ * unreachable.
+ */
+const INVARIANT_NO_STALE_DISTILL_BRANCHES_OVER_GRACE =
+  "no-stale-distill-branches-over-grace";
+
+/**
+ * Parse `git worktree list --porcelain` output and collect the set
+ * of branch names that are currently checked out in a live worktree.
+ * Used by the {@link INVARIANT_NO_STALE_DISTILL_BRANCHES_OVER_GRACE}
+ * check to avoid deleting branches that are still in use.
+ *
+ * Porcelain output is a sequence of records separated by blank
+ * lines; each record has lines of the form `<key> <value>`. The
+ * branch line is `branch refs/heads/<short-name>`; we strip the
+ * `refs/heads/` prefix to match the form returned by `git
+ * for-each-ref --format=%(refname:short)`.
+ *
+ * Returns an empty set when `git worktree list` fails or the vault
+ * has no worktrees — conservative, since the worst case is that
+ * we attempt to delete a branch that has a live worktree, which
+ * `git branch -D` will refuse with a clear error.
+ */
+export function parseLiveWorktreeBranches(vaultPath: string): Set<string> {
+  const r = spawnSync("git", ["worktree", "list", "--porcelain"], {
+    cwd: vaultPath,
+    encoding: "utf-8",
+    timeout: GIT_SUBCOMMAND_TIMEOUT_MS,
+    env: process.env,
+  });
+  if (r.status !== 0) return new Set();
+  const branches = new Set<string>();
+  for (const line of (r.stdout || "").split("\n")) {
+    if (line.startsWith("branch ")) {
+      const ref = line.slice("branch ".length).trim();
+      if (ref.startsWith("refs/heads/")) {
+        branches.add(ref.slice("refs/heads/".length));
+      } else {
+        branches.add(ref);
+      }
+    }
+  }
+  return branches;
+}
 
 /**
  * Range of the napkin-distill managed block within `<vault>/.gitignore`,
@@ -1126,35 +1220,122 @@ export function ensureVaultReadyForDistill(
     }
   }
 
-  // HEAD-valid invariant: createDistillWorktree requires HEAD to resolve
-  // to a commit. The paths above (fresh init OR existing repo + scaffolded
-  // files) produce a commit; the idempotent path (existing repo, nothing
-  // to scaffold) does NOT — so a vault where someone ran `git init` by
-  // hand and never committed leaves HEAD unresolvable. Seed an empty
-  // initial commit so `git worktree add ... HEAD` has something to pin to.
-  // This also covers the narrow window where `git init` succeeded above
-  // (we set `initialized = true`) but scaffolding wrote zero lines
-  // (`.gitignore` already present with our exact content) — that would
-  // fall into neither branch and leave a commit-less repo.
+  // HEAD-valid invariant: createDistillWorktree requires HEAD to
+  // resolve to a commit. The paths above (fresh init OR existing repo
+  // + scaffolded files) produce a commit; the idempotent path
+  // (existing repo, nothing to scaffold) does NOT — so a vault where
+  // someone ran `git init` by hand and never committed leaves HEAD
+  // unresolvable. Seed an empty initial commit so `git worktree add
+  // ... HEAD` has something to pin to. This also covers the narrow
+  // window where `git init` succeeded above (we set
+  // `initialized = true`) but scaffolding wrote zero lines
+  // (`.gitignore` already present with our exact content) — that
+  // would fall into neither branch and leave a commit-less repo.
+  //
+  // Full-level only: a session_start fast-level call on a vault
+  // whose HEAD is currently unresolvable returns clean (no seed,
+  // empty findings). The seed fires lazily on the next full-level
+  // call (auto-distill tick, session_shutdown, or manual /distill
+  // on subdir-layout) where a worktree-based spawn is imminent.
+  // Avoids seeding an unsolicited commit at session_start on
+  // vaults the user is still bootstrapping by hand.
   let seededCommit: SetupResult["seededCommit"];
-  const headAfter = runGit(vaultPath, ["rev-parse", "--verify", "HEAD"]);
-  if (headAfter.status !== 0) {
-    const seed = runGit(vaultPath, [
-      "commit",
-      "--allow-empty",
-      "-q",
-      "-m",
-      "napkin: initial vault commit (auto-distill setup)",
-    ]);
-    if (seed.status !== 0) {
-      return {
-        initialized,
-        scaffolded,
-        error: `git seed commit failed: ${seed.stderr.trim() || "unknown error"}`,
-        findings,
-      };
+  if (level === "full") {
+    const headAfter = runGit(vaultPath, ["rev-parse", "--verify", "HEAD"]);
+    if (headAfter.status !== 0) {
+      const seed = runGit(vaultPath, [
+        "commit",
+        "--allow-empty",
+        "-q",
+        "-m",
+        "napkin: initial vault commit (auto-distill setup)",
+      ]);
+      if (seed.status !== 0) {
+        return {
+          initialized,
+          scaffolded,
+          error: `git seed commit failed: ${seed.stderr.trim() || "unknown error"}`,
+          findings,
+        };
+      }
+      seededCommit = true;
+      findings.push({
+        kind: "auto-recovered",
+        invariant: INVARIANT_VAULT_HEAD_ON_BRANCH,
+        message: `${vaultPath} had a git repo with no commits; seeded empty initial commit so worktree spawn can pin HEAD.`,
+        recovery: "git commit --allow-empty",
+      });
     }
-    seededCommit = true;
+
+    // Orphaned distill worktree-registry entries: `git worktree prune
+    // --verbose --expire=now` removes entries whose worktree
+    // directories have been deleted (typically a crashed pi session).
+    // Prune is safe — it only touches entries pointing at missing
+    // dirs. `--expire=now` overrides git's default 3-month grace
+    // (`gc.worktreePruneExpire`) so freshly-orphaned entries are
+    // cleaned up on the next health check rather than lingering for
+    // months.
+    const prune = runGit(vaultPath, [
+      "worktree",
+      "prune",
+      "--verbose",
+      "--expire=now",
+    ]);
+    // `git worktree prune --verbose` emits its progress to stderr,
+    // not stdout. Combine both streams so the recovery text reflects
+    // every removed registry entry regardless of git's output
+    // routing.
+    const pruneOut = `${prune.stdout}\n${prune.stderr}`.trim();
+    if (pruneOut.length > 0) {
+      findings.push({
+        kind: "auto-recovered",
+        invariant: INVARIANT_NO_ORPHANED_DISTILL_WORKTREES,
+        message: `Pruned orphaned distill worktree registry entries.`,
+        recovery: pruneOut,
+      });
+    }
+
+    // Stale distill branches: any `distill/*` branch with
+    // committerdate older than STALE_DISTILL_BRANCH_GRACE_MS AND no
+    // live worktree pointing at it gets deleted. Reflog grace gives
+    // users a recovery window for content from a failed distill.
+    // Boundary: branches AT exactly the grace age are NOT deleted
+    // (strict `>` comparison) so the boundary tests can pin the
+    // "just under threshold" case deterministically.
+    const branches = runGit(vaultPath, [
+      "for-each-ref",
+      "refs/heads/distill/",
+      "--format=%(refname:short) %(committerdate:unix)",
+    ]);
+    const liveWorktreeBranches = parseLiveWorktreeBranches(vaultPath);
+    const now = (options.now ?? Date.now)();
+    for (const line of branches.stdout.split("\n")) {
+      if (line.length === 0) continue;
+      const spaceIdx = line.lastIndexOf(" ");
+      if (spaceIdx < 0) continue;
+      const refname = line.slice(0, spaceIdx).trim();
+      const tsStr = line.slice(spaceIdx + 1).trim();
+      const tsSec = parseInt(tsStr, 10);
+      if (!refname || !Number.isFinite(tsSec)) continue;
+      const ageMs = now - tsSec * 1000;
+      if (
+        ageMs > STALE_DISTILL_BRANCH_GRACE_MS &&
+        !liveWorktreeBranches.has(refname)
+      ) {
+        const del = runGit(vaultPath, ["branch", "-D", refname]);
+        if (del.status === 0) {
+          findings.push({
+            kind: "auto-recovered",
+            invariant: INVARIANT_NO_STALE_DISTILL_BRANCHES_OVER_GRACE,
+            message: `Deleted stale distill branch ${refname} (${Math.round(ageMs / 3600000)}h old, no live worktree).`,
+            recovery: `git branch -D ${refname}`,
+          });
+        }
+        // If `git branch -D` fails (e.g. the branch is checked out
+        // somewhere we couldn't detect), skip the finding rather
+        // than emit a confusing "deleted" message.
+      }
+    }
   }
 
   return { initialized, scaffolded, seededCommit, findings };

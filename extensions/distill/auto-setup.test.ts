@@ -15,9 +15,11 @@ import {
   isLineInsideBlock,
   LEGACY_EMBEDDED_LAYOUT_ERROR,
   parseCheckIgnoreVerbose,
+  parseLiveWorktreeBranches,
   parseManagedBlockRange,
   probeWritable,
   type SetupOptions,
+  STALE_DISTILL_BRANCH_GRACE_MS,
   walkToFirstExistingAncestor,
 } from "./auto-setup";
 
@@ -332,12 +334,15 @@ describe("ensureVaultReadyForDistill", () => {
   // otherwise the FIRST auto-distill after session_start crashes. The
   // tests below pin each entry path.
 
-  test("FB-2: existing empty repo, idempotent scaffolding — seeds empty commit so HEAD is valid", () => {
-    // Setup: run `git init` in the vault, then pre-install our scaffolding
-    // file with exact content — so mergeManagedBlock writes nothing and the
-    // existing-repo commit branch is SKIPPED. This is the idempotent
-    // re-run path on a vault that happens to have no commits yet. Pre-FB-2
-    // this branch left HEAD unresolvable.
+  test("existing empty repo, idempotent scaffolding at full-level: seeds empty commit so HEAD is valid + emits finding", () => {
+    // Run `git init` in the vault, then pre-install our scaffolding
+    // file with exact content — so mergeManagedBlock writes nothing
+    // and the existing-repo commit branch is SKIPPED. This is the
+    // idempotent re-run path on a vault that happens to have no
+    // commits yet. Without the full-level seed this branch would
+    // leave HEAD unresolvable, and `git worktree add HEAD` in
+    // createDistillWorktree would fail with `fatal: invalid
+    // reference: HEAD`.
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
     // Pre-populate .gitignore with our exact canonical block so the
@@ -349,17 +354,44 @@ describe("ensureVaultReadyForDistill", () => {
     const beforeHead = git(vault, ["rev-parse", "--verify", "HEAD"]);
     expect(beforeHead.status).not.toBe(0);
 
-    const r = runSetup();
+    const r = runSetup("full");
     expect(r.error).toBeUndefined();
     expect(r.initialized).toBe(false);
     expect(r.scaffolded).toEqual([]); // nothing to scaffold
-    expect(r.findings).toEqual([]);
     expect(r.seededCommit).toBe(true);
+    const seedFinding = r.findings.find(
+      (f) => f.invariant === "vault-head-on-branch",
+    );
+    expect(seedFinding).toBeDefined();
+    expect(seedFinding?.kind).toBe("auto-recovered");
 
     // Post-condition: HEAD resolves — subsequent createDistillWorktree
     // won't explode.
     const afterHead = git(vault, ["rev-parse", "--verify", "HEAD"]);
     expect(afterHead.status).toBe(0);
+  });
+
+  test("existing empty repo, idempotent scaffolding at fast-level: does NOT seed (defers to next full-level)", () => {
+    // Counterfactual to the full-level test above. Fast-level
+    // (session_start) on a freshly `git init`-ed but uncommitted
+    // vault returns clean: no seed, no finding. The seed fires
+    // lazily on the next worktree-based spawn (auto-distill tick,
+    // session_shutdown, or manual /distill).
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, ".gitignore"), canonicalBlock());
+
+    const r = runSetup("fast");
+    expect(r.error).toBeUndefined();
+    expect(r.seededCommit).toBeUndefined();
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("vault-head-on-branch");
+    }
+
+    // HEAD remains unresolvable post fast-level call — the gate is
+    // moved, not removed.
+    const afterHead = git(vault, ["rev-parse", "--verify", "HEAD"]);
+    expect(afterHead.status).not.toBe(0);
   });
 
   test("FB-2: existing empty repo, new scaffolding — normal scaffold+commit path still works", () => {
@@ -1314,6 +1346,152 @@ describe("ensureVaultReadyForDistill", () => {
       expect(f.invariant).not.toBe("cache-root-writable");
     }
   });
+
+  // --- no-orphaned-distill-worktrees + no-stale-distill-branches-over-grace
+  //
+  // The worktree-and-branch lifecycle accumulates two kinds of debris
+  // when distill runs crash or get cleaned up out-of-band: orphaned
+  // worktree-registry entries (dirs deleted but registry entry
+  // remains) and stale distill branches (committerdate older than
+  // STALE_DISTILL_BRANCH_GRACE_MS with no live worktree). Full-level
+  // cleans both up automatically; reflog grace gives users a
+  // recovery window for content from a failed distill.
+
+  /**
+   * Add a worktree at `worktreePath` with a freshly-created branch
+   * `<branch>` rooted at HEAD, then return the worktree path.
+   * Tests use this to simulate the real worktree+branch lifecycle
+   * before introducing drift (dir-deletion / time-warp).
+   */
+  function addWorktreeWithBranch(
+    vaultPath: string,
+    worktreePath: string,
+    branch: string,
+  ): void {
+    const r = git(vaultPath, ["worktree", "add", "-b", branch, worktreePath]);
+    if (r.status !== 0) throw new Error(`worktree add failed: ${r.stderr}`);
+  }
+
+  test("orphaned worktree (registered, dir deleted): prune emits + auto-recovered finding", () => {
+    setupExistingRepoWithBlock();
+    const wtRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-wt-"));
+    const wtPath = path.join(wtRoot, "orphan-target");
+    addWorktreeWithBranch(vault, wtPath, "distill/orphan-target");
+    // Delete the worktree dir without `git worktree remove`. Now the
+    // registry has an orphan entry pointing at a missing dir.
+    fs.rmSync(wtRoot, { recursive: true, force: true });
+
+    const r = runSetup("full");
+    const finding = r.findings.find(
+      (f) => f.invariant === "no-orphaned-distill-worktrees",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("auto-recovered");
+    // Recovery text carries the prune output — the user sees which
+    // entries were removed.
+    expect(finding?.recovery).toContain("orphan-target");
+  });
+
+  test("distill branch newer than grace, no live worktree: not deleted, no finding", () => {
+    setupExistingRepoWithBlock();
+    // Create a fresh distill branch (committerdate = now). The
+    // grace check requires `> STALE_DISTILL_BRANCH_GRACE_MS`; a
+    // freshly-committed branch is well within grace.
+    git(vault, ["branch", "distill/recent"]);
+
+    const r = runSetup("full");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("no-stale-distill-branches-over-grace");
+    }
+    // Branch still exists.
+    const exists = git(vault, ["rev-parse", "--verify", "distill/recent"]);
+    expect(exists.status).toBe(0);
+  });
+
+  test("distill branch older than grace, no live worktree: deleted with auto-recovered finding", () => {
+    setupExistingRepoWithBlock();
+    git(vault, ["branch", "distill/stale"]);
+    // Inject a deterministic clock that's `grace + 1h` past the
+    // branch's committerdate. The branch was committed via the seed
+    // commit at real-now; the injected clock makes it look
+    // grace-plus-one-hour old.
+    const realNow = Date.now();
+    const fakeNow = realNow + STALE_DISTILL_BRANCH_GRACE_MS + 3_600_000;
+
+    const r = runSetup("full", { now: () => fakeNow });
+    const finding = r.findings.find(
+      (f) => f.invariant === "no-stale-distill-branches-over-grace",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("auto-recovered");
+    expect(finding?.recovery).toBe("git branch -D distill/stale");
+    // Branch is gone.
+    const exists = git(vault, ["rev-parse", "--verify", "distill/stale"]);
+    expect(exists.status).not.toBe(0);
+  });
+
+  test("distill branch older than grace WITH live worktree: not deleted, no finding", () => {
+    setupExistingRepoWithBlock();
+    const wtRoot = fs.mkdtempSync(path.join(os.tmpdir(), "live-wt-"));
+    const wtPath = path.join(wtRoot, "live");
+    try {
+      addWorktreeWithBranch(vault, wtPath, "distill/live");
+      const realNow = Date.now();
+      const fakeNow = realNow + STALE_DISTILL_BRANCH_GRACE_MS + 3_600_000;
+
+      const r = runSetup("full", { now: () => fakeNow });
+      for (const f of r.findings) {
+        expect(f.invariant).not.toBe("no-stale-distill-branches-over-grace");
+      }
+      // Branch still exists; worktree still registered.
+      const exists = git(vault, ["rev-parse", "--verify", "distill/live"]);
+      expect(exists.status).toBe(0);
+    } finally {
+      // Cleanup: remove the worktree before letting afterEach delete
+      // the vault dir, otherwise git complains.
+      git(vault, ["worktree", "remove", "--force", wtPath]);
+      fs.rmSync(wtRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("distill branch exactly at grace age: not deleted (strict > comparison pins boundary)", () => {
+    setupExistingRepoWithBlock();
+    git(vault, ["branch", "distill/edge"]);
+    // Find the actual committerdate of the branch (in seconds), then
+    // build a fake-now that is exactly `grace` past that date. The
+    // age comparison is `> grace`, so the branch should remain.
+    const tsLine = git(vault, [
+      "for-each-ref",
+      "refs/heads/distill/edge",
+      "--format=%(committerdate:unix)",
+    ]).stdout.trim();
+    const tsSec = parseInt(tsLine, 10);
+    expect(Number.isFinite(tsSec)).toBe(true);
+    const fakeNow = tsSec * 1000 + STALE_DISTILL_BRANCH_GRACE_MS;
+
+    const r = runSetup("full", { now: () => fakeNow });
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("no-stale-distill-branches-over-grace");
+    }
+    const exists = git(vault, ["rev-parse", "--verify", "distill/edge"]);
+    expect(exists.status).toBe(0);
+  });
+
+  test("fast-level does NOT run orphan or stale-branch cleanup", () => {
+    setupExistingRepoWithBlock();
+    git(vault, ["branch", "distill/old"]);
+    const realNow = Date.now();
+    const fakeNow = realNow + STALE_DISTILL_BRANCH_GRACE_MS + 3_600_000;
+
+    const r = runSetup("fast", { now: () => fakeNow });
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("no-stale-distill-branches-over-grace");
+      expect(f.invariant).not.toBe("no-orphaned-distill-worktrees");
+    }
+    // Branch still exists.
+    const exists = git(vault, ["rev-parse", "--verify", "distill/old"]);
+    expect(exists.status).toBe(0);
+  });
 });
 
 // --- helper unit tests ---------------------------------------------------
@@ -1512,6 +1690,68 @@ describe("probeWritable", () => {
     expect(r.writable).toBe(false);
     expect(r.error).toBeDefined();
     expect(r.error?.length).toBeGreaterThan(0);
+  });
+});
+
+describe("parseLiveWorktreeBranches", () => {
+  let vault: string;
+  beforeEach(() => {
+    vault = fs.mkdtempSync(path.join(os.tmpdir(), "live-wt-"));
+    spawnSync("git", ["init", "-q", "-b", "main", vault]);
+    spawnSync("git", [
+      "-C",
+      vault,
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.email=t@e",
+      "-c",
+      "user.name=t",
+      "commit",
+      "--allow-empty",
+      "-q",
+      "-m",
+      "seed",
+    ]);
+  });
+  afterEach(() => {
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test("single worktree: returns set with the main branch", () => {
+    const r = parseLiveWorktreeBranches(vault);
+    expect(r).toContain("main");
+  });
+
+  test("with a distill worktree: returns both branches with refs/heads/ stripped", () => {
+    const wtRoot = fs.mkdtempSync(path.join(os.tmpdir(), "plw-"));
+    const wtPath = path.join(wtRoot, "work");
+    try {
+      spawnSync("git", [
+        "-C",
+        vault,
+        "worktree",
+        "add",
+        "-b",
+        "distill/test-x",
+        wtPath,
+      ]);
+      const r = parseLiveWorktreeBranches(vault);
+      expect(r).toContain("main");
+      expect(r).toContain("distill/test-x");
+    } finally {
+      spawnSync("git", ["-C", vault, "worktree", "remove", "--force", wtPath]);
+      fs.rmSync(wtRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("non-git path: returns empty set", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "plw-nogit-"));
+    try {
+      expect(parseLiveWorktreeBranches(tmp).size).toBe(0);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 
