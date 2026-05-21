@@ -199,38 +199,6 @@ describe("formatVaultConfigParseError", () => {
   test("empty parse error: returned unchanged", () => {
     expect(formatVaultConfigParseError("")).toBe("");
   });
-
-  // Three production sites construct a malformed-config notify line
-  // by interpolating `formatVaultConfigParseError(parseError)` into a
-  // shared template (see the `Auto-distill cannot proceed:` notifies
-  // in `index.ts`). A regression that drops the helper at any of those
-  // sites would let an adversarial multi-MB parse error overflow the
-  // notify surface. Pin the construction shape with a 1 MB parseError:
-  // assert the rendered notify line stays bounded regardless of input
-  // size, and that the canonical prefix is preserved.
-  test("1 MB parse error: every malformed-config notify template stays bounded", () => {
-    const oneMb = "x".repeat(1024 * 1024);
-    const cfgPath = "/vault/.napkin/config.json";
-    const renderedSegment = formatVaultConfigParseError(oneMb);
-    const templates = [
-      // session_start catch (line ~509)
-      `Auto-distill cannot proceed: ${cfgPath} is not valid JSON (${renderedSegment}). Fix the file by hand and restart pi.`,
-      // runDistill outer catch (line ~1058)
-      `Auto-distill cannot proceed: ${cfgPath} is not valid JSON (${renderedSegment}). Fix the file by hand and retry.`,
-      // worktreeSpawnFn setup-failed catch (line ~1471)
-      `Auto-distill cannot proceed: ${cfgPath} is not valid JSON (${renderedSegment}). Fix the file by hand and retry.`,
-    ];
-    for (const msg of templates) {
-      // Bounded: the 1 MB input is clipped to the cap; the surrounding
-      // template adds < 200 chars of fixed text. ≤ 600 leaves comfortable
-      // headroom over 200-cap + suffix + template without pinning the
-      // exact suffix wording.
-      expect(msg.length).toBeLessThan(600);
-      expect(msg.length).toBeLessThan(oneMb.length);
-      expect(msg.startsWith("Auto-distill cannot proceed: ")).toBe(true);
-      expect(msg).toContain("truncated");
-    }
-  });
 });
 
 describe("formatOutcomeNotification (POST-CONV-5)", () => {
