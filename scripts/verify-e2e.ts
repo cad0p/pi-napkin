@@ -257,7 +257,33 @@ const VARIANT_ABORT_NOTIFY_WAIT_MS = 5_000;
  * (gitignore-outside-managed-block) and one auto-recover path
  * (orphaned worktree pruning).
  */
-export type Variant = "healthy" | "config-outside-block" | "orphaned-worktree";
+const VARIANTS = [
+  "healthy",
+  "config-outside-block",
+  "orphaned-worktree",
+] as const;
+export type Variant = (typeof VARIANTS)[number];
+
+/**
+ * Whether {@link Variant} aborts the spawn before LLM dispatch (loud-
+ * error path) versus runs the LLM (healthy / auto-recover paths).
+ * Switch shape — not a single equality — so a future fourth abort-
+ * class variant becomes a tsc failure here instead of silently
+ * taking the full-timeout + green-assertion path.
+ */
+function isAbortVariant(variant: Variant): boolean {
+  switch (variant) {
+    case "config-outside-block":
+      return true;
+    case "healthy":
+    case "orphaned-worktree":
+      return false;
+    default: {
+      const _exhaustive: never = variant;
+      throw new Error(`isAbortVariant: unhandled variant ${_exhaustive}`);
+    }
+  }
+}
 
 interface Args {
   model: string;
@@ -266,12 +292,6 @@ interface Args {
   variant: Variant;
   all: boolean;
 }
-
-const VARIANT_VALUES: readonly Variant[] = [
-  "healthy",
-  "config-outside-block",
-  "orphaned-worktree",
-];
 
 const HELP = `verify-e2e — full-runtime gate for the distill flow
 
@@ -334,19 +354,17 @@ function parseArgs(argv: readonly string[]): Args {
     } else if (a === "--variant") {
       const next = argv[i + 1];
       if (!next) throw new Error("--variant requires a value");
-      if (!VARIANT_VALUES.includes(next as Variant)) {
+      if (!VARIANTS.includes(next as Variant)) {
         throw new Error(
-          `unknown variant: ${next}. Known: ${VARIANT_VALUES.join(", ")}`,
+          `unknown variant: ${next}. Known: ${VARIANTS.join(", ")}`,
         );
       }
       args.variant = next as Variant;
       i++;
     } else if (a.startsWith("--variant=")) {
       const v = a.slice("--variant=".length);
-      if (!VARIANT_VALUES.includes(v as Variant)) {
-        throw new Error(
-          `unknown variant: ${v}. Known: ${VARIANT_VALUES.join(", ")}`,
-        );
+      if (!VARIANTS.includes(v as Variant)) {
+        throw new Error(`unknown variant: ${v}. Known: ${VARIANTS.join(", ")}`);
       }
       args.variant = v as Variant;
     } else {
@@ -1612,8 +1630,8 @@ async function runOnce(args: Args, variant: Variant): Promise<number> {
     // {@link VARIANT_ABORT_NOTIFY_WAIT_MS} so the gate doesn't pay
     // the full LLM timeout. The variant's post-condition asserts the
     // abort separately.
-    const isAbortVariant = variant === "config-outside-block";
-    const timeoutMs = isAbortVariant
+    const abortVariant = isAbortVariant(variant);
+    const timeoutMs = abortVariant
       ? VARIANT_ABORT_NOTIFY_WAIT_MS
       : DISTILL_MAX_DURATION_MINUTES * 60 * 1000 +
         POLLER_DISPATCH_SLACK_SECS * 1000;
@@ -1635,7 +1653,7 @@ async function runOnce(args: Args, variant: Variant): Promise<number> {
     // results are re-included here so the final summary lists every
     // checked invariant in one PASS/FAIL block, even though they
     // were already asserted earlier for fail-fast.
-    const greenAssertions = isAbortVariant
+    const greenAssertions = abortVariant
       ? []
       : assertGreenPostConditions(fixture, notify, variantLeftoverBranches);
     const variantAssertions = assertVariantPostConditions(variant, notifyCalls);
