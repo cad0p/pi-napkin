@@ -1047,6 +1047,16 @@ export function ensureVaultReadyForDistill(
   // embedded layout. Closes Issue #14. Auto-recovers by adding the file
   // to scaffolded[] so the existing-repo branch below stages and
   // commits it on the same pass.
+  //
+  // The auto-recovered finding is held back as `pending` and only
+  // pushed onto `findings[]` after the eventual `git add` succeeds.
+  // In the cumulative scenario where the file is also gitignored
+  // outside the managed block (loud-error finding emitted just
+  // below), `git add` will refuse to stage the file and the
+  // existing-repo branch returns with `setup.error`. Pushing the
+  // recovery finding eagerly would produce a false info notify
+  // ("staged for commit") alongside the error notify.
+  let pendingConfigJsonTrackedFinding: HealthFinding | undefined;
   if (level === "full") {
     const configRel = path.relative(
       vaultPath,
@@ -1060,12 +1070,12 @@ export function ensureVaultReadyForDistill(
       ]);
       if (tracked.status !== 0) {
         scaffolded.push(configRel);
-        findings.push({
+        pendingConfigJsonTrackedFinding = {
           kind: "auto-recovered",
           invariant: INVARIANT_CONFIG_JSON_TRACKED,
           message: `${configRel} was untracked; staged for commit.`,
           recovery: `git add ${configRel}`,
-        });
+        };
       }
 
       // Refuse to spawn if the user gitignored `config.json` outside
@@ -1193,6 +1203,9 @@ export function ensureVaultReadyForDistill(
         findings,
       };
     }
+    if (pendingConfigJsonTrackedFinding) {
+      findings.push(pendingConfigJsonTrackedFinding);
+    }
   } else if (scaffolded.length > 0) {
     // Existing repo: only stage the scaffolding files so we don't sweep in
     // the user's unrelated working changes.
@@ -1218,6 +1231,9 @@ export function ensureVaultReadyForDistill(
         error: `git commit failed: ${commit.stderr.trim() || "unknown error"}`,
         findings,
       };
+    }
+    if (pendingConfigJsonTrackedFinding) {
+      findings.push(pendingConfigJsonTrackedFinding);
     }
   }
 

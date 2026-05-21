@@ -1177,6 +1177,54 @@ describe("ensureVaultReadyForDistill", () => {
     }
   });
 
+  // Cumulative scenario: config.json is BOTH untracked AND gitignored
+  // by a user-territory rule outside the managed block. The eventual
+  // `git add .napkin/config.json` from the existing-repo branch will
+  // refuse (gitignored paths are skipped). The auto-recover finding
+  // ("staged for commit") must NOT fire alongside the loud-error
+  // finding — a false info notify would contradict the failure.
+  test("untracked config.json + outside-block gitignore: error finding only, no false config.json-tracked recovery", () => {
+    // Build a vault with a tracked seed but an untracked, gitignored
+    // .napkin/config.json. We can't reuse setupExistingRepoWithBlock
+    // because that helper runs setup once (which would track the file
+    // before we add the gitignore rule).
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
+    // User-territory rule above the (yet-to-be-installed) managed block.
+    fs.writeFileSync(path.join(vault, ".gitignore"), ".napkin/config.json\n");
+    git(vault, ["add", "seed.md", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "seed + user gitignore rule"]);
+
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+
+    const r = runSetup("full");
+
+    // Loud-error finding fires for the outside-block rule.
+    const outsideBlock = r.findings.find(
+      (f) => f.invariant === "config.json-not-gitignored-outside-block",
+    );
+    expect(outsideBlock).toBeDefined();
+    expect(outsideBlock?.kind).toBe("error");
+
+    // Auto-recover finding must NOT fire — the staging step did not
+    // succeed (or, more precisely: the recovery message would be
+    // wrong if it were emitted). The user fixes the gitignore rule
+    // and re-runs; the next pass tracks the file cleanly.
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-tracked");
+    }
+
+    // Setup returns with a populated `error` (`git add` refused the
+    // gitignored path) so callers abort the spawn.
+    expect(r.error).toBeDefined();
+    expect(r.error).toContain("git add");
+  });
+
   // --- napkin-distill-not-tracked (full-level only) ----------------------
   //
   // The canonical {@link BLOCK_CONTENT} gitignores `.napkin/distill/`,
