@@ -214,11 +214,10 @@ export function formatVaultConfigParseError(parseError: string): string {
  * Callers that own a UI (`session_start`, manual `/distill`) should catch
  * this and surface a user-actionable error notify so the user knows the
  * file needs a hand-fix; the file is the user's source of truth and we
- * cannot guess the intended content. This pairs with the
- * `config.json-valid-json` invariant on `ensureVaultReadyForDistill`,
- * which would otherwise be unreachable from `session_start`: the previous
- * fail-open behavior masked malformed JSON as `enabled: false` and
- * short-circuited before the health check could fire.
+ * cannot guess the intended content. Previously this path failed open
+ * (returned defaults) and short-circuited at the `if (!config.enabled)
+ * return;` line in `session_start` before the user could see any
+ * indication that the config was malformed.
  */
 export class MalformedVaultConfigError extends Error {
   readonly configPath: string;
@@ -242,10 +241,8 @@ export class MalformedVaultConfigError extends Error {
  *     MalformedVaultConfigError}. Callers with a UI should catch and
  *     surface a notify so the user knows the file needs a hand-fix.
  *     Previously this path failed open (returned defaults), which
- *     made the `config.json-valid-json` health-check invariant
- *     unreachable from `session_start` — the
- *     `if (!config.enabled) return;` short-circuit fired before
- *     `ensureVaultReadyForDistill` could run.
+ *     masked the parse error as `enabled: false` and short-circuited
+ *     `session_start` before any user-visible signal could fire.
  */
 export function loadVaultConfig(vaultPath: string): VaultConfig {
   const configPath = path.join(vaultPath, "config.json");
@@ -499,11 +496,9 @@ export default function (pi: ExtensionAPI) {
         // fix the file and re-launch; skip the rest of session_start
         // (no health check, no auto-distill arming) because the
         // session-wide flags downstream depend on a parseable config.
-        // Pairs with the `config.json-valid-json` invariant on
-        // `ensureVaultReadyForDistill`; the previous fail-open
-        // behavior of `loadVaultConfig` masked the parse error as
-        // `enabled: false` and short-circuited before the health
-        // check could fire.
+        // The previous fail-open behavior of `loadVaultConfig` masked
+        // the parse error as `enabled: false` and short-circuited
+        // before any user-visible signal could fire.
         if (ctx.hasUI) {
           ctx.ui.notify(
             `Auto-distill cannot proceed: ${err.configPath} is not valid JSON (${formatVaultConfigParseError(err.parseError)}). Fix the file by hand and restart pi.`,

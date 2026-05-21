@@ -390,7 +390,7 @@ The block style is the same Ansible-style sentinel pattern Ansible's `blockinfil
 
 | Cadence | When | What it covers | Typical cost |
 |---|---|---|---|
-| Fast-level | Every `session_start` (every pi launch in the vault) | Subdir vs legacy-embedded layout, `.napkin/config.json` parses as JSON, managed gitignore block matches canonical (auto-recover if drift), auto-init `git init` + initial commit if `.git/` is missing | Sub-second (a handful of git probes) |
+| Fast-level | Every `session_start` (every pi launch in the vault) | Subdir vs legacy-embedded layout, managed gitignore block matches canonical (auto-recover if drift), auto-init `git init` + initial commit if `.git/` is missing | Sub-second (a handful of git probes) |
 | Full-level | On `/distill` (manual) and at each interval-driven auto-distill spawn | Everything fast-level covers, plus: `.napkin/config.json` is git-tracked, vault HEAD resolves to a commit (seed an empty initial commit if a hand-`git init`-ed vault has no commits yet), `.napkin/config.json` not gitignored outside the managed block, `.napkin/distill/` not tracked, cache root writable, no orphaned distill worktree registry entries, no stale `distill/*` branches past the grace period | A few extra git probes; runs only when a worktree is about to be spawned anyway |
 
 Fast-level findings surface as one-shot notifications at session start; the session continues regardless. Full-level findings are gated separately depending on category (below).
@@ -410,7 +410,7 @@ These are recoverable drift the health check fixes in place. Each emits a single
 These are conditions where auto-distill cannot safely proceed. Each emits an error notification of the form `Auto-distill cannot proceed: <message>` and `/distill` aborts before spawning a wrapper:
 
 - **Subdir-layout violation** — vault uses napkin's legacy embedded layout (config at `<vault>/config.json`, no `.napkin/` subdir). Auto-distill needs the subdir layout for worktree-based concurrency to work; see [Migration from legacy layout](#migration-from-legacy-layout).
-- **Malformed `.napkin/config.json`** — file exists but doesn't parse as JSON. Auto-distill refuses to guess; fix the file and reload.
+- **Malformed `.napkin/config.json`** — file exists but doesn't parse as JSON. Detected by `loadVaultConfig` upstream of the health check itself; auto-distill refuses to guess; fix the file and reload.
 - **`.napkin/config.json` gitignored outside the managed block** (full-level only) — a user-territory rule in `.gitignore` (or a parent `.gitignore` / global ignore) excludes the config file. Worktrees would have no config to read; remove the rule or move it inside the managed block.
 - **`.napkin/distill/` tracked in git** (full-level only) — the per-worktree session fork directory got committed at some point. Untrack it (`git rm --cached -r .napkin/distill/`) before re-running.
 - **Cache root unwritable** (full-level only) — `$XDG_CACHE_HOME/napkin-distill/<hash>/` can't be created or written. Check disk space and permissions on the cache root.

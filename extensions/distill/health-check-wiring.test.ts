@@ -40,8 +40,9 @@ const SUFFICIENTLY_LARGE_INTERVAL_MS = 10_000;
 /**
  * Build a subdir-layout vault with `distill.enabled=true` and an initial
  * commit. The vault is a real git repo; the `.napkin/config.json` is
- * the napkin source-of-truth that the health check reads to enforce
- * `config.json-valid-json`.
+ * the napkin source-of-truth that `loadVaultConfig` reads, and the
+ * health check on top of it enforces the layout + managed-block + git
+ * invariants.
  */
 function createSubdirVault(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "health-wiring-vault-"));
@@ -643,12 +644,11 @@ describe("per-spawn health-check wiring", () => {
   // --- session_start with malformed config.json --------------------------
   //
   // `loadVaultConfig` previously masked malformed JSON as `enabled: false`
-  // and the session_start handler short-circuited before the health
-  // check could fire — leaving the `config.json-valid-json` invariant
-  // unreachable from this entry point. After the propagation fix,
-  // `loadVaultConfig` throws `MalformedVaultConfigError`; session_start
-  // catches it, emits an actionable error notify, and skips the rest
-  // of the handler (no health check, no auto-distill arming).
+  // and the session_start handler short-circuited before any user-visible
+  // signal could fire. After the propagation fix, `loadVaultConfig`
+  // throws `MalformedVaultConfigError`; session_start catches it, emits
+  // an actionable error notify, and skips the rest of the handler (no
+  // health check, no auto-distill arming).
 
   test("session_start on vault with malformed config.json: error notify, no spawn, valid-config session unaffected", async () => {
     const vault = createSubdirVault();

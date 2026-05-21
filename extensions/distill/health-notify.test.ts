@@ -105,9 +105,13 @@ describe("surfaceHealthFindings", () => {
       },
       {
         kind: "error",
-        invariant: "config.json-valid-json",
+        // Use a production-emitted error invariant ID so a reader
+        // tracing the fixture back to its source finds the real
+        // emitter. Renderer is invariant-name-agnostic; only the
+        // `kind: "error"` + `message` shape is exercised here.
+        invariant: "napkin-distill-not-tracked",
         message:
-          "/path/.napkin/config.json is not valid JSON: Unexpected token.",
+          "/path/.napkin/distill/ contains tracked files [a.md]; auto-untrack would risk data loss.",
       },
     ];
     const result = surfaceHealthFindings(ctx, findings);
@@ -125,7 +129,7 @@ describe("surfaceHealthFindings", () => {
         "- /path/.gitignore did not contain a managed block; installed. (installed)",
     );
     expect(errors[0].msg).toBe(
-      "Auto-distill cannot proceed: /path/.napkin/config.json is not valid JSON: Unexpected token.",
+      "Auto-distill cannot proceed: /path/.napkin/distill/ contains tracked files [a.md]; auto-untrack would risk data loss.",
     );
     expect(result).toEqual({ hasErrors: true });
   });
@@ -140,8 +144,12 @@ describe("surfaceHealthFindings", () => {
       },
       {
         kind: "error",
-        invariant: "config.json-valid-json",
-        message: "parse error on /path/.napkin/config.json.",
+        // Production-emitted error invariant; the renderer iterates
+        // a heterogeneous error list, so the second fixture uses a
+        // distinct invariant ID from the first to mirror real
+        // multi-finding output.
+        invariant: "napkin-distill-not-tracked",
+        message: "/path/.napkin/distill/ contains tracked files.",
       },
     ];
     const result = surfaceHealthFindings(ctx, findings);
@@ -150,7 +158,7 @@ describe("surfaceHealthFindings", () => {
     expect(notifies[0].msg).toBe(
       "Auto-distill cannot proceed:\n" +
         "- marker drift on /path/.gitignore.\n" +
-        "- parse error on /path/.napkin/config.json.",
+        "- /path/.napkin/distill/ contains tracked files.",
     );
     expect(result).toEqual({ hasErrors: true });
   });
