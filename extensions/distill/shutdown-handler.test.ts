@@ -435,7 +435,7 @@ describe("session_shutdown handler (Item 8)", () => {
 
   test("setup failure: suppresses shutdown distill AND overrides persisted suppression=false (C1)", async () => {
     // Simulate a vault-level setup failure: create a directory where
-    // `.gitignore` is supposed to be a file. `ensureVaultReadyForAutoDistill`
+    // `.gitignore` is supposed to be a file. `ensureVaultReadyForDistill`
     // tries `fs.writeFileSync(.gitignore, ...)` which fails with EISDIR —
     // the function returns `{ error: ... }`.
     //
@@ -446,7 +446,7 @@ describe("session_shutdown handler (Item 8)", () => {
     // actually suppress anything. This test pins the fixed ordering.
     vault = createVault({ enabled: true });
     // Remove the .gitignore file that createVault's git init+commit added,
-    // and replace it with a directory to force mergeLines to fail.
+    // and replace it with a directory to force mergeManagedBlock to fail.
     const giPath = path.join(vault, ".gitignore");
     if (fs.existsSync(giPath)) fs.rmSync(giPath, { force: true });
     fs.mkdirSync(giPath, { recursive: true });

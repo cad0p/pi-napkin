@@ -2,22 +2,46 @@
 /**
  * verify-e2e — full-runtime gate for the distill flow.
  *
- * This is the on-demand integration tier. It exercises the production
- * code path end-to-end: the manual `/distill` command handler triggers
- * `runDistillWith`, which spawns the real wrapper subprocess (via the
- * worktree spawn function), the wrapper invokes `pi -p` against a real
- * LLM, and the JS-side `setInterval` poller observes the wrapper's
- * outcome sidecar and dispatches a UI notification through the captured
- * fake UI. The script then asserts on the dispatched notification's
- * severity + message plus filesystem post-conditions.
+ * This is the on-demand integration tier. It exercises BOTH halves of
+ * the production code path end-to-end:
+ *
+ *   1. The session_start auto-init: `ensureVaultReadyForDistill(vault,
+ *      "fast")` runs `git init`, installs the managed `.gitignore`
+ *      block, and produces the initial commit.
+ *   2. The manual `/distill` command handler triggers `runDistillWith`,
+ *      which calls `ensureVaultReadyForDistill(vault, "full")` to
+ *      enforce the full health-check matrix, then spawns the real
+ *      wrapper subprocess via the worktree spawn function. The wrapper
+ *      invokes `pi -p` against a real LLM, and the JS-side
+ *      `setInterval` poller observes the wrapper's outcome sidecar and
+ *      dispatches a UI notification through the captured fake UI.
+ *
+ * Fixture shape: mirrors the production user-onboarding flow rather
+ * than pre-bootstrapping a healthy vault. The user has run
+ * `napkin init` (which writes `.napkin/config.json` and any vault
+ * content) and then launches `pi`; from there the extension's
+ * session_start handler does the git init + scaffold + commit. The
+ * fixture therefore writes ONLY the artefacts a real user genuinely
+ * brings — `.napkin/config.json` and a content file — and lets the
+ * production code do the rest. Fast-level health-check regressions
+ * (auto-init failure, gitignore install regression, commit failure)
+ * surface here; the previous fixture pre-bootstrapped git and could
+ * not see them.
+ *
+ * Trade-off: gate wall time grows by the local git work auto-init
+ * does (a few seconds at most); cost stays near $0.50/run because
+ * the LLM-driven distill phase dominates.
  *
  * Strict superset of the prompt-only gate that this script replaces:
- * post-conditions cover the wrapper's outcome class AND the JS-side
- * notification severity AND the bare-origin push (which the prompt-only
- * harness couldn't validate).
+ * post-conditions cover the auto-init's filesystem effects AND the
+ * wrapper's outcome class AND the JS-side notification severity AND
+ * the bare-origin push (none of which the prompt-only harness could
+ * validate).
  *
  * What this catches that a prompt-only harness can't:
  *
+ *   - Auto-init regressions (git init failure, missing `.gitignore`
+ *     managed block, missing initial commit, info notify silenced).
  *   - Races between the wrapper's worktree teardown and its outcome
  *     write (the JS poller can observe worktree-gone with no outcome
  *     yet, dispatching the wrong notification).
@@ -29,17 +53,34 @@
  * What it does:
  *
  *   1. Creates a tmpdir at `${TMPDIR:-/tmp}/napkin-verify-e2e-XXXXXX`.
- *   2. `git init -b main` a vault. Writes a sibling-layout `.napkin/config.json`
- *      with `vault.root: ".."` and `distill.enabled = true` so napkin
- *      resolves `contentPath=<vault>` and `runDistill` routes through
- *      the worktree spawn path (NOT the legacy-embedded fallback).
- *   3. `git init --bare` a sibling origin and `git push origin main` so
- *      the wrapper's push step has somewhere to land. The bare flag is
- *      mandatory: non-bare repos refuse pushes to checked-out branches,
- *      so the agent's push would fail and the outcome would be
- *      `merged-local` (warning) instead of `merged-content` (info),
- *      misclassifying the GREEN signature.
- *   4. Allocates a SessionManager-managed session JSONL path under the
+ *   2. Builds a vault that simulates the post-`napkin init` state:
+ *      writes a sibling-layout `.napkin/config.json` (`vault.root:
+ *      ".."`, `distill.enabled = true`) and a `note.md` content file.
+ *      Does NOT run `git init`, does NOT scaffold `.gitignore`, does
+ *      NOT commit — those are session_start's job.
+ *   3. Builds a mock `ExtensionAPI` and calls `distillExtension(api)`
+ *      so the production handlers and `/distill` command are
+ *      registered against the captured spy.
+ *   4. Triggers `captured.handlers.session_start({ reason: "new" },
+ *      ctx)` — this fires `ensureVaultReadyForDistill(vault, "fast")`
+ *      which performs `git init`, installs the managed gitignore
+ *      block, runs `git add . && git commit`, and (via the index.ts
+ *      handler) pushes an info notify announcing the init.
+ *   5. Asserts the auto-init's filesystem + notify post-conditions:
+ *      `.git/` exists, `.gitignore` contains the BEGIN/END markers and
+ *      canonical block content, `.napkin/config.json` is tracked, HEAD
+ *      points to a real commit, and the captured notify spy contains
+ *      the canonical "Initialized git repo in your vault for
+ *      auto-distill" info notification.
+ *   6. THEN sets up the bare origin: `git init --bare origin/`,
+ *      `git remote add origin <bare>`, `git push origin main`. Bare
+ *      flag is mandatory: non-bare repos refuse pushes to checked-out
+ *      branches, so the agent's push would fail and the outcome would
+ *      be `merged-local` (warning) instead of `merged-content` (info),
+ *      misclassifying the GREEN signature. This is the only piece of
+ *      test scaffolding that is NOT user-flow — wrappers need a
+ *      remote to push to.
+ *   7. Allocates a SessionManager-managed session JSONL path under the
  *      tmpdir, then writes a synthetic 6-message conversation directly
  *      to that path via `writeSyntheticSession()`. The wrapper's
  *      session-fork step reads from disk via `getSessionFile()`, so as
@@ -47,19 +88,17 @@
  *      ownership is unambiguous: SessionManager allocates the path,
  *      writeSyntheticSession writes the JSONL content, the wrapper
  *      reads it later.
- *   5. Builds a mock `ExtensionAPI` and calls `distillExtension(api)` so
- *      the production handlers and `/distill` command are registered
- *      against the captured spy.
- *   6. Constructs a fake `RunCtx` (cwd=vault, sessionManager, fake UI)
- *      and triggers `captured.commands.distill?.handler("", ctx)`. This
+ *   8. Triggers `captured.commands.distill?.handler("", ctx)`. This
  *      bypasses the 60-minute auto-distill interval — the manual
  *      handler invokes `runDistill(ctx)` immediately, which calls
- *      `runDistillWith` and sets up the real 2-second `setInterval`
+ *      `ensureVaultReadyForDistill(vault, "full")` (full-level
+ *      invariants on a healthy vault → no findings) and then
+ *      `runDistillWith` to set up the real 2-second `setInterval`
  *      poll loop.
- *   7. Waits up to `distill.maxDurationMinutes * 60s + 30s` slack for the
+ *   9. Waits up to `distill.maxDurationMinutes * 60s + 30s` slack for the
  *      poll loop to fire its dispatch (`ctx.ui.notify` is captured into
  *      `notifyCalls`).
- *   8. Asserts on the dispatched notification + filesystem post-conditions:
+ *  10. Asserts on the dispatched notification + filesystem post-conditions:
  *
  *      RED-gate FAIL signature (current buggy code; what we expect
  *      against the unfixed branch):
@@ -76,6 +115,7 @@
  *        - all filesystem post-conditions green (no markers, default
  *          branch, squash committed, branch removed, worktree removed,
  *          outcome class merged-content, origin advanced)
+ *        - auto-init notify present in `notifyCalls`
  *
  * Production code never runs this. Lives outside `extensions/` to avoid
  * being mistaken for a runtime asset.
@@ -112,6 +152,11 @@ import {
   makeMockExtensionAPI,
   type NotifyCall,
 } from "../extensions/distill/_test-helpers";
+import {
+  BLOCK_CONTENT,
+  BLOCK_MARKER_BEGIN,
+  BLOCK_MARKER_END,
+} from "../extensions/distill/auto-setup";
 import { writeSyntheticSession } from "./_e2e-helpers";
 
 // ---------------------------------------------------------------------------
@@ -225,13 +270,72 @@ interface Fixture {
   parentCwd: string;
   sessionsDir: string;
   defaultBranch: string;
-  /** SHA of the vault's default branch BEFORE the agent ran. */
+  /**
+   * SHA of the vault's default branch BEFORE the agent ran. Captured
+   * AFTER session_start has driven `ensureVaultReadyForDistill(vault,
+   * "fast")` to install `.git/` and produce the initial commit, then
+   * after `wireBareOrigin` pushes `main` to the bare origin, so this
+   * is the commit that the bare origin's `main` ref will track at
+   * the start of the distill phase.
+   */
   startSha: string;
   /** SHA of origin/main BEFORE the agent ran (post initial push). */
   originStartSha: string;
 }
 
-function setupFixture(): Fixture {
+/**
+ * Augment `process.env` with a fixed git identity + a global-config
+ * override that disables gpg signing. Mirrors the pattern used by
+ * `auto-setup.test.ts`'s `runSetup`: `ensureVaultReadyForDistill`
+ * shells out to `git` with `env: process.env`, so identity vars must
+ * be on `process.env` (not just on a per-spawn `env` map) for the
+ * auto-init's `git commit` to succeed under a CI runner whose global
+ * `commit.gpgsign=true` would otherwise refuse to commit unsigned.
+ *
+ * Returns a `restore` callback that reverts the mutations. Callers
+ * MUST invoke it on the fail path AND the happy path — the env is
+ * process-scoped state and leaving it dirty would affect any
+ * subsequent code paths that introspect git identity.
+ */
+function installGitEnvOnProcess(): { restore: () => void } {
+  const saved = {
+    GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME,
+    GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL,
+    GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME,
+    GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL,
+    GIT_CONFIG_COUNT: process.env.GIT_CONFIG_COUNT,
+    GIT_CONFIG_KEY_0: process.env.GIT_CONFIG_KEY_0,
+    GIT_CONFIG_VALUE_0: process.env.GIT_CONFIG_VALUE_0,
+  };
+  process.env.GIT_AUTHOR_NAME = "verify";
+  process.env.GIT_AUTHOR_EMAIL = "verify@example.com";
+  process.env.GIT_COMMITTER_NAME = "verify";
+  process.env.GIT_COMMITTER_EMAIL = "verify@example.com";
+  process.env.GIT_CONFIG_COUNT = "1";
+  process.env.GIT_CONFIG_KEY_0 = "commit.gpgsign";
+  process.env.GIT_CONFIG_VALUE_0 = "false";
+  return {
+    restore() {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    },
+  };
+}
+
+/**
+ * Build the on-disk shape that a real user brings to a fresh
+ * `pi`-on-vault session: `.napkin/config.json` (sibling layout +
+ * distill enabled) and a single `note.md` content file. Deliberately
+ * does NOT run `git init` and does NOT commit — auto-init owns those
+ * steps. Bare origin and remote wiring also live elsewhere because
+ * they aren't part of `napkin init`'s footprint.
+ *
+ * Returns the partial fixture without `startSha` / `originStartSha`;
+ * the caller fills those in after auto-init + bare-origin wiring.
+ */
+function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
   const tmpdir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-verify-e2e-"));
   const vaultPath = path.join(tmpdir, "vault");
   const originPath = path.join(tmpdir, "origin.git");
@@ -242,41 +346,11 @@ function setupFixture(): Fixture {
   fs.mkdirSync(parentCwd);
   fs.mkdirSync(sessionsDir);
 
-  const env = {
-    ...process.env,
-    GIT_AUTHOR_NAME: "verify",
-    GIT_AUTHOR_EMAIL: "verify@example.com",
-    GIT_COMMITTER_NAME: "verify",
-    GIT_COMMITTER_EMAIL: "verify@example.com",
-  };
-  const gitVault = (...args: string[]): string => {
-    const r = spawnSync("git", ["-C", vaultPath, ...args], {
-      env,
-      encoding: "utf-8",
-    });
-    if (r.status !== 0) {
-      throw new Error(
-        `git ${args.join(" ")} failed (rc=${r.status}): ${r.stderr.trim()}`,
-      );
-    }
-    return r.stdout;
-  };
-
-  // Vault: default branch `main`, ephemeral identity, signing off.
-  const initRc = spawnSync("git", ["init", "-b", "main", vaultPath], { env });
-  if (initRc.status !== 0) {
-    throw new Error(`git init failed in ${vaultPath}`);
-  }
-  gitVault("config", "user.email", "verify@example.com");
-  gitVault("config", "user.name", "verify");
-  gitVault("config", "commit.gpgsign", "false");
-
-  // Sibling-layout config: `vault.root: ".."` (so napkin resolves
-  // contentPath=<vault>) AND `distill.enabled=true` (so runDistill
-  // routes through worktreeSpawnFn rather than legacySpawnFn). Both
-  // keys are required for the production worktree-backed code path
-  // to fire — without `vault.root`, the vault is treated as
-  // legacy-embedded and bypasses the wrapper entirely.
+  // `napkin init` produces `.napkin/config.json`; `vault.root: ".."`
+  // marks the vault as sibling-layout so napkin resolves
+  // contentPath=<vault>, and `distill.enabled=true` opts into the
+  // worktree-backed path (instead of the legacy tmpdir spawn that
+  // would bypass the wrapper).
   fs.mkdirSync(path.join(vaultPath, ".napkin"), { recursive: true });
   fs.writeFileSync(
     path.join(vaultPath, ".napkin", "config.json"),
@@ -291,31 +365,14 @@ function setupFixture(): Fixture {
     }),
   );
 
+  // User content present at the moment `pi` launches. Auto-init's
+  // `git add .` will pick this up in the initial commit, mirroring
+  // the production sequence where notes typically pre-exist the
+  // first session_start.
   fs.writeFileSync(
     path.join(vaultPath, "note.md"),
     "---\ntitle: x\n---\n# baseline\n",
   );
-  gitVault("add", "-A");
-  gitVault("commit", "-m", "verify: baseline");
-
-  // Bare origin so the wrapper's push lands without needing
-  // `receive.denyCurrentBranch=ignore`. A non-bare init refuses pushes
-  // to a checked-out branch on modern git, which would steer the
-  // outcome to `merged-local` (warning) instead of `merged-content`
-  // (info) and misclassify the GREEN signature.
-  const originInit = spawnSync("git", ["init", "--bare", originPath], { env });
-  if (originInit.status !== 0) {
-    throw new Error(`git init --bare failed in ${originPath}`);
-  }
-  gitVault("remote", "add", "origin", originPath);
-  gitVault("push", "origin", "main");
-
-  const startSha = gitVault("rev-parse", "HEAD").trim();
-  const originStartSha = spawnSync(
-    "git",
-    ["-C", originPath, "rev-parse", "main"],
-    { env, encoding: "utf-8" },
-  ).stdout.trim();
 
   return {
     tmpdir,
@@ -324,9 +381,56 @@ function setupFixture(): Fixture {
     parentCwd,
     sessionsDir,
     defaultBranch: "main",
-    startSha,
-    originStartSha,
   };
+}
+
+/**
+ * Wire the bare origin AFTER auto-init has produced `main`. Runs
+ * `git init --bare origin/`, points the vault's `origin` remote at
+ * it, and pushes `main` so the wrapper's later `git push origin
+ * <branch>` has a parent commit to fast-forward from. Returns the
+ * SHAs the gate uses as the "before-distill" reference.
+ *
+ * Bare flag is mandatory: a non-bare init refuses pushes to a
+ * checked-out branch on modern git, steering the wrapper's outcome
+ * to `merged-local` (warning) instead of `merged-content` (info) and
+ * misclassifying the GREEN signature. This is the only piece of test
+ * scaffolding that is not part of the user-onboarding flow — wrappers
+ * need a remote.
+ */
+function wireBareOrigin(
+  fixture: Omit<Fixture, "startSha" | "originStartSha">,
+): { startSha: string; originStartSha: string } {
+  const gitVault = (...args: string[]): string => {
+    const r = spawnSync("git", ["-C", fixture.vaultPath, ...args], {
+      encoding: "utf-8",
+      env: process.env,
+    });
+    if (r.status !== 0) {
+      throw new Error(
+        `git ${args.join(" ")} failed (rc=${r.status}): ${r.stderr.trim()}`,
+      );
+    }
+    return r.stdout;
+  };
+
+  const originInit = spawnSync("git", ["init", "--bare", fixture.originPath], {
+    env: process.env,
+  });
+  if (originInit.status !== 0) {
+    throw new Error(`git init --bare failed in ${fixture.originPath}`);
+  }
+  gitVault("remote", "add", "origin", fixture.originPath);
+  gitVault("push", "origin", "main");
+
+  const startSha = gitVault("rev-parse", "HEAD").trim();
+  const originStartSha = spawnSync(
+    "git",
+    ["-C", fixture.originPath, "rev-parse", "main"],
+    { encoding: "utf-8", env: process.env },
+  ).stdout.trim();
+
+  return { startSha, originStartSha };
 }
 
 // ---------------------------------------------------------------------------
@@ -412,6 +516,243 @@ function readOutcomeSidecar(vaultPath: string): OutcomeSidecar | null {
   };
 }
 
+type BlockBodyExtraction =
+  | { ok: true; lines: string[] }
+  | { ok: false; reason: string };
+
+/**
+ * Extract the lines strictly BETWEEN `BLOCK_MARKER_BEGIN` and
+ * `BLOCK_MARKER_END` in the given `.gitignore` content, normalised to
+ * LF for line splitting (CRLF input round-trips byte-for-byte through
+ * `mergeManagedBlock`, but the managed-body comparison is a content
+ * check, not a line-ending check). Tolerates trailing whitespace on
+ * marker lines (`mergeManagedBlock` does the same when reading) but
+ * rejects indented markers — those aren't ours and shouldn't match.
+ *
+ * Returns `{ ok: true, lines }` with the body lines in document order,
+ * or `{ ok: false, reason }` describing exactly which marker invariant
+ * failed (missing, duplicated, mis-ordered).
+ */
+function extractManagedBlockBody(content: string): BlockBodyExtraction {
+  const lines = content.replace(/\r\n/g, "\n").split("\n");
+  const beginIndices: number[] = [];
+  const endIndices: number[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const rtrimmed = lines[i].replace(/\s+$/, "");
+    if (rtrimmed === BLOCK_MARKER_BEGIN) beginIndices.push(i);
+    else if (rtrimmed === BLOCK_MARKER_END) endIndices.push(i);
+  }
+  if (beginIndices.length === 0)
+    return { ok: false, reason: "BEGIN marker missing" };
+  if (endIndices.length === 0)
+    return { ok: false, reason: "END marker missing" };
+  if (beginIndices.length > 1) {
+    return {
+      ok: false,
+      reason: `${beginIndices.length} BEGIN markers (expected 1)`,
+    };
+  }
+  if (endIndices.length > 1) {
+    return {
+      ok: false,
+      reason: `${endIndices.length} END markers (expected 1)`,
+    };
+  }
+  if (beginIndices[0] >= endIndices[0]) {
+    return {
+      ok: false,
+      reason: `END marker (line ${endIndices[0] + 1}) precedes BEGIN marker (line ${beginIndices[0] + 1})`,
+    };
+  }
+  return {
+    ok: true,
+    lines: lines.slice(beginIndices[0] + 1, endIndices[0]),
+  };
+}
+
+/**
+ * Render a useful diagnostic when a `.gitignore` managed block exists
+ * but its body diverges from `BLOCK_CONTENT`. Reports the first
+ * structural mismatch (length differs, line at index N differs) so a
+ * fixture-format change that drops one line surfaces with the dropped
+ * line in the gate output rather than "drift" alone.
+ */
+function describeBlockBodyDrift(actual: readonly string[]): string {
+  if (actual.length !== BLOCK_CONTENT.length) {
+    return `block body length=${actual.length}, expected ${BLOCK_CONTENT.length}`;
+  }
+  for (let i = 0; i < BLOCK_CONTENT.length; i++) {
+    if (actual[i] !== BLOCK_CONTENT[i]) {
+      return `block body line ${i + 1} differs: got ${JSON.stringify(actual[i])}, expected ${JSON.stringify(BLOCK_CONTENT[i])}`;
+    }
+  }
+  // Unreachable: callers gate on `!giBlockMatches`, which is exactly
+  // the disjunction of the two return branches above (length mismatch
+  // OR some line mismatch). Reaching this throw means the caller-side
+  // guard regressed — surface that loudly rather than printing a
+  // generic "drift" string that hides the bug.
+  throw new Error(
+    "describeBlockBodyDrift: unreachable — actual matches BLOCK_CONTENT (caller gate broken)",
+  );
+}
+
+/**
+ * Assert the filesystem AND user-visible-notify effects of
+ * session_start's auto-init pass. These are the cheap fast-level
+ * invariants that `ensureVaultReadyForDistill(vault, "fast")` plus
+ * the index.ts session_start handler are contracted to leave behind
+ * on a vault entering the gate without a `.git/`:
+ *
+ *   - `<vault>/.git/` exists (auto-init ran `git init -q -b main`).
+ *   - `<vault>/.gitignore` contains the BEGIN/END managed-block markers
+ *     and every line of the canonical `BLOCK_CONTENT` between them.
+ *   - `.napkin/config.json` is tracked by git (auto-init's `git add .`
+ *     respected the just-installed gitignore but still picked up the
+ *     config file).
+ *   - HEAD points to a real commit (auto-init produced "napkin: initial
+ *     vault commit (auto-distill setup)").
+ *   - `notifyCalls` contains the canonical "Initialized git repo in
+ *     your vault for auto-distill" info notify dispatched by the
+ *     session_start handler. The notify is the user-visible signal
+ *     that fail-soft branched into the success path; pinning it here
+ *     (rather than after the LLM-driven distill phase) keeps the
+ *     gate's fail-fast promise for the notify-silenced regression
+ *     class.
+ *
+ * These are asserted BEFORE the bare-origin wiring + `/distill` trigger
+ * so a regression in the auto-init path is reported as soon as it
+ * fires — not after a 2-minute wait for the wrapper to do work that
+ * was already doomed.
+ */
+function assertAutoInitPostConditions(
+  vaultPath: string,
+  notifyCalls: readonly NotifyCall[],
+): PostConditionResult[] {
+  const results: PostConditionResult[] = [];
+
+  // .git/ presence — the bare-minimum invariant: auto-init refused to
+  // run, ran but failed silently, or skipped the path on a vault it
+  // misclassified as legacy-embedded.
+  const gitDirExists = fs.existsSync(path.join(vaultPath, ".git"));
+  results.push({
+    name: "auto-init created <vault>/.git/",
+    passed: gitDirExists,
+    detail: gitDirExists
+      ? "present"
+      : "missing — auto-init's git init step did not run or failed silently",
+  });
+
+  // .gitignore managed block — extract the body BETWEEN the BEGIN/END
+  // markers and compare ordered against `BLOCK_CONTENT`. A whole-file
+  // substring check (`giContent.includes(line)`) is partly tautological
+  // (the canonical content includes blank-line separators, and
+  // `String.includes("")` is unconditionally true) AND not
+  // locality-anchored (a regression that drops the markers but leaks
+  // canonical lines into user territory would pass). Failing this
+  // means `mergeManagedBlock` regressed (didn't install, misformatted
+  // markers, dropped lines, reordered lines, or moved lines outside
+  // the markers).
+  const giPath = path.join(vaultPath, ".gitignore");
+  const giExists = fs.existsSync(giPath);
+  const giContent = giExists ? fs.readFileSync(giPath, "utf-8") : "";
+  const giBlockBody = giExists
+    ? extractManagedBlockBody(giContent)
+    : { ok: false as const, reason: ".gitignore missing" };
+  const giBlockMatches =
+    giBlockBody.ok &&
+    giBlockBody.lines.length === BLOCK_CONTENT.length &&
+    giBlockBody.lines.every((l, i) => l === BLOCK_CONTENT[i]);
+  results.push({
+    name: "auto-init wrote .gitignore with the managed block + canonical content",
+    passed: giExists && giBlockBody.ok && giBlockMatches,
+    detail: !giExists
+      ? ".gitignore missing"
+      : !giBlockBody.ok
+        ? giBlockBody.reason
+        : giBlockMatches
+          ? "markers + canonical body present (ordered match)"
+          : describeBlockBodyDrift(giBlockBody.lines),
+  });
+
+  // .napkin/config.json tracked — the full-level invariant that
+  // closes Issue #14 also has a fast-level shadow here: auto-init's
+  // initial `git add .` pass should have staged config.json into the
+  // first commit. If it didn't, the next `worktree add HEAD` won't
+  // copy config.json into the worktree and napkin will fall back to
+  // legacy-embedded layout.
+  const lsConfig = spawnSync(
+    "git",
+    ["-C", vaultPath, "ls-files", "--error-unmatch", ".napkin/config.json"],
+    { encoding: "utf-8", env: process.env },
+  );
+  results.push({
+    name: "auto-init's initial commit tracks .napkin/config.json",
+    passed: lsConfig.status === 0,
+    detail:
+      lsConfig.status === 0
+        ? "tracked"
+        : `untracked (rc=${lsConfig.status}): ${lsConfig.stderr.trim()}`,
+  });
+
+  // HEAD resolves to a real commit. `rev-parse --verify HEAD` exits
+  // non-zero on a commit-less repo (the failure mode that motivates
+  // the seed-empty-commit branch in `ensureVaultReadyForDistill`).
+  const headProbe = spawnSync(
+    "git",
+    ["-C", vaultPath, "rev-parse", "--verify", "HEAD"],
+    { encoding: "utf-8", env: process.env },
+  );
+  const headSha = headProbe.stdout.trim();
+  results.push({
+    name: "auto-init produced an initial commit (HEAD resolves)",
+    passed: headProbe.status === 0 && headSha.length === 40,
+    detail:
+      headProbe.status === 0
+        ? `HEAD=${headSha.slice(0, 12)}`
+        : `rev-parse failed (rc=${headProbe.status}): ${headProbe.stderr.trim()}`,
+  });
+
+  // session_start emitted the canonical first-run notify dispatched
+  // by the index.ts handler once auto-init lands a fresh `git init`
+  // + initial commit. The exact wording lives in
+  // `extensions/distill/index.ts` (look for "Initialized git repo in
+  // your vault for auto-distill"); pin the prefix here so a copy
+  // change in the handler surfaces as a gate failure rather than a
+  // silent loss of the user-visible signal. Severity must be `info`:
+  // an `error` notify here means the auto-init's fail-soft branch
+  // fired instead of the success branch.
+  //
+  // Asserted at fast-level so a notify-silenced regression surfaces
+  // before the gate spends ~$0.50 on the LLM-driven distill phase
+  // (the post-LLM `assertGreenPostConditions` has its own notify
+  // pin for the `Distillation complete (...)` dispatch).
+  const autoInitNotify = notifyCalls.find((n) =>
+    n.msg.startsWith("Initialized git repo in your vault for auto-distill"),
+  );
+  results.push({
+    name: "session_start emitted the auto-init success notify",
+    passed:
+      !!autoInitNotify &&
+      autoInitNotify.severity === "info" &&
+      autoInitNotify.msg.includes(
+        "napkin: initial vault commit (auto-distill setup)",
+      ),
+    detail: autoInitNotify
+      ? `severity=${autoInitNotify.severity}, msg.startsWith("Initialized git repo...")`
+      : `not present in ${notifyCalls.length} captured notify call(s)`,
+  });
+
+  return results;
+}
+
+/**
+ * Assert the distill-phase post-conditions: the JS poller's outcome
+ * notify, the wrapper's filesystem effects on the vault, the bare
+ * origin's advance from `originStartSha`, and the outcome sidecar
+ * class. Auto-init's filesystem + notify post-conditions live in
+ * {@link assertAutoInitPostConditions} and are asserted before this
+ * function runs (fail-fast before the LLM-driven distill phase).
+ */
 function assertGreenPostConditions(
   fixture: Fixture,
   notify: NotifyCall | null,
@@ -442,7 +783,7 @@ function assertGreenPostConditions(
   const grep = spawnSync(
     "grep",
     ["-rEnH", "^<{7} |^={7}$|^>{7} ", "--include=*.md", fixture.vaultPath],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   results.push({
     name: "no conflict markers in *.md",
@@ -459,7 +800,7 @@ function assertGreenPostConditions(
   const headRef = spawnSync(
     "git",
     ["-C", fixture.vaultPath, "symbolic-ref", "--short", "HEAD"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   const head = headRef.stdout.trim();
   results.push({
@@ -471,7 +812,12 @@ function assertGreenPostConditions(
         : `symbolic-ref failed: ${headRef.stderr.trim()}`,
   });
 
-  // (4) Squash commit landed on default — count >= 2 (1 baseline + agent).
+  // (4) Agent's squash commit landed on the default branch — at least
+  // one commit since `startSha` (auto-init's initial commit, captured
+  // by `wireBareOrigin` AFTER session_start). With the new fixture
+  // the agent's squash commit is the only commit in `startSha..HEAD`
+  // on a clean run; the threshold tolerates fixture variants that
+  // may produce additional intermediate commits.
   const commitCount = spawnSync(
     "git",
     [
@@ -481,7 +827,7 @@ function assertGreenPostConditions(
       "--count",
       `${fixture.startSha}..HEAD`,
     ],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   const count = Number.parseInt(commitCount.stdout.trim(), 10);
   results.push({
@@ -496,7 +842,7 @@ function assertGreenPostConditions(
   const branchList = spawnSync(
     "git",
     ["-C", fixture.vaultPath, "branch", "--list", "distill/*"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   results.push({
     name: "all distill/* branches removed",
@@ -511,7 +857,7 @@ function assertGreenPostConditions(
   const worktreeList = spawnSync(
     "git",
     ["-C", fixture.vaultPath, "worktree", "list", "--porcelain"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   const distillWorktreesStillTracked = worktreeList.stdout
     .split("\n")
@@ -541,7 +887,7 @@ function assertGreenPostConditions(
   const originHead = spawnSync(
     "git",
     ["-C", fixture.originPath, "rev-parse", "main"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   const originHeadSha = originHead.stdout.trim();
   results.push({
@@ -659,7 +1005,7 @@ async function main(): Promise<number> {
   const piCheck = spawnSync(
     process.env.NAPKIN_DISTILL_PI_BIN || "pi",
     ["--version"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   if (piCheck.error) {
     console.error(
@@ -669,100 +1015,190 @@ async function main(): Promise<number> {
   }
 
   console.log(`verify-e2e: model=${model}`);
-  console.log("Setting up fixture...");
+  console.log(
+    "Setting up fixture (post-`napkin init` shape: .napkin/config.json + content; no .git/)...",
+  );
   const startMs = Date.now();
-  let fixture: Fixture;
+
+  // Install the git identity + signing override on `process.env`
+  // BEFORE any subprocess that spawns git — `ensureVaultReadyForDistill`
+  // shells out via `runGit` with `env: process.env`, so identity must
+  // live there for auto-init's `git commit` to succeed under a CI
+  // runner whose global `commit.gpgsign=true` would otherwise refuse
+  // to commit unsigned. Restored in the bottom-of-main `finally` so
+  // every exit path — happy, fail-fast, exception — leaves the
+  // process env clean.
+  const gitEnv = installGitEnvOnProcess();
+
+  // Tracked here so the bottom-of-main `finally` can clean up the
+  // tmpdir even when an early-exit branch returns before the fixture
+  // is fully built. `null` until `setupFixture` succeeds.
+  let tmpdir: string | null = null;
+
   try {
-    fixture = setupFixture();
-  } catch (e) {
-    console.error(`error: fixture setup failed: ${(e as Error).message}`);
-    return 2;
-  }
-
-  console.log(`  tmpdir:  ${fixture.tmpdir}`);
-  console.log(`  vault:   ${fixture.vaultPath}`);
-  console.log(`  origin:  ${fixture.originPath}`);
-  console.log("");
-
-  // Allocate session via SessionManager (path allocation only) and
-  // overwrite via writeSyntheticSession (raw JSONL content). Order is
-  // unambiguous: SessionManager owns the path, writeSyntheticSession
-  // owns the content, the wrapper subprocess later reads from disk.
-  const sm = SessionManager.create(fixture.parentCwd, fixture.sessionsDir);
-  const sessionFile = sm.getSessionFile();
-  if (!sessionFile) {
-    console.error("error: SessionManager allocated no session file");
-    if (!args.keepTmpdir) {
-      fs.rmSync(fixture.tmpdir, { recursive: true, force: true });
+    let fixturePartial: Omit<Fixture, "startSha" | "originStartSha">;
+    try {
+      fixturePartial = setupFixture();
+    } catch (e) {
+      console.error(`error: fixture setup failed: ${(e as Error).message}`);
+      return 2;
     }
-    return 2;
-  }
-  writeSyntheticSession(sessionFile, fixture.vaultPath);
+    tmpdir = fixturePartial.tmpdir;
 
-  // Wire the extension. distillExtension(api) registers handlers + the
-  // /distill command against the captured spy.
-  const { api, captured } = makeMockExtensionAPI();
-  // biome-ignore lint/suspicious/noExplicitAny: opaque ExtensionAPI shape
-  distillExtension(api as any);
-  if (!captured.commands.distill) {
-    console.error("error: /distill command not registered by extension");
-    if (!args.keepTmpdir) {
-      fs.rmSync(fixture.tmpdir, { recursive: true, force: true });
+    console.log(`  tmpdir:  ${fixturePartial.tmpdir}`);
+    console.log(`  vault:   ${fixturePartial.vaultPath}`);
+    console.log(`  origin:  ${fixturePartial.originPath}`);
+    console.log("");
+
+    // Wire the extension BEFORE driving the auto-init: distillExtension
+    // registers handlers + the /distill command against the captured
+    // spy. Tighter ordering than the previous fixture (which built the
+    // mock API only at the /distill trigger): the auto-init now runs
+    // through `captured.handlers.session_start`, which has to exist
+    // before we fire it.
+    const { api, captured } = makeMockExtensionAPI();
+    // biome-ignore lint/suspicious/noExplicitAny: opaque ExtensionAPI shape
+    distillExtension(api as any);
+    if (!captured.handlers.session_start) {
+      console.error("error: session_start handler not registered by extension");
+      return 2;
     }
-    return 2;
+    if (!captured.commands.distill) {
+      console.error("error: /distill command not registered by extension");
+      return 2;
+    }
+
+    // Allow the wrapper subprocess to inherit the model selection.
+    process.env.NAPKIN_DISTILL_MODEL = model;
+
+    // Allocate session via SessionManager (path allocation only) and
+    // overwrite via writeSyntheticSession (raw JSONL content). Order is
+    // unambiguous: SessionManager owns the path, writeSyntheticSession
+    // owns the content, the wrapper subprocess later reads from disk.
+    const sm = SessionManager.create(
+      fixturePartial.parentCwd,
+      fixturePartial.sessionsDir,
+    );
+    const sessionFile = sm.getSessionFile();
+    if (!sessionFile) {
+      console.error("error: SessionManager allocated no session file");
+      return 2;
+    }
+    writeSyntheticSession(sessionFile, fixturePartial.vaultPath);
+
+    const { ui, notifyCalls } = makeFakeUI();
+    // biome-ignore lint/suspicious/noExplicitAny: minimal RunCtx
+    const ctx: any = {
+      cwd: fixturePartial.vaultPath,
+      sessionManager: sm,
+      hasUI: true,
+      ui,
+    };
+
+    // ----- Phase 1: drive auto-init through session_start ----------------------
+    //
+    // Mirrors production: a fresh `pi` invocation in a vault that has
+    // `.napkin/config.json` but no `.git/`. session_start calls
+    // `ensureVaultReadyForDistill(vault, "fast")` which performs
+    // `git init -q -b main`, installs the managed gitignore block,
+    // runs `git add . && git commit`, and (via the index.ts handler)
+    // pushes an info notify announcing the init.
+    console.log("Triggering session_start (auto-init phase)...");
+    const autoInitStart = Date.now();
+    await captured.handlers.session_start({ reason: "new" }, ctx);
+    const autoInitWallMs = Date.now() - autoInitStart;
+    console.log(
+      `  auto-init wall: ${(autoInitWallMs / 1000).toFixed(2)}s ` +
+        `(notify spy captured ${notifyCalls.length} call(s))`,
+    );
+
+    const autoInitResults = assertAutoInitPostConditions(
+      fixturePartial.vaultPath,
+      notifyCalls,
+    );
+    const autoInitAllPassed = autoInitResults.every((r) => r.passed);
+    if (!autoInitAllPassed) {
+      // Auto-init regressed — fail fast instead of waiting on a wrapper
+      // run that's now guaranteed to misbehave.
+      console.log("");
+      console.log("Auto-init phase failed; skipping /distill trigger.");
+      for (const r of autoInitResults) {
+        console.log(`  ${r.passed ? "✓" : "✗"} ${r.name}`);
+        if (!r.passed) console.log(`      ${r.detail}`);
+      }
+      return 1;
+    }
+
+    // ----- Phase 2: bare origin (test scaffolding only) ------------------------
+    //
+    // Auto-init produced `main` with the initial commit; now we wire a
+    // bare origin so the wrapper's `git push origin <branch>` later has
+    // a parent commit to fast-forward from. This is the only piece of
+    // setup that is NOT user-flow — wrappers need a remote.
+    let originRefs: { startSha: string; originStartSha: string };
+    try {
+      originRefs = wireBareOrigin(fixturePartial);
+    } catch (e) {
+      console.error(
+        `error: bare-origin wiring failed: ${(e as Error).message}`,
+      );
+      return 2;
+    }
+    const fixture: Fixture = { ...fixturePartial, ...originRefs };
+
+    // ----- Phase 3: drive /distill -------------------------------------------
+    const triggerStart = Date.now();
+    console.log(
+      `Triggering /distill (timeout ${DISTILL_MAX_DURATION_MINUTES}m + ${POLLER_DISPATCH_SLACK_SECS}s slack)...`,
+    );
+    await captured.commands.distill.handler("", ctx);
+
+    // Wait for the JS poller to fire its dispatch.
+    const timeoutMs =
+      DISTILL_MAX_DURATION_MINUTES * 60 * 1000 +
+      POLLER_DISPATCH_SLACK_SECS * 1000;
+    const notify = await waitForOutcomeNotify(notifyCalls, timeoutMs);
+    const triggerWallMs = Date.now() - triggerStart;
+    console.log(
+      `Notify dispatch wall: ${(triggerWallMs / 1000).toFixed(1)}s (poll loop tick is 2s)`,
+    );
+
+    // Read the outcome sidecar (filesystem evidence — independent of the
+    // notification dispatch path).
+    const outcome = readOutcomeSidecar(fixture.vaultPath);
+    const gate = classifyGate(notify, outcome);
+
+    // Combined summary: auto-init's invariants (captured at phase 1) +
+    // the distill phase's notify / outcome / filesystem invariants.
+    // The auto-init results are re-included here from the phase-1
+    // capture so the final summary lists every checked invariant in
+    // one PASS/FAIL block, even though auto-init was already asserted
+    // earlier for fail-fast.
+    const results = [
+      ...autoInitResults,
+      ...assertGreenPostConditions(fixture, notify),
+    ];
+    const passed = printSummary(
+      results,
+      notify,
+      outcome,
+      gate,
+      fixture,
+      model,
+      startMs,
+    );
+
+    return passed ? 0 : 1;
+  } finally {
+    gitEnv.restore();
+    if (tmpdir) {
+      if (args.keepTmpdir) {
+        console.log(`  --keep-tmpdir: leaving ${tmpdir} for inspection.`);
+      } else {
+        fs.rmSync(tmpdir, { recursive: true, force: true });
+      }
+    }
   }
-
-  // Allow the wrapper subprocess to inherit the model selection.
-  process.env.NAPKIN_DISTILL_MODEL = model;
-
-  const { ui, notifyCalls } = makeFakeUI();
-  // biome-ignore lint/suspicious/noExplicitAny: minimal RunCtx
-  const ctx: any = {
-    cwd: fixture.vaultPath,
-    sessionManager: sm,
-    hasUI: true,
-    ui,
-  };
-
-  const triggerStart = Date.now();
-  console.log(
-    `Triggering /distill (timeout ${DISTILL_MAX_DURATION_MINUTES}m + ${POLLER_DISPATCH_SLACK_SECS}s slack)...`,
-  );
-  await captured.commands.distill.handler("", ctx);
-
-  // Wait for the JS poller to fire its dispatch.
-  const timeoutMs =
-    DISTILL_MAX_DURATION_MINUTES * 60 * 1000 +
-    POLLER_DISPATCH_SLACK_SECS * 1000;
-  const notify = await waitForOutcomeNotify(notifyCalls, timeoutMs);
-  const triggerWallMs = Date.now() - triggerStart;
-  console.log(
-    `Notify dispatch wall: ${(triggerWallMs / 1000).toFixed(1)}s (poll loop tick is 2s)`,
-  );
-
-  // Read the outcome sidecar (filesystem evidence — independent of the
-  // notification dispatch path).
-  const outcome = readOutcomeSidecar(fixture.vaultPath);
-  const gate = classifyGate(notify, outcome);
-
-  const results = assertGreenPostConditions(fixture, notify);
-  const passed = printSummary(
-    results,
-    notify,
-    outcome,
-    gate,
-    fixture,
-    model,
-    startMs,
-  );
-
-  if (args.keepTmpdir) {
-    console.log(`  --keep-tmpdir: leaving ${fixture.tmpdir} for inspection.`);
-  } else {
-    fs.rmSync(fixture.tmpdir, { recursive: true, force: true });
-  }
-
-  return passed ? 0 : 1;
 }
 
 main()

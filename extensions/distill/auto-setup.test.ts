@@ -5,9 +5,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import {
+  BLOCK_CONTENT,
+  BLOCK_MARKER_BEGIN,
+  BLOCK_MARKER_END,
   countTrackedFiles,
-  ensureVaultReadyForAutoDistill,
+  ensureVaultReadyForDistill,
   GITIGNORE_LINES,
+  type HealthLevel,
   LEGACY_EMBEDDED_LAYOUT_ERROR,
 } from "./auto-setup";
 
@@ -26,7 +30,16 @@ function git(cwd: string, args: string[]) {
   return spawnSync("git", args, { cwd, env, encoding: "utf-8" });
 }
 
-describe("ensureVaultReadyForAutoDistill", () => {
+/**
+ * Render the canonical managed-block region as a string, suitable for
+ * dropping into a `.gitignore` fixture (with surrounding user content,
+ * leading/trailing newlines, etc.).
+ */
+function canonicalBlock(): string {
+  return `${BLOCK_MARKER_BEGIN}\n${BLOCK_CONTENT.join("\n")}\n${BLOCK_MARKER_END}\n`;
+}
+
+describe("ensureVaultReadyForDistill", () => {
   let vault: string;
 
   beforeEach(() => {
@@ -43,7 +56,9 @@ describe("ensureVaultReadyForAutoDistill", () => {
    * Helper: run setup under a git identity env so the initial commit succeeds
    * even when the CI runner has no default author configured.
    */
-  function runSetup(): ReturnType<typeof ensureVaultReadyForAutoDistill> {
+  function runSetup(
+    level: HealthLevel = "fast",
+  ): ReturnType<typeof ensureVaultReadyForDistill> {
     const saved = {
       name: process.env.GIT_AUTHOR_NAME,
       email: process.env.GIT_AUTHOR_EMAIL,
@@ -64,10 +79,13 @@ describe("ensureVaultReadyForAutoDistill", () => {
       // Subdir layout: configPath is a distinct path from contentPath.
       // The legacy-embedded-layout check compares string equality only;
       // the path doesn't need to exist on disk for the happy-path tests.
-      return ensureVaultReadyForAutoDistill({
-        contentPath: vault,
-        configPath: path.join(vault, ".napkin"),
-      });
+      return ensureVaultReadyForDistill(
+        {
+          contentPath: vault,
+          configPath: path.join(vault, ".napkin"),
+        },
+        level,
+      );
     } finally {
       if (saved.name === undefined) delete process.env.GIT_AUTHOR_NAME;
       else process.env.GIT_AUTHOR_NAME = saved.name;
@@ -92,6 +110,20 @@ describe("ensureVaultReadyForAutoDistill", () => {
 
     expect(r.initialized).toBe(true);
     expect(r.error).toBeUndefined();
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "vault-is-git-repo",
+        message: expect.stringContaining("Initialized git repo"),
+        recovery: "ran git init",
+      },
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("did not contain"),
+        recovery: "installed",
+      },
+    ]);
     expect(r.scaffolded).toContain(".gitignore");
     // PR #12: no `.gitattributes` is written by auto-setup any more (the
     // merge driver was removed; the agent owns merge resolution in its
@@ -174,6 +206,14 @@ describe("ensureVaultReadyForAutoDistill", () => {
 
     expect(r.initialized).toBe(false);
     expect(r.error).toBeUndefined();
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("did not contain"),
+        recovery: "installed",
+      },
+    ]);
     // PR #12: only `.gitignore` is scaffolded (no `.gitattributes`).
     expect(r.scaffolded).toEqual([".gitignore"]);
 
@@ -194,12 +234,13 @@ describe("ensureVaultReadyForAutoDistill", () => {
     expect(second.initialized).toBe(false);
     expect(second.scaffolded).toEqual([]);
     expect(second.error).toBeUndefined();
+    expect(second.findings).toEqual([]);
 
     const headAfterSecond = git(vault, ["rev-parse", "HEAD"]).stdout.trim();
     expect(headAfterSecond).toBe(headAfterFirst);
   });
 
-  test("existing .gitignore with user content: merges napkin lines, preserves user lines", () => {
+  test("existing .gitignore with user content: installs block, preserves user lines", () => {
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
     fs.writeFileSync(path.join(vault, ".gitignore"), "# user\nnode_modules/\n");
@@ -211,22 +252,29 @@ describe("ensureVaultReadyForAutoDistill", () => {
     const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
     expect(gi).toContain("# user");
     expect(gi).toContain("node_modules/");
+    expect(gi).toContain(BLOCK_MARKER_BEGIN);
+    expect(gi).toContain(BLOCK_MARKER_END);
     expect(gi).toContain(".napkin/distill/");
     expect(gi).toContain("search-cache.json");
     expect(r.scaffolded).toContain(".gitignore");
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("did not contain"),
+        recovery: "installed",
+      },
+    ]);
   });
 
-  test("existing .gitignore already contains napkin lines: no-op (no scaffolding)", () => {
+  test("existing .gitignore already contains napkin block: no-op (no scaffolding)", () => {
     // PR #12: pre-PR-12 this test asserted that `.gitattributes` would be
     // scaffolded if `.gitignore` was already complete. The merge driver is
     // gone, so a complete `.gitignore` means there's nothing left for
     // auto-setup to scaffold.
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
-    fs.writeFileSync(
-      path.join(vault, ".gitignore"),
-      `${GITIGNORE_LINES.join("\n")}\n`,
-    );
+    fs.writeFileSync(path.join(vault, ".gitignore"), canonicalBlock());
     git(vault, ["add", ".gitignore"]);
     git(vault, ["commit", "-q", "-m", "preseeded"]);
 
@@ -234,6 +282,7 @@ describe("ensureVaultReadyForAutoDistill", () => {
 
     expect(r.error).toBeUndefined();
     expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([]);
   });
 
   test("simulated permission failure: git init fails without throwing", () => {
@@ -243,10 +292,13 @@ describe("ensureVaultReadyForAutoDistill", () => {
       const savedName = process.env.GIT_AUTHOR_NAME;
       process.env.GIT_AUTHOR_NAME = "test";
       try {
-        const r = ensureVaultReadyForAutoDistill({
-          contentPath: ro,
-          configPath: path.join(ro, ".napkin"),
-        });
+        const r = ensureVaultReadyForDistill(
+          {
+            contentPath: ro,
+            configPath: path.join(ro, ".napkin"),
+          },
+          "fast",
+        );
         // If the kernel didn't enforce the read-only (common under root /
         // bind mounts), the setup may actually succeed. Either way, the
         // contract is: no throw.
@@ -274,18 +326,16 @@ describe("ensureVaultReadyForAutoDistill", () => {
 
   test("FB-2: existing empty repo, idempotent scaffolding — seeds empty commit so HEAD is valid", () => {
     // Setup: run `git init` in the vault, then pre-install our scaffolding
-    // file with exact content — so mergeLines appends nothing and the
+    // file with exact content — so mergeManagedBlock writes nothing and the
     // existing-repo commit branch is SKIPPED. This is the idempotent
     // re-run path on a vault that happens to have no commits yet. Pre-FB-2
     // this branch left HEAD unresolvable.
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
-    // Pre-populate .gitignore with our exact content so the scaffold is a
-    // no-op. PR #12: no `.gitattributes` to pre-populate any more.
-    const giContent = `${GITIGNORE_LINES.filter(
-      (l) => l.trim().length > 0 && !l.startsWith("#"),
-    ).join("\n")}\n`;
-    fs.writeFileSync(path.join(vault, ".gitignore"), giContent);
+    // Pre-populate .gitignore with our exact canonical block so the
+    // scaffold is a no-op. PR #12: no `.gitattributes` to pre-populate
+    // any more.
+    fs.writeFileSync(path.join(vault, ".gitignore"), canonicalBlock());
 
     // Pre-condition: HEAD does not resolve (no commits).
     const beforeHead = git(vault, ["rev-parse", "--verify", "HEAD"]);
@@ -295,6 +345,7 @@ describe("ensureVaultReadyForAutoDistill", () => {
     expect(r.error).toBeUndefined();
     expect(r.initialized).toBe(false);
     expect(r.scaffolded).toEqual([]); // nothing to scaffold
+    expect(r.findings).toEqual([]);
     expect(r.seededCommit).toBe(true);
 
     // Post-condition: HEAD resolves — subsequent createDistillWorktree
@@ -309,12 +360,20 @@ describe("ensureVaultReadyForAutoDistill", () => {
     // commit (scaffold commit + seeded empty commit).
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
-    // No pre-existing scaffolding — mergeLines will write `.gitignore`.
+    // No pre-existing scaffolding — mergeManagedBlock will write `.gitignore`.
 
     const r = runSetup();
     expect(r.error).toBeUndefined();
     expect(r.initialized).toBe(false);
     expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("did not contain"),
+        recovery: "installed",
+      },
+    ]);
     // The scaffold commit provides HEAD; no empty seed needed.
     expect(r.seededCommit).toBeUndefined();
 
@@ -338,14 +397,24 @@ describe("ensureVaultReadyForAutoDistill", () => {
   test("legacy-embedded layout (configPath === contentPath) \u2192 refuses, returns legacyLayout", () => {
     // Legacy vault: config.json lives alongside notes at the vault root,
     // no `.napkin/` subdir. napkin resolves contentPath = configPath.
-    const r = ensureVaultReadyForAutoDistill({
-      contentPath: vault,
-      configPath: vault,
-    });
+    const r = ensureVaultReadyForDistill(
+      {
+        contentPath: vault,
+        configPath: vault,
+      },
+      "fast",
+    );
     expect(r.error).toBe(LEGACY_EMBEDDED_LAYOUT_ERROR);
     expect(r.legacyLayout).toEqual({ configPath: vault });
     expect(r.initialized).toBe(false);
     expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "subdir-layout",
+        message: expect.stringContaining("legacy embedded layout"),
+      },
+    ]);
     // Must not have attempted git init — no `.git` dir in the vault.
     expect(fs.existsSync(path.join(vault, ".git"))).toBe(false);
   });
@@ -355,10 +424,13 @@ describe("ensureVaultReadyForAutoDistill", () => {
     // even if the caller later ignores the error. Otherwise a stale
     // `.gitignore` would be the only artifact the user sees after a
     // failed migration attempt.
-    const r = ensureVaultReadyForAutoDistill({
-      contentPath: vault,
-      configPath: vault,
-    });
+    const r = ensureVaultReadyForDistill(
+      {
+        contentPath: vault,
+        configPath: vault,
+      },
+      "fast",
+    );
     expect(r.error).toBe(LEGACY_EMBEDDED_LAYOUT_ERROR);
     expect(fs.existsSync(path.join(vault, ".gitignore"))).toBe(false);
     expect(fs.existsSync(path.join(vault, ".gitattributes"))).toBe(false);
@@ -371,6 +443,640 @@ describe("ensureVaultReadyForAutoDistill", () => {
     const r = runSetup();
     expect(r.error).toBeUndefined();
     expect(r.legacyLayout).toBeUndefined();
+  });
+
+  test("on a healthy vault, both 'fast' and 'full' levels produce empty findings", () => {
+    // Structural pin at the happy-path baseline. The two levels diverge
+    // on the `config.json-tracked` invariant (full only); on a vault
+    // where config.json is already tracked, both levels see no
+    // outstanding work and return `findings: []`. Catches accidental
+    // wiring-layer divergence (e.g. a stray finding firing at fast
+    // level that was supposed to be full-only).
+    fs.writeFileSync(path.join(vault, "f.md"), "# f\n");
+    const fast = runSetup("fast");
+    expect(fast.error).toBeUndefined();
+    expect(fast.initialized).toBe(true);
+    // First run initialises the repo and installs the managed block.
+    expect(fast.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "vault-is-git-repo",
+        message: expect.stringContaining("Initialized git repo"),
+        recovery: "ran git init",
+      },
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("did not contain"),
+        recovery: "installed",
+      },
+    ]);
+
+    // Run again at full level on the now-set-up vault: idempotent.
+    const full = runSetup("full");
+    expect(full.error).toBeUndefined();
+    expect(full.findings).toEqual([]);
+    expect(full.initialized).toBe(false);
+    expect(full.scaffolded).toEqual([]);
+  });
+
+  // --- managed-block format (Ansible-style markers) -----------------------
+  //
+  // The .gitignore is rewritten as a `# BEGIN NAPKIN-DISTILL MANAGED` /
+  // `# END NAPKIN-DISTILL MANAGED` block. Drift inside the markers is
+  // auto-recovered; user content outside the markers is byte-preserved;
+  // malformed markers refuse auto-fix and surface a loud error.
+
+  test("BLOCK_CONTENT is a strict superset of GITIGNORE_LINES (non-comment, non-blank)", () => {
+    // Pin the contract from the v0.3.0 → v0.3.1 migration: every
+    // line-by-line entry that 0.3.0 vaults relied on must be present in
+    // the managed block. A future edit that drops one would break the
+    // secret-pattern protections silently; this assertion fails
+    // loudly instead.
+    //
+    // The assertion iterates GITIGNORE_LINES and checks each entry
+    // literally appears as a (post-trim) line in BLOCK_CONTENT. This
+    // pin is structurally tighter than a set-membership check: a future
+    // divergence (typo on one side, drop on the other) will surface a
+    // per-line mismatch rather than slipping through a cardinality
+    // assertion.
+    const meaningful = (xs: readonly string[]) =>
+      xs.map((l) => l.trim()).filter((l) => l.length > 0 && !l.startsWith("#"));
+    const oldEntries = meaningful(GITIGNORE_LINES);
+    const blockTrimmed = BLOCK_CONTENT.map((l) => l.trim());
+    for (const entry of oldEntries) {
+      // Iterate; each entry must literally be one of the lines in the
+      // canonical block array (post-trim, to tolerate trailing-whitespace
+      // edits in either constant).
+      expect(blockTrimmed).toContain(entry);
+    }
+    // Backstop: BLOCK_CONTENT must be at least as large as the legacy
+    // line-by-line list (it can grow with new canonical entries; it
+    // cannot shrink without breaking the migration contract).
+    expect(BLOCK_CONTENT.length).toBeGreaterThanOrEqual(GITIGNORE_LINES.length);
+  });
+
+  test("v0.3.0-shaped line-by-line .gitignore migrates to managed block", () => {
+    // RED: this is the migration scenario for vaults that were set up by
+    // v0.3.0 (line-by-line append, no markers). After the run the file
+    // must have the markers, canonical content inside, and zero orphan
+    // lines outside.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(
+      path.join(vault, ".gitignore"),
+      `${GITIGNORE_LINES.join("\n")}\n`,
+    );
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "v0.3.0 line-by-line"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("had unmanaged"),
+        recovery: "migrated from line-by-line",
+      },
+    ]);
+
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(gi).toContain(BLOCK_MARKER_BEGIN);
+    expect(gi).toContain(BLOCK_MARKER_END);
+    // No orphan canonical lines outside the markers.
+    const begin = gi.indexOf(BLOCK_MARKER_BEGIN);
+    const end = gi.indexOf(BLOCK_MARKER_END);
+    const outside =
+      gi.slice(0, begin) + gi.slice(end + BLOCK_MARKER_END.length);
+    const canonicalNonComment = BLOCK_CONTENT.filter(
+      (l) => l.trim().length > 0 && !l.startsWith("#"),
+    );
+    for (const line of canonicalNonComment) {
+      expect(outside).not.toContain(line);
+    }
+  });
+
+  test("managed block with a missing canonical line is reset in place", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    // Canonical block minus one line (`.napkin/distill/`). The drift
+    // detector must spot the difference and rewrite the bracketed
+    // region back to canonical.
+    const drifted = canonicalBlock().replace(".napkin/distill/\n", "");
+    fs.writeFileSync(path.join(vault, ".gitignore"), drifted);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "drift"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("drifted"),
+        recovery: "reset",
+      },
+    ]);
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(gi).toContain(".napkin/distill/");
+  });
+
+  test("user content outside markers is preserved byte-identically on idempotent runs", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    // Mix user content above + below the canonical block. Run setup;
+    // assert the file is byte-identical (idempotent path — nothing to do).
+    const userBefore = "# user header\nnode_modules/\nbuild/\n\n";
+    const userAfter = "\n# trailing user note\ncoverage/\n";
+    const initial = `${userBefore}${canonicalBlock()}${userAfter}`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), initial);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "mixed"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([]);
+
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(initial);
+  });
+
+  test("CRLF input: legacy v0.3.0 line-by-line .gitignore migrates with CRLF preserved", () => {
+    // Windows-checkout vaults often store .gitignore with CRLF line
+    // endings. The line-by-line → managed-block migration must
+    // preserve that convention; rewriting with bare LF would silently
+    // strip every \r and look like spurious churn in git diffs.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(
+      path.join(vault, ".gitignore"),
+      `${GITIGNORE_LINES.join("\r\n")}\r\n`,
+    );
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "v0.3.0 line-by-line CRLF"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    // Output uses CRLF throughout — no bare LF anywhere in the file.
+    expect(gi).toContain("\r\n");
+    expect(gi.replace(/\r\n/g, "")).not.toContain("\n");
+    // Markers are present (block was installed/migrated, not skipped).
+    expect(gi).toContain(BLOCK_MARKER_BEGIN);
+    expect(gi).toContain(BLOCK_MARKER_END);
+  });
+
+  test("CRLF input: managed block with drift is reset with CRLF preserved", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    // Canonical block minus one line, written with CRLF.
+    const driftedLF = canonicalBlock().replace(".napkin/distill/\n", "");
+    const driftedCRLF = driftedLF.replace(/\n/g, "\r\n");
+    fs.writeFileSync(path.join(vault, ".gitignore"), driftedCRLF);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "drift CRLF"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("drifted"),
+        recovery: "reset",
+      },
+    ]);
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(gi).toContain("\r\n");
+    expect(gi.replace(/\r\n/g, "")).not.toContain("\n");
+    // Drift was repaired: the missing canonical entry is present.
+    expect(gi).toContain(".napkin/distill/");
+  });
+
+  test("CRLF input: idempotent re-run produces no further writes", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    // Already-canonical managed block, written with CRLF.
+    const canonicalLF = canonicalBlock();
+    const canonicalCRLF = canonicalLF.replace(/\n/g, "\r\n");
+    fs.writeFileSync(path.join(vault, ".gitignore"), canonicalCRLF);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "canonical CRLF"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([]);
+
+    // File is byte-identical: no spurious EOL conversion.
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(canonicalCRLF);
+  });
+
+  test("LF input: continues to use LF on rewrite (regression check)", () => {
+    // Regression check: the CRLF-detection logic must not flip LF
+    // files to CRLF. Drift the canonical block under LF and assert
+    // the rewrite stays LF.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const driftedLF = canonicalBlock().replace(".napkin/distill/\n", "");
+    fs.writeFileSync(path.join(vault, ".gitignore"), driftedLF);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "drift LF"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+
+    const gi = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(gi).not.toContain("\r\n");
+    // Drift was repaired.
+    expect(gi).toContain(".napkin/distill/");
+  });
+
+  test("BEGIN marker without matching END is malformed: error finding, file untouched", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const original = `${BLOCK_MARKER_BEGIN}\n.napkin/distill/\n# missing END marker\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), original);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "malformed"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("malformed"),
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(original);
+  });
+
+  test("multiple BEGIN markers are malformed: error finding, file untouched", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const original = `${BLOCK_MARKER_BEGIN}\n.napkin/distill/\n${BLOCK_MARKER_END}\n${BLOCK_MARKER_BEGIN}\n.env\n${BLOCK_MARKER_END}\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), original);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "two-blocks"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("malformed"),
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(original);
+  });
+
+  test("END marker before BEGIN marker is malformed: error finding, file untouched", () => {
+    // The wellFormed predicate requires beginIndices[0] < endIndices[0].
+    // A file where the END marker appears earlier in the file than the
+    // BEGIN marker (e.g. a user shuffled the block) hits the malformed
+    // branch even though the count of each marker is exactly 1.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const original = `${BLOCK_MARKER_END}\n.napkin/distill/\n${BLOCK_MARKER_BEGIN}\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), original);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "end-before-begin"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("malformed"),
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(original);
+  });
+
+  test("END marker without any BEGIN is malformed: error finding, file untouched", () => {
+    // markersAbsent is `beginIndices.length === 0 && endIndices.length
+    // === 0`. An END marker on its own (zero BEGINs, one or more ENDs)
+    // fails markersAbsent and the wellFormed-pair predicate, so it hits
+    // the malformed branch instead of being silently ignored.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const original = `# user-only\n${BLOCK_MARKER_END}\nlogs/\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), original);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "orphan-end"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("malformed"),
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(original);
+  });
+
+  test("asymmetric markers (2 BEGIN, 1 END) are malformed: error finding, file untouched", () => {
+    // Distinct from the existing "multiple BEGIN markers" test (2 BEGIN
+    // + 2 END = two complete blocks): here the marker counts disagree
+    // (2 BEGIN + 1 END), which also fails the wellFormed predicate
+    // (length === 1 on both sides) without being a complete-block
+    // duplicate.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const original = `${BLOCK_MARKER_BEGIN}\n.napkin/distill/\n${BLOCK_MARKER_END}\n${BLOCK_MARKER_BEGIN}\n.env\n`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), original);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "asymmetric markers"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([]);
+    expect(r.findings).toEqual([
+      {
+        kind: "error",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("malformed"),
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toBe(original);
+  });
+
+  test("unrelated user '# BEGIN ...' markers do not collide with detection", () => {
+    // The marker match requires the exact `NAPKIN-DISTILL MANAGED`
+    // suffix. A user marker like `# BEGIN MY-OWN-SECTION` must not be
+    // matched as ours.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const userMarkered =
+      "# BEGIN MY-OWN-SECTION\ncoverage/\n# END MY-OWN-SECTION\n";
+    fs.writeFileSync(path.join(vault, ".gitignore"), userMarkered);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "user markers"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("did not contain"),
+        recovery: "installed",
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    expect(after).toContain("# BEGIN MY-OWN-SECTION");
+    expect(after).toContain("# END MY-OWN-SECTION");
+    expect(after).toContain(BLOCK_MARKER_BEGIN);
+    expect(after).toContain(BLOCK_MARKER_END);
+  });
+
+  test("orphan canonical lines outside an already-correct block are removed", () => {
+    // Partial migration shape: a previous run installed the block, but
+    // the user (or a v0.3.0 stale fixture) has duplicated canonical
+    // entries above the block. The block stays put; the orphans are
+    // stripped on the next run.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const initial = `.napkin/distill/\n.env\n\n${canonicalBlock()}`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), initial);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "partial migration"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining("orphan canonical lines outside"),
+        recovery: "migrated from line-by-line",
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    // Orphan lines above the block are gone.
+    const begin = after.indexOf(BLOCK_MARKER_BEGIN);
+    const before = after.slice(0, begin);
+    expect(before).not.toContain(".napkin/distill/");
+    expect(before).not.toContain(".env");
+    // Block is still intact.
+    expect(after).toContain(BLOCK_MARKER_BEGIN);
+    expect(after).toContain(BLOCK_MARKER_END);
+  });
+
+  test("managed block with drift AND orphan canonical lines outside fires the compound recovery", () => {
+    // Both drift conditions on the same pass: the bracketed region
+    // diverges from canonical (one line missing) AND a canonical line
+    // is duplicated outside the block. mergeManagedBlock must rewrite
+    // the block in place AND strip the orphan, surfacing a single
+    // compound recovery flavor (`reset and migrated from line-by-line`).
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    const drifted = canonicalBlock().replace(".napkin/distill/\n", "");
+    const initial = `.env\n\n${drifted}`;
+    fs.writeFileSync(path.join(vault, ".gitignore"), initial);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "compound drift"]);
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toEqual([".gitignore"]);
+    expect(r.findings).toEqual([
+      {
+        kind: "auto-recovered",
+        invariant: "gitignore-block-correct",
+        message: expect.stringContaining(
+          "managed block drifted and orphan canonical lines were present outside it",
+        ),
+        recovery: "reset and migrated from line-by-line",
+      },
+    ]);
+    const after = fs.readFileSync(path.join(vault, ".gitignore"), "utf-8");
+    // Block restored to canonical: the missing line is back inside the
+    // managed region.
+    const begin = after.indexOf(BLOCK_MARKER_BEGIN);
+    const end = after.indexOf(BLOCK_MARKER_END);
+    expect(after.slice(begin, end)).toContain(".napkin/distill/");
+    // Orphan stripped from outside the markers.
+    const before = after.slice(0, begin);
+    expect(before).not.toContain(".env");
+  });
+
+  // --- config.json validity ----------------------------------------------
+  //
+  // The vault's config.json is the user's hand-edited (or napkin-
+  // generated) source of truth for vault config. A parse failure means
+  // later napkin operations will silently fall back to defaults or
+  // crash; we surface a loud error so the user can fix the file.
+
+  test("invalid JSON in config.json: error finding, no auto-recovery", () => {
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      "{ this is not valid json",
+    );
+    fs.writeFileSync(path.join(vault, "notes.md"), "# n\n");
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    expect(r.findings).toContainEqual({
+      kind: "error",
+      invariant: "config.json-valid-json",
+      message: expect.stringContaining("is not valid JSON"),
+    });
+    // The corrupt file is left in place — user must repair it.
+    expect(
+      fs.readFileSync(path.join(vault, ".napkin", "config.json"), "utf-8"),
+    ).toBe("{ this is not valid json");
+  });
+
+  test("missing config.json: no config.json-valid-json finding (skip silently)", () => {
+    // Subdir-layout vault with no config.json yet (the typical fresh-
+    // setup state before `napkin init` runs). The valid-JSON check is
+    // file-existence-gated so we don't false-positive on this.
+    fs.writeFileSync(path.join(vault, "notes.md"), "# n\n");
+
+    const r = runSetup();
+    expect(r.error).toBeUndefined();
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-valid-json");
+    }
+  });
+
+  // --- config.json tracked (full-level only; closes Issue #14) ----------
+  //
+  // Distill worktrees are checked out via `git worktree add HEAD`, which
+  // copies only tracked files. An untracked `.napkin/config.json` never
+  // reaches the worktree, napkin's findVault falls back to legacy
+  // embedded layout, and the distill agent reports `Empty vault`. The
+  // full-level check stages the file via the existing scaffolded[]
+  // commit branch.
+
+  test("existing repo, .napkin/config.json untracked: full-level tracks it", () => {
+    // RED for Issue #14. The fixture mirrors the reported scenario:
+    // a user runs `napkin init` (creates .napkin/config.json) on a
+    // git repo, but never `git add`s the file.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
+    git(vault, ["add", "seed.md"]);
+    git(vault, ["commit", "-q", "-m", "seed"]);
+
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+
+    // Pre-condition: config.json is NOT tracked.
+    const beforeLs = git(vault, [
+      "ls-files",
+      "--error-unmatch",
+      ".napkin/config.json",
+    ]);
+    expect(beforeLs.status).not.toBe(0);
+
+    const r = runSetup("full");
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).toContain(".napkin/config.json");
+    expect(r.findings).toContainEqual({
+      kind: "auto-recovered",
+      invariant: "config.json-tracked",
+      message: expect.stringContaining("untracked"),
+      recovery: "git add .napkin/config.json",
+    });
+
+    // Post-condition: config.json is tracked.
+    const afterLs = git(vault, [
+      "ls-files",
+      "--error-unmatch",
+      ".napkin/config.json",
+    ]);
+    expect(afterLs.status).toBe(0);
+  });
+
+  test("config.json-tracked is idempotent on a re-run (no spurious recovery, no new commit)", () => {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
+    git(vault, ["add", "seed.md"]);
+    git(vault, ["commit", "-q", "-m", "seed"]);
+
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+
+    runSetup("full");
+    const headAfterFirst = git(vault, ["rev-parse", "HEAD"]).stdout.trim();
+
+    const second = runSetup("full");
+    expect(second.error).toBeUndefined();
+    expect(second.scaffolded).toEqual([]);
+    for (const f of second.findings) {
+      expect(f.invariant).not.toBe("config.json-tracked");
+    }
+
+    const headAfterSecond = git(vault, ["rev-parse", "HEAD"]).stdout.trim();
+    expect(headAfterSecond).toBe(headAfterFirst);
+  });
+
+  test("fast-level does NOT stage config.json even when it is untracked", () => {
+    // The tracking check is full-level only. Fast-level (session_start)
+    // must remain the cheapest necessary call — no git index probes
+    // beyond `ls-files`-style commit gates that the existing fast lane
+    // does not perform.
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
+    git(vault, ["add", "seed.md"]);
+    git(vault, ["commit", "-q", "-m", "seed"]);
+
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+
+    const r = runSetup("fast");
+    expect(r.error).toBeUndefined();
+    expect(r.scaffolded).not.toContain(".napkin/config.json");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-tracked");
+    }
+
+    // Confirm the file is still untracked after a fast-level call.
+    const ls = git(vault, [
+      "ls-files",
+      "--error-unmatch",
+      ".napkin/config.json",
+    ]);
+    expect(ls.status).not.toBe(0);
   });
 });
 

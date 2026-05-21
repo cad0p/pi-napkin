@@ -15,7 +15,7 @@ import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import {
   countTrackedFiles,
-  ensureVaultReadyForAutoDistill,
+  ensureVaultReadyForDistill,
   LEGACY_EMBEDDED_LAYOUT_ERROR,
 } from "./auto-setup";
 import {
@@ -31,6 +31,7 @@ import {
   resolveDistillErrorDir,
   spawnDistillInWorktree,
 } from "./distill-workspace";
+import { surfaceHealthFindings, surfaceSetupError } from "./health-notify";
 import { getSessionTouchedFiles } from "./session-touched-files";
 import { shouldDistillOnShutdown } from "./should-distill-on-shutdown";
 
@@ -441,57 +442,73 @@ export default function (pi: ExtensionAPI) {
     const vaultContentPath = napkinVault.contentPath;
     let setupFailed = false;
     try {
-      const setup = ensureVaultReadyForAutoDistill({
-        contentPath: vaultContentPath,
-        configPath: napkinVault.configPath,
-      });
-      if (setup.error) {
+      const setup = ensureVaultReadyForDistill(
+        {
+          contentPath: vaultContentPath,
+          configPath: napkinVault.configPath,
+        },
+        "fast",
+      );
+      if (setup.error === LEGACY_EMBEDDED_LAYOUT_ERROR) {
+        // Legacy embedded layout (`~/.napkin/` with `config.json`
+        // alongside notes, no `.napkin/` subdir). Worktree-based
+        // concurrency requires the subdir layout so napkin's
+        // `findVault` resolves cwd=worktree to the worktree itself.
+        // README has the migration steps; point there instead of
+        // duplicating them in the notify (keeps the notification
+        // short enough to render cleanly in every UI surface). Skip
+        // the structured per-finding render below so the same
+        // condition doesn't fire two error notifies.
         setupFailed = true;
         if (ctx.hasUI) {
-          if (setup.error === LEGACY_EMBEDDED_LAYOUT_ERROR) {
-            // Legacy embedded layout (`~/.napkin/` with `config.json`
-            // alongside notes, no `.napkin/` subdir). Worktree-based
-            // concurrency requires the subdir layout so napkin's
-            // `findVault` resolves cwd=worktree to the worktree itself.
-            // README has the migration steps; point there instead of
-            // duplicating them in the notify (keeps the notification
-            // short enough to render cleanly in every UI surface).
-            ctx.ui.notify(
-              "Auto-distill requires the subdir vault layout. See README for migration, or set distill.enabled: false in vault config.json.",
-              "error",
-            );
-          } else {
-            ctx.ui.notify(
-              `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
-              "error",
-            );
-          }
-        }
-      } else if (setup.initialized) {
-        const tracked = countTrackedFiles(vaultContentPath);
-        const files = tracked >= 0 ? tracked : setup.scaffolded.length;
-        if (ctx.hasUI) {
           ctx.ui.notify(
-            [
-              "Initialized git repo in your vault for auto-distill.",
-              `Commit: 'napkin: initial vault commit (auto-distill setup)'`,
-              `Files tracked: ${files}`,
-              `To undo: rm -rf ${path.join(vaultContentPath, ".git")} (removes history, keeps files)`,
-              "To opt out: set distill.enabled: false in vault config.json",
-            ].join("\n"),
-            "info",
+            "Auto-distill requires the subdir vault layout. See README for migration, or set distill.enabled: false in vault config.json.",
+            "error",
           );
         }
-      } else if (setup.scaffolded.length > 0) {
-        if (ctx.hasUI) {
+      } else {
+        // Surface every non-legacy finding through the structured
+        // helper so fast-level error invariants (malformed gitignore
+        // markers, invalid `config.json`) get the same notify
+        // treatment as the full-level call sites and so auto-recovered
+        // findings (gitignore install / migrate / reset) reach the user
+        // here at session_start instead of at the first interval tick.
+        const { hasErrors } = surfaceHealthFindings(ctx, setup.findings);
+        setupFailed = !!setup.error || hasErrors;
+
+        // Generic fail-soft errors (git init / add / commit /
+        // scaffolding-write failures) populate `setup.error` but not
+        // `findings`; surface the underlying message so the user knows
+        // why setup aborted on this session.
+        if (setup.error && ctx.hasUI) {
           ctx.ui.notify(
-            `Added ${setup.scaffolded.join(", ")} for auto-distill.`,
-            "info",
+            `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
+            "error",
           );
         }
       }
+
+      // Initial-run onboarding notify carries scope context (file
+      // count, undo command, opt-out hint) that the structured
+      // per-finding render can't. Fires alongside
+      // `surfaceHealthFindings`'s info notify on the first session in a
+      // fresh vault.
+      if (setup.initialized && ctx.hasUI) {
+        const tracked = countTrackedFiles(vaultContentPath);
+        const files = tracked >= 0 ? tracked : setup.scaffolded.length;
+        ctx.ui.notify(
+          [
+            "Initialized git repo in your vault for auto-distill.",
+            `Commit: 'napkin: initial vault commit (auto-distill setup)'`,
+            `Files tracked: ${files}`,
+            `To undo: rm -rf ${path.join(vaultContentPath, ".git")} (removes history, keeps files)`,
+            "To opt out: set distill.enabled: false in vault config.json",
+          ].join("\n"),
+          "info",
+        );
+      }
     } catch (err) {
-      // Truly unexpected (ensureVaultReadyForAutoDistill is supposed to not
+      // Truly unexpected (ensureVaultReadyForDistill is supposed to not
       // throw). Log + continue, worst case later operations fail gracefully.
       console.error("[napkin-distill] auto-setup threw:", err);
     }
@@ -641,21 +658,39 @@ export default function (pi: ExtensionAPI) {
             fs.existsSync(path.join(vaultInfo.contentPath, ".git")) &&
             sessionFile
           ) {
-            const modelStr = config.model
-              ? `${config.model.provider}/${config.model.id}`
-              : undefined;
-            spawnDistillInWorktree({
-              vault: vaultInfo.contentPath,
-              sessionFile,
-              parentCwd: ctx.cwd,
-              maxDurationSecs: Math.round(
-                getMaxDistillDurationMs(config) / 1000,
-              ),
-              model: modelStr,
-            });
-            // Mark this size as "spawned" so if the parent re-enters shutdown
-            // (unlikely but possible with session switch), we don't duplicate.
-            lastSpawnedSize = currentSize;
+            // Full health-check before the shutdown distill spawns. The
+            // shutdown handler is the last chance to surface a notify
+            // before the session ends; an error finding aborts the
+            // spawn (corrupt config, malformed markers, etc.) so the
+            // wrapper doesn't get handed an unusable vault.
+            const setup = ensureVaultReadyForDistill(
+              {
+                contentPath: vaultInfo.contentPath,
+                configPath: vaultInfo.configPath,
+              },
+              "full",
+            );
+            const { hasErrors } = surfaceHealthFindings(ctx, setup.findings);
+            surfaceSetupError(ctx, setup.error);
+            if (!hasErrors && !setup.error) {
+              const modelStr = config.model
+                ? `${config.model.provider}/${config.model.id}`
+                : undefined;
+              spawnDistillInWorktree({
+                vault: vaultInfo.contentPath,
+                sessionFile,
+                parentCwd: ctx.cwd,
+                maxDurationSecs: Math.round(
+                  getMaxDistillDurationMs(config) / 1000,
+                ),
+                model: modelStr,
+              });
+              // Mark this size as "spawned" so if the parent re-enters shutdown
+              // (unlikely but possible with session switch), we don't duplicate.
+              lastSpawnedSize = currentSize;
+            }
+            // On error: do not advance lastSpawnedSize so a subsequent
+            // recovery attempt can re-fire.
           }
         }
       }
@@ -1132,9 +1167,24 @@ export default function (pi: ExtensionAPI) {
           path.join(args.vaultContentPath, ".git"),
         );
         // Legacy-embedded detection matches the predicate in
-        // `ensureVaultReadyForAutoDistill` (keep the two gates in lockstep).
+        // `ensureVaultReadyForDistill` (keep the two gates in lockstep).
         const isLegacyEmbedded = args.vaultConfigPath === args.vaultContentPath;
         if (gitPresent && args.config.enabled && !isLegacyEmbedded) {
+          // Full health-check before the worktree-based spawn. Surfaces
+          // auto-recovered findings as info notifies; aborts the spawn
+          // when any error finding fires (corrupt config, malformed
+          // gitignore markers, etc.). Legacy-embedded routing skips this
+          // entirely — those vaults are untouched by auto-distill.
+          const setup = ensureVaultReadyForDistill(
+            {
+              contentPath: args.vaultContentPath,
+              configPath: args.vaultConfigPath,
+            },
+            "full",
+          );
+          const { hasErrors } = surfaceHealthFindings(args.ctx, setup.findings);
+          surfaceSetupError(args.ctx, setup.error);
+          if (hasErrors || setup.error) return null;
           return worktreeSpawnFn(args);
         }
         return legacySpawnFn(args);
@@ -1162,7 +1212,24 @@ export default function (pi: ExtensionAPI) {
         }
         return { ok: true };
       },
-      spawnFn: worktreeSpawnFn,
+      spawnFn: (args) => {
+        // Full health-check before each tick: rewires drift in the
+        // managed gitignore block, re-emits structured findings, aborts
+        // the spawn on any error finding (corrupt config, malformed
+        // markers). Auto-distill always uses the worktree path; the
+        // legacy-embedded route only exists for manual `/distill`.
+        const setup = ensureVaultReadyForDistill(
+          {
+            contentPath: args.vaultContentPath,
+            configPath: args.vaultConfigPath,
+          },
+          "full",
+        );
+        const { hasErrors } = surfaceHealthFindings(args.ctx, setup.findings);
+        surfaceSetupError(args.ctx, setup.error);
+        if (hasErrors || setup.error) return null;
+        return worktreeSpawnFn(args);
+      },
     });
   }
 
