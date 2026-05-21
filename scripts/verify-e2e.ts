@@ -54,57 +54,78 @@
  *   - JS poller dispatch correctness on the wrapper's actual sidecar
  *     content.
  *
- * What it does:
+ * What it does (4-phase flow; phases 2-4 marked inline in `main()`):
  *
- *   1. Creates a tmpdir at `${TMPDIR:-/tmp}/napkin-verify-e2e-XXXXXX`.
- *   2. Builds the post-`napkin init` vault state by INVOKING the real
- *      `napkin init --path <vault>` CLI (production code, not
- *      synthesized), then patching `distill.*` into the resulting
- *      `.napkin/config.json` to model the user-edits-config step,
- *      then writing a `note.md` content file. Does NOT run `git
- *      init`, does NOT scaffold `.gitignore`, does NOT commit —
- *      those are session_start's job.
- *   3. Builds a mock `ExtensionAPI` and calls `distillExtension(api)`
- *      so the production handlers and `/distill` command are
- *      registered against the captured spy.
- *   4. Triggers `captured.handlers.session_start({ reason: "new" },
- *      ctx)` — this fires `ensureVaultReadyForDistill(vault, "fast")`
- *      which performs `git init`, installs the managed gitignore
- *      block, runs `git add . && git commit`, and (via the index.ts
- *      handler) pushes an info notify announcing the init.
- *   5. Asserts the auto-init's filesystem + notify post-conditions:
- *      `.git/` exists, `.gitignore` contains the BEGIN/END markers and
- *      canonical block content, `.napkin/config.json` is tracked, HEAD
- *      points to a real commit, and the captured notify spy contains
- *      the canonical "Initialized git repo in your vault for
- *      auto-distill" info notification.
- *   6. THEN sets up the bare origin: `git init --bare origin/`,
- *      `git remote add origin <bare>`, `git push origin main`. Bare
- *      flag is mandatory: non-bare repos refuse pushes to checked-out
- *      branches, so the agent's push would fail and the outcome would
- *      be `merged-local` (warning) instead of `merged-content` (info),
- *      misclassifying the GREEN signature. This is the only piece of
- *      test scaffolding that is NOT user-flow — wrappers need a
- *      remote to push to.
- *   7. Allocates a SessionManager-managed session JSONL path under the
- *      tmpdir, then writes a synthetic 6-message conversation directly
- *      to that path via `writeSyntheticSession()`. The wrapper's
- *      session-fork step reads from disk via `getSessionFile()`, so as
- *      long as the synthetic content is on disk before the wrapper runs,
- *      ownership is unambiguous: SessionManager allocates the path,
- *      writeSyntheticSession writes the JSONL content, the wrapper
- *      reads it later.
- *   8. Triggers `captured.commands.distill?.handler("", ctx)`. This
- *      bypasses the 60-minute auto-distill interval — the manual
- *      handler invokes `runDistill(ctx)` immediately, which calls
- *      `ensureVaultReadyForDistill(vault, "full")` (full-level
- *      invariants on a healthy vault → no findings) and then
- *      `runDistillWith` to set up the real 2-second `setInterval`
- *      poll loop.
- *   9. Waits up to `distill.maxDurationMinutes * 60s + 30s` slack for the
- *      poll loop to fire its dispatch (`ctx.ui.notify` is captured into
- *      `notifyCalls`).
- *  10. Asserts on the dispatched notification + filesystem post-conditions:
+ *   Phase 1 — napkin init (CLI invocation produces vault scaffolding):
+ *
+ *     1. Creates a tmpdir at `${TMPDIR:-/tmp}/napkin-verify-e2e-XXXXXX`.
+ *     2. Builds the post-`napkin init` vault state by INVOKING the
+ *        real `napkin init --path <vault>` CLI (production code, not
+ *        synthesized), then patching `distill.*` into the resulting
+ *        `.napkin/config.json` to model the user-edits-config step,
+ *        then writing a `note.md` content file. Does NOT run `git
+ *        init`, does NOT scaffold `.gitignore`, does NOT commit —
+ *        those are session_start's job.
+ *     3. Asserts napkin init's filesystem artifacts via
+ *        `assertNapkinInitPostConditions` (default-schema sections,
+ *        `vault.root`, `.obsidian/{app,templates,daily-notes}.json`)
+ *        and `return 1` on any fail — fast-fail before the gate spends
+ *        seconds on auto-init or ~$0.50 on the LLM phase.
+ *
+ *   Phase 2 — session_start auto-init (production code: git init,
+ *   gitignore managed block, initial commit):
+ *
+ *     4. Builds a mock `ExtensionAPI` and calls `distillExtension(api)`
+ *        so the production handlers and `/distill` command are
+ *        registered against the captured spy.
+ *     5. Triggers `captured.handlers.session_start({ reason: "new" },
+ *        ctx)` — this fires `ensureVaultReadyForDistill(vault, "fast")`
+ *        which performs `git init`, installs the managed gitignore
+ *        block, runs `git add . && git commit`, and (via the index.ts
+ *        handler) pushes an info notify announcing the init.
+ *     6. Asserts the auto-init's filesystem + notify post-conditions
+ *        via `assertAutoInitPostConditions`: `.git/` exists,
+ *        `.gitignore` contains the BEGIN/END markers and canonical
+ *        block content, `.napkin/config.json` is tracked, HEAD points
+ *        to a real commit, and the captured notify spy contains the
+ *        canonical "Initialized git repo in your vault for auto-
+ *        distill" info notification. `return 1` on any fail.
+ *
+ *   Phase 3 — bare-origin scaffolding (test-only: wrapper needs a
+ *   remote):
+ *
+ *     7. Sets up the bare origin: `git init --bare origin/`, `git
+ *        remote add origin <bare>`, `git push origin main`. Bare flag
+ *        is mandatory: non-bare repos refuse pushes to checked-out
+ *        branches, so the agent's push would fail and the outcome
+ *        would be `merged-local` (warning) instead of `merged-content`
+ *        (info), misclassifying the GREEN signature. This is the only
+ *        piece of test scaffolding that is NOT user-flow — wrappers
+ *        need a remote to push to.
+ *
+ *   Phase 4 — /distill (production code: full health check + wrapper
+ *   subprocess + JS poller):
+ *
+ *     8. Allocates a SessionManager-managed session JSONL path under
+ *        the tmpdir, then writes a synthetic 6-message conversation
+ *        directly to that path via `writeSyntheticSession()`. The
+ *        wrapper's session-fork step reads from disk via
+ *        `getSessionFile()`, so as long as the synthetic content is on
+ *        disk before the wrapper runs, ownership is unambiguous:
+ *        SessionManager allocates the path, writeSyntheticSession
+ *        writes the JSONL content, the wrapper reads it later.
+ *     9. Triggers `captured.commands.distill?.handler("", ctx)`. This
+ *        bypasses the 60-minute auto-distill interval — the manual
+ *        handler invokes `runDistill(ctx)` immediately, which calls
+ *        `ensureVaultReadyForDistill(vault, "full")` (full-level
+ *        invariants on a healthy vault → no findings) and then
+ *        `runDistillWith` to set up the real 2-second `setInterval`
+ *        poll loop.
+ *    10. Waits up to `distill.maxDurationMinutes * 60s + 30s` slack for
+ *        the poll loop to fire its dispatch (`ctx.ui.notify` is
+ *        captured into `notifyCalls`).
+ *    11. Asserts on the dispatched notification + filesystem post-
+ *        conditions:
  *
  *      RED-gate FAIL signature (current buggy code; what we expect
  *      against the unfixed branch):
@@ -352,11 +373,13 @@ function installGitEnvOnProcess(): { restore: () => void } {
  *
  *   1. `napkin init --path <vault>` — invokes the real `@cad0p/napkin`
  *      CLI dependency to produce `.napkin/config.json` (with napkin's
- *      default schema, including `vault.root: ".."` for sibling
- *      layout) and the canonical `.obsidian/{app,templates,daily-
- *      notes}.json` files. Synthesising the config in-process would
- *      mask regressions in napkin init's default schema; running the
- *      real CLI catches them.
+ *      default schema, including `vault.root: ".."` for subdir-
+ *      layout — the modern shape where `.napkin/` is a subdirectory of
+ *      the vault root; see design glossary) and the canonical
+ *      `.obsidian/{app,templates,daily-notes}.json` files.
+ *      Synthesising the config in-process would mask regressions in
+ *      napkin init's default schema; running the real CLI catches
+ *      them.
  *   2. Patches `distill.*` into the resulting config — models the
  *      "user enables auto-distill in their config" step. Merges into
  *      the existing config rather than overwriting so napkin's other
@@ -1293,7 +1316,7 @@ async function main(): Promise<number> {
       ui,
     };
 
-    // ----- Phase 1: drive auto-init through session_start ----------------------
+    // ----- Phase 2: drive auto-init through session_start ----------------------
     //
     // Mirrors production: a fresh `pi` invocation in a vault that has
     // `.napkin/config.json` but no `.git/`. session_start calls
@@ -1327,7 +1350,7 @@ async function main(): Promise<number> {
       return 1;
     }
 
-    // ----- Phase 2: bare origin (test scaffolding only) ------------------------
+    // ----- Phase 3: bare origin (test scaffolding only) ------------------------
     //
     // Auto-init produced `main` with the initial commit; now we wire a
     // bare origin so the wrapper's `git push origin <branch>` later has
@@ -1344,7 +1367,7 @@ async function main(): Promise<number> {
     }
     const fixture: Fixture = { ...fixturePartial, ...originRefs };
 
-    // ----- Phase 3: drive /distill -------------------------------------------
+    // ----- Phase 4: drive /distill -------------------------------------------
     const triggerStart = Date.now();
     console.log(
       `Triggering /distill (timeout ${DISTILL_MAX_DURATION_MINUTES}m + ${POLLER_DISPATCH_SLACK_SECS}s slack)...`,
