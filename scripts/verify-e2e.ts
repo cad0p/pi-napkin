@@ -423,7 +423,7 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
     env: process.env,
     encoding: "utf-8",
   });
-  if (napkinCheck.error?.code === "ENOENT" || napkinCheck.status !== 0) {
+  if (napkinCheck.status !== 0) {
     throw new Error(
       `napkin binary not usable at ${NAPKIN_BIN} ` +
         `(${napkinCheck.error?.message ?? `rc=${napkinCheck.status}`}); ` +
@@ -446,7 +446,7 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
   if (initRc.status !== 0) {
     throw new Error(
       `napkin init failed in ${vaultPath} (rc=${initRc.status}): ${
-        initRc.error?.message ?? initRc.stderr ?? initRc.stdout
+        initRc.error?.message ?? (initRc.stderr || initRc.stdout)
       }`,
     );
   }
