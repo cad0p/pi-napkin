@@ -7,6 +7,7 @@ import {
   DEFAULT_DISTILL,
   formatOutcomeNotification,
   loadVaultConfig,
+  MalformedVaultConfigError,
 } from "./index";
 
 /**
@@ -115,8 +116,28 @@ describe("loadVaultConfig", () => {
     expect(cfg.distill.onShutdown === false).toBe(false);
   });
 
-  test("malformed JSON falls back to defaults", () => {
+  test("malformed JSON throws MalformedVaultConfigError with parse detail", () => {
     const vault = track(makeVault("{ not valid json"));
+    let thrown: unknown = null;
+    try {
+      loadVaultConfig(vault);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(MalformedVaultConfigError);
+    const e = thrown as MalformedVaultConfigError;
+    expect(e.configPath).toBe(path.join(vault, "config.json"));
+    expect(e.parseError.length).toBeGreaterThan(0);
+    // Make sure the underlying message embeds the path so notify-text
+    // surfaces a user-actionable file location.
+    expect(e.message).toContain("config.json");
+  });
+
+  test("missing config.json still returns DEFAULT (no throw)", () => {
+    // Counterfactual to the malformed-JSON throw: the missing-file
+    // path stays fail-soft so a fresh vault before `napkin init` is
+    // still usable inside pi.
+    const vault = track(makeVault(null));
     const cfg = loadVaultConfig(vault);
     expect(cfg.distill).toEqual(DEFAULT_DISTILL);
     expect(cfg.showStatus).toBe(true);
