@@ -408,18 +408,17 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
   fs.mkdirSync(parentCwd);
   fs.mkdirSync(sessionsDir);
 
-  // Step 1: invoke the real napkin init CLI. The binary-existence
-  // preflight via `--version` mirrors the `pi --version` preflight in
-  // `main()` (which mirrors index.ts:1158-1169) so a missing or
-  // non-executable binary surfaces with an actionable message naming
-  // the path and the underlying syscall failure rather than the
-  // opaque "(rc=null): undefined" the init invocation alone would
-  // emit. Without this preflight, a fresh checkout that hasn't run
-  // `bun install` (or whose `node_modules/.bin/napkin` symlink is
-  // broken, or whose shebang `node` is missing from PATH) hits
-  // `spawnSync` returning `{ status: null, error: ENOENT, stdout:
-  // undefined, stderr: undefined }` and the diagnostic info on
-  // `error.message` would be lost.
+  // Step 1: invoke the real napkin init CLI. The `--version`
+  // preflight catches a missing or non-executable binary with an
+  // actionable message naming the path and the underlying syscall
+  // failure, rather than the opaque "(rc=null): undefined" the init
+  // invocation alone would emit. Without this preflight, a fresh
+  // checkout that hasn't run `bun install` (or whose
+  // `node_modules/.bin/napkin` symlink is broken, or whose shebang
+  // `node` is missing from PATH) hits `spawnSync` returning
+  // `{ status: null, error: ENOENT, stdout: undefined, stderr:
+  // undefined }` and the diagnostic info on `error.message` would be
+  // lost.
   const napkinCheck = spawnSync(NAPKIN_BIN, ["--version"], {
     env: process.env,
     encoding: "utf-8",
@@ -432,20 +431,14 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
     );
   }
 
-  // Sanity-check the post-init exit status. The previous fixture
-  // shape also matched a stdout banner substring ("Initialized vault
-  // at <path>/.napkin"), but the substring check breaks under
-  // `FORCE_COLOR=1` (chalk inserts ANSI escape codes around the
-  // banner words, splitting the substring) AND duplicates the
-  // post-condition file-existence checks in `assertNapkinInitPost-
-  // Conditions` — the fresh-tmpdir guarantees napkin's alternative
-  // "Vault already initialized at <path>" path is unreachable, so
-  // "banner present" can't distinguish anything `assertNapkinInit-
-  // PostConditions` doesn't already verify by reading the produced
-  // files. Failure paths surface both `error` (subprocess never
-  // started — ENOENT, EACCES, ENOEXEC) and the captured streams
-  // (subprocess started but exited non-zero) so the operator can
-  // distinguish the two failure modes.
+  // Sanity-check the post-init exit status. The filesystem
+  // post-conditions in `assertNapkinInitPostConditions` (run later
+  // against the produced `.napkin/` and `.obsidian/` files) carry
+  // the actual init invariants; the rc check here is just fail-fast
+  // when the subprocess itself errored. Failure paths surface both
+  // `error` (subprocess never started — ENOENT, EACCES, ENOEXEC) and
+  // the captured streams (subprocess started but exited non-zero) so
+  // the operator can distinguish the two failure modes.
   const initRc = spawnSync(NAPKIN_BIN, ["init", "--path", vaultPath], {
     env: process.env,
     encoding: "utf-8",
@@ -1391,7 +1384,7 @@ async function main(): Promise<number> {
 
     // Combined summary: napkin-init's invariants (asserted right
     // after `setupFixture`) + auto-init's invariants (captured at
-    // phase 1) + the distill phase's notify / outcome / filesystem
+    // phase 2) + the distill phase's notify / outcome / filesystem
     // invariants. Earlier-asserted results are re-included here so
     // the final summary lists every checked invariant in one
     // PASS/FAIL block, even though they were already asserted
