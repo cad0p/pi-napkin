@@ -385,9 +385,36 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
   fs.mkdirSync(parentCwd);
   fs.mkdirSync(sessionsDir);
 
-  // Step 1: invoke the real napkin init CLI. Sanity-check the canonical
-  // "Initialized vault at <path>/.napkin" stdout banner so a future
-  // CLI redesign that silently changes the contract surfaces here.
+  // Step 1: invoke the real napkin init CLI. The binary-existence
+  // preflight via `--version` mirrors the `pi --version` preflight in
+  // `main()` (which mirrors index.ts:1158-1169) so a missing or
+  // non-executable binary surfaces with an actionable message naming
+  // the path and the underlying syscall failure rather than the
+  // opaque "(rc=null): undefined" the init invocation alone would
+  // emit. Without this preflight, a fresh checkout that hasn't run
+  // `bun install` (or whose `node_modules/.bin/napkin` symlink is
+  // broken, or whose shebang `node` is missing from PATH) hits
+  // `spawnSync` returning `{ status: null, error: ENOENT, stdout:
+  // undefined, stderr: undefined }` and the diagnostic info on
+  // `error.message` would be lost.
+  const napkinCheck = spawnSync(NAPKIN_BIN, ["--version"], {
+    env: process.env,
+    encoding: "utf-8",
+  });
+  if (napkinCheck.error?.code === "ENOENT" || napkinCheck.status !== 0) {
+    throw new Error(
+      `napkin binary not usable at ${NAPKIN_BIN} ` +
+        `(${napkinCheck.error?.message ?? `rc=${napkinCheck.status}`}); ` +
+        "is `node_modules/.bin/napkin` populated? (run `bun install`)",
+    );
+  }
+
+  // Sanity-check the canonical "Initialized vault at <path>/.napkin"
+  // stdout banner so a future CLI redesign that silently changes the
+  // contract surfaces here. Failure paths surface both `error`
+  // (subprocess never started — ENOENT, EACCES, ENOEXEC) and the
+  // captured streams (subprocess started but exited non-zero) so the
+  // operator can distinguish the two failure modes.
   const initRc = spawnSync(NAPKIN_BIN, ["init", "--path", vaultPath], {
     env: process.env,
     encoding: "utf-8",
@@ -395,7 +422,7 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
   if (initRc.status !== 0) {
     throw new Error(
       `napkin init failed in ${vaultPath} (rc=${initRc.status}): ${
-        initRc.stderr || initRc.stdout
+        initRc.error?.message ?? initRc.stderr ?? initRc.stdout
       }`,
     );
   }
