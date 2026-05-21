@@ -257,7 +257,7 @@ const VARIANT_ABORT_NOTIFY_WAIT_MS = 5_000;
  * (gitignore-outside-managed-block) and one auto-recover path
  * (orphaned worktree pruning).
  */
-const VARIANTS = [
+export const VARIANTS = [
   "healthy",
   "config-outside-block",
   "orphaned-worktree",
@@ -276,7 +276,7 @@ export type Variant = (typeof VARIANTS)[number];
  * class variant becomes a tsc failure here instead of silently
  * taking the full-timeout + green-assertion path.
  */
-function isAbortVariant(variant: Variant): boolean {
+export function isAbortVariant(variant: Variant): boolean {
   switch (variant) {
     case "config-outside-block":
       return true;
@@ -288,6 +288,26 @@ function isAbortVariant(variant: Variant): boolean {
       throw new Error(`isAbortVariant: unhandled variant ${_exhaustive}`);
     }
   }
+}
+
+/**
+ * Order the variants for an `--all` run: abort variants (cost zero)
+ * first, LLM-driven variants after. Within each cost band the input
+ * tuple's order is preserved (JS sort is stable since ES2019), so a
+ * future variant added to {@link VARIANTS} participates in `--all`
+ * automatically and lands in the correct cost band.
+ *
+ * Pinned by `scripts/verify-e2e.test.ts` so a sign-flip in the
+ * comparator (LLM variants first) or a dropped predicate (tuple
+ * order preserved) fails a unit test instead of silently costing
+ * ~$0.50 per LLM variant on every `--all` run.
+ */
+export function orderVariantsForAll(
+  variants: readonly Variant[],
+): readonly Variant[] {
+  return [...variants].sort(
+    (a, b) => Number(isAbortVariant(b)) - Number(isAbortVariant(a)),
+  );
 }
 
 interface Args {
@@ -1732,15 +1752,12 @@ async function main(): Promise<number> {
     // when `--all` is set: the cost-zero abort variants run before
     // the LLM-driven variants so a regression there fails the run
     // before paying ~$0.50 per LLM variant. The order is derived
-    // from {@link VARIANTS} via the {@link isAbortVariant} class so
-    // a future variant added to the tuple participates in `--all`
-    // automatically and lands in the correct cost band — JS sort is
-    // stable since ES2019, so within each band the tuple order is
-    // preserved.
+    // from {@link VARIANTS} via {@link orderVariantsForAll} so a
+    // future variant added to the tuple participates in `--all`
+    // automatically and lands in the correct cost band; the helper's
+    // ordering invariant is pinned by `scripts/verify-e2e.test.ts`.
     const variants: readonly Variant[] = args.all
-      ? [...VARIANTS].sort(
-          (a, b) => Number(isAbortVariant(b)) - Number(isAbortVariant(a)),
-        )
+      ? orderVariantsForAll(VARIANTS)
       : [args.variant];
 
     let aggregateExit = 0;
@@ -1763,9 +1780,14 @@ async function main(): Promise<number> {
   }
 }
 
-main()
-  .then((code) => process.exit(code))
-  .catch((e) => {
-    console.error(`fatal: ${(e as Error).stack ?? e}`);
-    process.exit(2);
-  });
+// Only run when invoked directly (`bun run verify:e2e` / shebang). When
+// imported from a test file (e.g. `scripts/verify-e2e.test.ts`), the
+// module's exported helpers are pulled in without triggering the gate.
+if (import.meta.main) {
+  main()
+    .then((code) => process.exit(code))
+    .catch((e) => {
+      console.error(`fatal: ${(e as Error).stack ?? e}`);
+      process.exit(2);
+    });
+}
