@@ -272,9 +272,11 @@ interface Fixture {
   defaultBranch: string;
   /**
    * SHA of the vault's default branch BEFORE the agent ran. Captured
-   * AFTER `wireAutoInitOnVault` has installed `.git/` and produced the
-   * initial commit, so this is the commit that the bare origin's
-   * `main` ref will track at the start of the distill phase.
+   * AFTER session_start has driven `ensureVaultReadyForDistill(vault,
+   * "fast")` to install `.git/` and produce the initial commit, then
+   * after `wireBareOrigin` pushes `main` to the bare origin, so this
+   * is the commit that the bare origin's `main` ref will track at
+   * the start of the distill phase.
    */
   startSha: string;
   /** SHA of origin/main BEFORE the agent ran (post initial push). */
@@ -402,6 +404,7 @@ function wireBareOrigin(
   const gitVault = (...args: string[]): string => {
     const r = spawnSync("git", ["-C", fixture.vaultPath, ...args], {
       encoding: "utf-8",
+      env: process.env,
     });
     if (r.status !== 0) {
       throw new Error(
@@ -411,7 +414,9 @@ function wireBareOrigin(
     return r.stdout;
   };
 
-  const originInit = spawnSync("git", ["init", "--bare", fixture.originPath]);
+  const originInit = spawnSync("git", ["init", "--bare", fixture.originPath], {
+    env: process.env,
+  });
   if (originInit.status !== 0) {
     throw new Error(`git init --bare failed in ${fixture.originPath}`);
   }
@@ -422,7 +427,7 @@ function wireBareOrigin(
   const originStartSha = spawnSync(
     "git",
     ["-C", fixture.originPath, "rev-parse", "main"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   ).stdout.trim();
 
   return { startSha, originStartSha };
@@ -673,7 +678,7 @@ function assertAutoInitPostConditions(
   const lsConfig = spawnSync(
     "git",
     ["-C", vaultPath, "ls-files", "--error-unmatch", ".napkin/config.json"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   results.push({
     name: "auto-init's initial commit tracks .napkin/config.json",
@@ -690,7 +695,7 @@ function assertAutoInitPostConditions(
   const headProbe = spawnSync(
     "git",
     ["-C", vaultPath, "rev-parse", "--verify", "HEAD"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   const headSha = headProbe.stdout.trim();
   results.push({
@@ -773,7 +778,7 @@ function assertGreenPostConditions(
   const grep = spawnSync(
     "grep",
     ["-rEnH", "^<{7} |^={7}$|^>{7} ", "--include=*.md", fixture.vaultPath],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   results.push({
     name: "no conflict markers in *.md",
@@ -790,7 +795,7 @@ function assertGreenPostConditions(
   const headRef = spawnSync(
     "git",
     ["-C", fixture.vaultPath, "symbolic-ref", "--short", "HEAD"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   const head = headRef.stdout.trim();
   results.push({
@@ -802,7 +807,12 @@ function assertGreenPostConditions(
         : `symbolic-ref failed: ${headRef.stderr.trim()}`,
   });
 
-  // (4) Squash commit landed on default — count >= 2 (1 baseline + agent).
+  // (4) Agent's squash commit landed on the default branch — at least
+  // one commit since `startSha` (auto-init's initial commit, captured
+  // by `wireBareOrigin` AFTER session_start). With the new fixture
+  // the agent's squash commit is the only commit in `startSha..HEAD`
+  // on a clean run; the threshold tolerates fixture variants that
+  // may produce additional intermediate commits.
   const commitCount = spawnSync(
     "git",
     [
@@ -812,7 +822,7 @@ function assertGreenPostConditions(
       "--count",
       `${fixture.startSha}..HEAD`,
     ],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   const count = Number.parseInt(commitCount.stdout.trim(), 10);
   results.push({
@@ -827,7 +837,7 @@ function assertGreenPostConditions(
   const branchList = spawnSync(
     "git",
     ["-C", fixture.vaultPath, "branch", "--list", "distill/*"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   results.push({
     name: "all distill/* branches removed",
@@ -842,7 +852,7 @@ function assertGreenPostConditions(
   const worktreeList = spawnSync(
     "git",
     ["-C", fixture.vaultPath, "worktree", "list", "--porcelain"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   const distillWorktreesStillTracked = worktreeList.stdout
     .split("\n")
@@ -872,7 +882,7 @@ function assertGreenPostConditions(
   const originHead = spawnSync(
     "git",
     ["-C", fixture.originPath, "rev-parse", "main"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   const originHeadSha = originHead.stdout.trim();
   results.push({
@@ -990,7 +1000,7 @@ async function main(): Promise<number> {
   const piCheck = spawnSync(
     process.env.NAPKIN_DISTILL_PI_BIN || "pi",
     ["--version"],
-    { encoding: "utf-8" },
+    { encoding: "utf-8", env: process.env },
   );
   if (piCheck.error) {
     console.error(
