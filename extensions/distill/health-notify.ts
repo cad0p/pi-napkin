@@ -17,7 +17,7 @@
  * the caller's abort logic continues to work in the non-UI path.
  */
 
-import type { HealthFinding } from "./auto-setup";
+import type { ensureVaultReadyForDistill, HealthFinding } from "./auto-setup";
 
 /**
  * Subset of `ExtensionContext` the helper needs: a `hasUI` flag plus a

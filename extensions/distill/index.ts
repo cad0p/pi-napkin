@@ -494,8 +494,8 @@ export default function (pi: ExtensionAPI) {
     // Skip if this is a distill subprocess
     if (process.env.NAPKIN_DISTILL_NO_RECURSE) return;
 
-    // Auto-init git + scaffold .gitignore/.gitattributes so subsequent
-    // worktree operations have the invariants they need. Idempotent and
+    // Auto-init git + scaffold .gitignore so subsequent worktree
+    // operations have the invariants they need. Idempotent and
     // non-throwing — on failure we notify once and disable auto-distill for
     // this session rather than retrying on every interval fire.
     //

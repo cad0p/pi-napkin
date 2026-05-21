@@ -391,7 +391,7 @@ The block style is the same Ansible-style sentinel pattern Ansible's `blockinfil
 | Cadence | When | What it covers | Typical cost |
 |---|---|---|---|
 | Fast-level | Every `session_start` (every pi launch in the vault) | Subdir vs legacy-embedded layout, `.napkin/config.json` parses as JSON, managed gitignore block matches canonical (auto-recover if drift), auto-init `git init` + initial commit if `.git/` is missing | Sub-second (a handful of git probes) |
-| Full-level | On `/distill` (manual) and at each interval-driven auto-distill spawn | Everything fast-level covers, plus: `.napkin/config.json` is git-tracked, vault HEAD resolves (seed empty commit if not), `.napkin/config.json` not gitignored outside the managed block, `.napkin/distill/` not tracked, cache root writable, vault HEAD on a real branch (auto-recover by `git checkout <default>` if detached), no orphaned distill worktree registry entries, no stale `distill/*` branches past the grace period | A few extra git probes; runs only when a worktree is about to be spawned anyway |
+| Full-level | On `/distill` (manual) and at each interval-driven auto-distill spawn | Everything fast-level covers, plus: `.napkin/config.json` is git-tracked, vault HEAD resolves to a commit (seed an empty initial commit if a hand-`git init`-ed vault has no commits yet), `.napkin/config.json` not gitignored outside the managed block, `.napkin/distill/` not tracked, cache root writable, no orphaned distill worktree registry entries, no stale `distill/*` branches past the grace period | A few extra git probes; runs only when a worktree is about to be spawned anyway |
 
 Fast-level findings surface as one-shot notifications at session start; the session continues regardless. Full-level findings are gated separately depending on category (below).
 
@@ -401,7 +401,7 @@ These are recoverable drift the health check fixes in place. Each emits a single
 
 - **Managed-block drift** — markers got reordered, content drifted, or canonical lines leaked outside the block. Resolution: rewrite the bracketed region back to canonical and strip any leaked lines from user territory.
 - **Untracked `.napkin/config.json`** (full-level only) — config file exists but isn't yet in git's index. Resolution: stage and commit it (so worktrees can see it).
-- **Detached HEAD** (full-level only) — vault HEAD is detached or on an arbitrary branch. Resolution: `git checkout <default>` to put HEAD back on the default branch.
+- **Vault HEAD resolves to a commit** (full-level only) — the vault is a `git init`-ed repo with zero commits, so `git rev-parse --verify HEAD` fails and `git worktree add HEAD` would have no ref to pin to. Resolution: `git commit --allow-empty` to seed an empty initial commit. (Detached-HEAD-after-distill is a separate post-distill concern surfaced as the `head-not-on-default` outcome reason in the wrapper-side table above; it requires manual recovery.)
 - **Orphaned distill worktrees** (full-level only) — a previous distill crashed and left a `git worktree list` registry entry pointing at a directory that no longer exists. Resolution: `git worktree prune --expire=now`.
 - **Stale `distill/*` branches** (full-level only) — a `distill/*` branch with a committerdate older than the grace period (24h) AND no live worktree pointing at it. Resolution: `git branch -D <branch>`. The reflog grace gives you a recovery window for content from a failed distill.
 
