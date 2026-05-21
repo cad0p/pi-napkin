@@ -262,6 +262,11 @@ const VARIANTS = [
   "config-outside-block",
   "orphaned-worktree",
 ] as const;
+/**
+ * Health-check fixture variant exercised by this run. The values
+ * live in {@link VARIANTS} (the runtime tuple); see that constant
+ * for the per-variant scenario semantics.
+ */
 export type Variant = (typeof VARIANTS)[number];
 
 /**
@@ -1630,8 +1635,8 @@ async function runOnce(args: Args, variant: Variant): Promise<number> {
     // {@link VARIANT_ABORT_NOTIFY_WAIT_MS} so the gate doesn't pay
     // the full LLM timeout. The variant's post-condition asserts the
     // abort separately.
-    const abortVariant = isAbortVariant(variant);
-    const timeoutMs = abortVariant
+    const isAbort = isAbortVariant(variant);
+    const timeoutMs = isAbort
       ? VARIANT_ABORT_NOTIFY_WAIT_MS
       : DISTILL_MAX_DURATION_MINUTES * 60 * 1000 +
         POLLER_DISPATCH_SLACK_SECS * 1000;
@@ -1653,7 +1658,7 @@ async function runOnce(args: Args, variant: Variant): Promise<number> {
     // results are re-included here so the final summary lists every
     // checked invariant in one PASS/FAIL block, even though they
     // were already asserted earlier for fail-fast.
-    const greenAssertions = abortVariant
+    const greenAssertions = isAbort
       ? []
       : assertGreenPostConditions(fixture, notify, variantLeftoverBranches);
     const variantAssertions = assertVariantPostConditions(variant, notifyCalls);
@@ -1724,11 +1729,18 @@ async function main(): Promise<number> {
 
   try {
     // The variants exercised by the gate are ordered cheapest-first
-    // when `--all` is set: the cost-zero abort variant runs before
+    // when `--all` is set: the cost-zero abort variants run before
     // the LLM-driven variants so a regression there fails the run
-    // before paying ~$0.50 per LLM variant.
+    // before paying ~$0.50 per LLM variant. The order is derived
+    // from {@link VARIANTS} via the {@link isAbortVariant} class so
+    // a future variant added to the tuple participates in `--all`
+    // automatically and lands in the correct cost band — JS sort is
+    // stable since ES2019, so within each band the tuple order is
+    // preserved.
     const variants: readonly Variant[] = args.all
-      ? ["config-outside-block", "healthy", "orphaned-worktree"]
+      ? [...VARIANTS].sort(
+          (a, b) => Number(isAbortVariant(b)) - Number(isAbortVariant(a)),
+        )
       : [args.variant];
 
     let aggregateExit = 0;
