@@ -17,7 +17,7 @@
  * the caller's abort logic continues to work in the non-UI path.
  */
 
-import type { HealthFinding } from "./auto-setup";
+import type { ensureVaultReadyForDistill, HealthFinding } from "./auto-setup";
 
 /**
  * Subset of `ExtensionContext` the helper needs: a `hasUI` flag plus a
@@ -46,8 +46,31 @@ export function surfaceHealthFindings(
   ctx: HealthNotifyCtx,
   findings: readonly HealthFinding[],
 ): { hasErrors: boolean } {
-  const recovered = findings.filter((f) => f.kind === "auto-recovered");
-  const errors = findings.filter((f) => f.kind === "error");
+  const recovered: HealthFinding[] = [];
+  const errors: HealthFinding[] = [];
+  for (const finding of findings) {
+    switch (finding.kind) {
+      case "auto-recovered":
+        recovered.push(finding);
+        break;
+      case "error":
+        errors.push(finding);
+        break;
+      default: {
+        // A future third `HealthFinding.kind` would silently produce
+        // no notify under the previous filter-based shape. The
+        // exhaustiveness assertion forces a tsc error at the
+        // partitioning site so a maintainer adding a new variant
+        // updates the renderer at the same time. Mirrors the
+        // `_exhaustive: never` pattern used by the verify-e2e variant
+        // switches.
+        const _exhaustive: never = finding.kind;
+        throw new Error(
+          `surfaceHealthFindings: unhandled HealthFinding.kind ${String(_exhaustive)}`,
+        );
+      }
+    }
+  }
 
   if (ctx.hasUI && recovered.length > 0) {
     const lines = recovered.map((f) =>

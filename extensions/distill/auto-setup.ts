@@ -48,7 +48,29 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { GIT_SUBCOMMAND_TIMEOUT_MS } from "./distill-workspace";
+import {
+  GIT_SUBCOMMAND_TIMEOUT_MS,
+  resolveCacheRoot,
+} from "./distill-workspace";
+
+/**
+ * Grace period before a stale distill branch is auto-deleted by the
+ * full-level health check. 24 hours is generous enough to cover the
+ * common "user runs another distill the next day" pattern: the user
+ * still has access to the branch tip via `git reflog` for content
+ * recovery if they need it. Tighter would race users who recovered
+ * overnight; looser would let dead branches accumulate without bound.
+ */
+export const STALE_DISTILL_BRANCH_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Milliseconds per hour. Used to render branch ages in hours for
+ * human-readable notify messages (e.g. the stale-distill-branch
+ * deletion finding). Independent of
+ * {@link STALE_DISTILL_BRANCH_GRACE_MS} — the relationship between
+ * "24h grace" and "hours" is incidental, not a derived constant.
+ */
+const MS_PER_HOUR = 60 * 60 * 1000;
 
 /**
  * Snapshot of the v0.3.0 line-by-line entries appended to
@@ -254,6 +276,37 @@ export interface SetupVault {
 }
 
 /**
+ * Optional dependency-injection seam for {@link
+ * ensureVaultReadyForDistill}. All fields are optional; production
+ * call sites pass `undefined` (or omit the argument) and get the
+ * default behavior. Tests inject stubs to exercise paths that are
+ * impractical to reproduce on real filesystems (notably an unwritable
+ * cache root: `chmod 0500` would false-pass under root in CI, and a
+ * read-only mount is platform-specific).
+ */
+export interface SetupOptions {
+  /**
+   * Probe whether `dir` is writable. Defaults to {@link probeWritable},
+   * which writes and removes a temporary file. Tests substitute a
+   * stub that returns `{ writable: false, error }` to exercise the
+   * `cache-root-writable` loud-error path without touching the real
+   * filesystem.
+   */
+  probeWritable?: (dir: string) => WritableProbeResult;
+  /**
+   * Read the current wall-clock time in milliseconds since the
+   * epoch. Defaults to `Date.now`. Tests inject a deterministic
+   * clock to pin boundary cases on the
+   * `no-stale-distill-branches-over-grace` invariant: branches
+   * exactly at {@link STALE_DISTILL_BRANCH_GRACE_MS} age are not
+   * deleted (strict `>` comparison), branches one millisecond past
+   * the boundary are. Without an injectable clock the test would
+   * race the real `Date.now()`.
+   */
+  now?: () => number;
+}
+
+/**
  * Run `git` in `cwd` and return `{ status, stdout, stderr }`. Does not throw
  * on non-zero exit — we translate failures to `SetupResult.error`.
  */
@@ -303,13 +356,6 @@ const INVARIANT_SUBDIR_LAYOUT = "subdir-layout";
 const INVARIANT_VAULT_IS_GIT_REPO = "vault-is-git-repo";
 
 /**
- * Stable invariant ID for `<configPath>/config.json` JSON validity.
- * Loud-error finding only — a corrupt config is the user's hand-edit and
- * we can't guess the intended content.
- */
-const INVARIANT_CONFIG_JSON_VALID = "config.json-valid-json";
-
-/**
  * Stable invariant ID for `<configPath>/config.json` being tracked by
  * git. Auto-recovered via `git add <configRel>`; the existing
  * scaffolded[] consumption stages and commits the file on the same
@@ -319,6 +365,336 @@ const INVARIANT_CONFIG_JSON_VALID = "config.json-valid-json";
  * worktree and napkin's findVault falls back to legacy embedded layout.
  */
 const INVARIANT_CONFIG_JSON_TRACKED = "config.json-tracked";
+
+/**
+ * Stable invariant ID for `<configPath>/config.json` NOT being
+ * gitignored by a rule that lives outside the napkin-distill managed
+ * block. Loud-error finding only — the user added the rule explicitly
+ * and we cannot guess whether removing it would lose track of an
+ * intentional choice. The inside-block flavor is a no-op for this
+ * invariant: the canonical {@link BLOCK_CONTENT} does NOT gitignore
+ * `config.json`, and the {@link INVARIANT_GITIGNORE_BLOCK} reset
+ * automatically removes any drift inside the markers on the next
+ * pass.
+ */
+const INVARIANT_CONFIG_JSON_NOT_GITIGNORED_OUTSIDE_BLOCK =
+  "config.json-not-gitignored-outside-block";
+
+/**
+ * Stable invariant ID for `<configPath>/distill/` NOT containing tracked
+ * files. Loud-error finding only — auto-untrack via `git rm --cached -r`
+ * could lose user data the user staged on purpose. The user resolves
+ * manually after we've surfaced the offending paths.
+ *
+ * `<configPath>/distill/` is napkin-distill's ephemeral worktree-fork
+ * registry; the canonical {@link BLOCK_CONTENT} gitignores it so it
+ * should never be tracked. A tracked entry typically means a stale
+ * commit from before the gitignore block was installed, OR a user
+ * who explicitly ran `git add -f` on the directory.
+ */
+const INVARIANT_NAPKIN_DISTILL_NOT_TRACKED = "napkin-distill-not-tracked";
+
+/**
+ * Stable invariant ID for the cache root being writable. Loud-error
+ * finding only — a read-only home directory or misconfigured
+ * `XDG_CACHE_HOME` is the user's environment problem; auto-recovery
+ * (e.g. fall back to a different cache home) would mask the real
+ * cause and produce surprising state.
+ *
+ * The probe walks UP from `resolveCacheRoot(vault.contentPath)`'s
+ * parent to the first existing ancestor (so a fresh box where
+ * `~/.cache/napkin-distill/` does not yet exist does not
+ * false-error — the probe lands on `~/.cache` instead).
+ */
+const INVARIANT_CACHE_ROOT_WRITABLE = "cache-root-writable";
+
+/**
+ * Stable invariant ID for the vault HEAD pointing at a real commit.
+ * Auto-recovered by seeding an empty initial commit when the vault
+ * has a `.git/` but no commits (e.g. a user who ran `git init` by
+ * hand and never committed). Without this seed, `git worktree add
+ * HEAD` in `createDistillWorktree` would fail with
+ * `fatal: invalid reference: HEAD`. Full-level only — fast-level
+ * skips so a session_start on a fresh-init-but-uncommitted vault
+ * does not seed an unsolicited commit; the seed fires lazily on
+ * the next worktree-based spawn.
+ */
+const INVARIANT_VAULT_HEAD_ON_BRANCH = "vault-head-on-branch";
+
+/**
+ * Stable invariant ID for orphaned distill worktree-registry
+ * entries. Auto-recovered via `git worktree prune --verbose
+ * --expire=now`, which removes registry entries whose worktree
+ * directories have been deleted (typically a crashed pi session).
+ * Safe: prune only touches entries pointing at missing dirs. The
+ * `--expire=now` flag is required because git's default 3-month
+ * grace would skip recently-orphaned entries; see the call site for
+ * full rationale.
+ */
+const INVARIANT_NO_ORPHANED_DISTILL_WORKTREES = "no-orphaned-distill-worktrees";
+
+/**
+ * Stable invariant ID for stale distill branches with no live
+ * worktree. Auto-recovered via `git branch -D <branch>` for any
+ * `distill/*` branch whose committerdate is older than
+ * {@link STALE_DISTILL_BRANCH_GRACE_MS} AND has no live worktree
+ * pointing at it. The reflog grace gives users a recovery window
+ * for content from a failed distill before the branch tip is
+ * unreachable.
+ */
+const INVARIANT_NO_STALE_DISTILL_BRANCHES_OVER_GRACE =
+  "no-stale-distill-branches-over-grace";
+
+/**
+ * Pure parser for `git worktree list --porcelain` output. Extracted
+ * from {@link parseLiveWorktreeBranches} so synthetic-input unit tests
+ * can pin the strict-parser behavior (skip unrecognised ref shapes
+ * rather than adding the wrong key) independent of git's runtime
+ * output. Exported for direct test consumption.
+ *
+ * Porcelain output is a sequence of records separated by blank
+ * lines; each record has lines of the form `<key> <value>`. The
+ * branch line is `branch refs/heads/<short-name>`; we strip the
+ * `refs/heads/` prefix to match the form returned by `git
+ * for-each-ref --format=%(refname:short)`. Detached / bare records
+ * have no `branch` line and contribute nothing to the set.
+ */
+export function parsePorcelainWorktreeBranches(stdout: string): Set<string> {
+  const branches = new Set<string>();
+  for (const line of stdout.split("\n")) {
+    if (line.startsWith("branch ")) {
+      const ref = line.slice("branch ".length).trim();
+      // `git worktree list --porcelain` documents `branch` lines as
+      // always emitting fully-qualified `refs/heads/<name>` refs.
+      // Anything else would be a future git format change; skip
+      // unrecognised shapes rather than adding the wrong key (which
+      // would mismatch the short-name set the stale-branch check
+      // compares against).
+      if (ref.startsWith("refs/heads/")) {
+        branches.add(ref.slice("refs/heads/".length));
+      }
+    }
+  }
+  return branches;
+}
+
+/**
+ * Run `git worktree list --porcelain` against `vaultPath` and return
+ * the set of branch names checked out in live worktrees. Used by the
+ * {@link INVARIANT_NO_STALE_DISTILL_BRANCHES_OVER_GRACE} check to
+ * avoid deleting branches that are still in use.
+ *
+ * Returns an empty set when `git worktree list` fails or the vault
+ * has no worktrees — conservative, since the worst case is that we
+ * attempt to delete a branch that has a live worktree, which
+ * `git branch -D` will refuse with a clear error.
+ */
+export function parseLiveWorktreeBranches(vaultPath: string): Set<string> {
+  const r = spawnSync("git", ["worktree", "list", "--porcelain"], {
+    cwd: vaultPath,
+    encoding: "utf-8",
+    timeout: GIT_SUBCOMMAND_TIMEOUT_MS,
+    env: process.env,
+  });
+  if (r.status !== 0) return new Set();
+  return parsePorcelainWorktreeBranches(r.stdout || "");
+}
+
+/**
+ * Range of the napkin-distill managed block within `<vault>/.gitignore`,
+ * in 1-indexed line numbers (matching `git check-ignore -v` output).
+ * `beginLine` points at the BEGIN marker; `endLine` at the END marker;
+ * the canonical-content lines live STRICTLY between them.
+ *
+ * `null` when the file is missing or the markers are absent / malformed
+ * — the gitignore-block invariant handles the recovery for those
+ * cases on the next pass.
+ */
+interface ManagedBlockRange {
+  beginLine: number;
+  endLine: number;
+}
+
+/**
+ * Read `<giPath>` and locate the napkin-distill managed-block markers.
+ * Returns `null` if the file is missing, the markers are absent, or
+ * the markers are malformed (multiple BEGINs, BEGIN without matching
+ * END, END before BEGIN). The malformed cases are handled by
+ * {@link mergeManagedBlock}'s loud-error finding on the same pass; this
+ * helper's `null` return signals the caller to skip the inside-block
+ * test (treating the line as outside the block, which is the
+ * conservative default).
+ *
+ * Marker matching mirrors {@link mergeManagedBlock}: right-trimmed
+ * exact match against {@link BLOCK_MARKER_BEGIN} / {@link
+ * BLOCK_MARKER_END}, leading whitespace not tolerated.
+ */
+export function parseManagedBlockRange(
+  giPath: string,
+): ManagedBlockRange | null {
+  if (!fs.existsSync(giPath)) return null;
+  const content = fs.readFileSync(giPath, "utf-8");
+  const eol = content.includes("\r\n") ? "\r\n" : "\n";
+  const lines = content.length > 0 ? content.split(eol) : [];
+  let begin = -1;
+  let end = -1;
+  let beginCount = 0;
+  let endCount = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const rtrimmed = lines[i].replace(/\s+$/, "");
+    if (rtrimmed === BLOCK_MARKER_BEGIN) {
+      begin = i;
+      beginCount++;
+    } else if (rtrimmed === BLOCK_MARKER_END) {
+      end = i;
+      endCount++;
+    }
+  }
+  if (beginCount !== 1 || endCount !== 1 || begin >= end) return null;
+  // Convert to 1-indexed (matches `git check-ignore -v` line numbers).
+  return { beginLine: begin + 1, endLine: end + 1 };
+}
+
+/**
+ * Test whether the gitignore rule at `<source>:<line>` lives strictly
+ * inside the managed block defined by `range`. The block markers
+ * themselves are gitignore comments (no-op as patterns) so they will
+ * not appear in `git check-ignore -v` output; only lines strictly
+ * between the markers can be inside the block.
+ *
+ * `source` is the gitignore source path reported by `git check-ignore
+ * -v`; only matches `.gitignore` (the file the managed block lives
+ * in) are eligible to be inside the block. Other sources — a global
+ * `~/.config/git/ignore`, a parent-directory `.gitignore`, an info/
+ * exclude — are by definition outside our managed block, so we
+ * report them as outside.
+ *
+ * Caller passes `null` for `range` when the markers are missing or
+ * malformed; in that case every gitignore rule is treated as outside
+ * the block (conservative default; the gitignore-block invariant
+ * handles the recovery for those cases on the next pass).
+ */
+export function isLineInsideBlock(
+  source: string,
+  line: number,
+  range: ManagedBlockRange | null,
+): boolean {
+  if (range === null) return false;
+  if (source !== ".gitignore") return false;
+  return line > range.beginLine && line < range.endLine;
+}
+
+/**
+ * Parsed output of `git check-ignore -v`. Format documented in `man
+ * git-check-ignore`: `<source> <COLON> <linenum> <COLON> <pattern> <HT>
+ * <pathname>`. The first separator before the pathname is a TAB; the
+ * source-side fields are colon-separated, with the line number in the
+ * middle anchoring the parse (`source` may itself contain colons on
+ * absolute Windows paths or when sourced from absolute global ignore
+ * files).
+ *
+ * Returns `null` when the line does not match the expected `-v` shape
+ * — conservative, since `git check-ignore` exited 0 so the path IS
+ * ignored; we just can't determine where the rule lives. Caller
+ * should treat as outside-block in that case (loud error).
+ */
+export function parseCheckIgnoreVerbose(
+  stdoutLine: string,
+): { source: string; line: number; pattern: string; pathname: string } | null {
+  const tabIdx = stdoutLine.indexOf("\t");
+  if (tabIdx < 0) return null;
+  const matchInfo = stdoutLine.slice(0, tabIdx);
+  const pathname = stdoutLine.slice(tabIdx + 1);
+  // Greedy `.+` on source so absolute paths with colons match;
+  // anchored on the line-number `\d+` in the middle so the parse
+  // remains unambiguous when source/pattern themselves contain
+  // colons.
+  const m = matchInfo.match(/^(.+):(\d+):(.*)$/);
+  if (!m) return null;
+  return {
+    source: m[1],
+    line: parseInt(m[2], 10),
+    pattern: m[3],
+    pathname,
+  };
+}
+
+/**
+ * Walk upward from `dir` until we find an existing ancestor. The
+ * `cache-root-writable` probe fires on a fresh box where
+ * `~/.cache/napkin-distill/` doesn't exist yet, so a literal probe
+ * against the cache root would always fail with ENOENT — a false
+ * positive. Walking up to the first existing ancestor (typically
+ * `~/.cache`, occasionally `~`) probes a directory that's actually
+ * present and reflects the real writability state.
+ *
+ * Stops at the filesystem root (`path.dirname("/") === "/"`).
+ * Returns `"/"` if every path component along the way is missing,
+ * which is impossible in practice (root always exists) but the
+ * deterministic shape keeps the helper's contract total.
+ */
+export function walkToFirstExistingAncestor(dir: string): string {
+  let current = dir;
+  while (!fs.existsSync(current)) {
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
+
+/**
+ * Result of {@link probeWritable}. `writable: true` is the healthy
+ * path; `writable: false` carries the underlying error message so
+ * the loud-error finding can include the platform-specific reason
+ * (EACCES, EROFS, ENOSPC, etc.).
+ */
+export interface WritableProbeResult {
+  writable: boolean;
+  error?: string;
+}
+
+/**
+ * Probe whether `dir` is writable by writing and removing a
+ * temporary file. The filename embeds `Date.now()` plus a random
+ * suffix so concurrent probes from parallel pi sessions or test
+ * workers on the same directory don't collide.
+ *
+ * Failures are translated to `{ writable: false, error }` rather than
+ * thrown so callers can surface the message in a structured
+ * finding. Cleanup of the probe file is best-effort: if writeFileSync
+ * succeeds but unlink fails, we still report `writable: true` (the
+ * write proves the directory is writable) but the temp file leaks.
+ * The leak window is bounded — a subsequent probe on the same path
+ * would overwrite if the random suffixes collide; otherwise the OS's
+ * tmp-cleanup or a manual `rm` resolves it. We accept that trade-
+ * off rather than reporting a false-negative on writability.
+ */
+export function probeWritable(dir: string): WritableProbeResult {
+  // Filename embeds Date.now() AND a random suffix so concurrent
+  // probes from parallel pi sessions or test workers on the same
+  // vault don't collide. The suffix is large enough that a same-ms
+  // collision across realistic concurrency is statistically
+  // negligible.
+  const probePath = path.join(
+    dir,
+    `.napkin-write-probe-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+  );
+  try {
+    fs.writeFileSync(probePath, "");
+  } catch (err) {
+    return {
+      writable: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+  try {
+    fs.unlinkSync(probePath);
+  } catch {
+    // ignore — see JSDoc.
+  }
+  return { writable: true };
+}
 
 /**
  * Internal result of {@link mergeManagedBlock}.
@@ -549,29 +925,58 @@ function mergeManagedBlock(
  *      `.napkin/` subdir that findVault could resolve to. Returns
  *      `{ error: "legacy-embedded-layout", legacyLayout, findings:
  *      [subdir-layout error] }` without touching git.
- *   1. fast + full: validate `<configPath>/config.json` is parseable
- *      (`config.json-valid-json`). On parse failure, push a loud-error
- *      finding and continue (the file is the user's hand-edit; we can
- *      neither auto-correct nor proceed past the smoke check).
- *   2. fast + full: if `.git/` is missing, run `git init -q -b main`
+ *   1. fast + full: if `.git/` is missing, run `git init -q -b main`
  *      (`vault-is-git-repo`, auto-recovered). Failure here aborts with
- *      `error`.
- *   3. fast + full: reconcile `.gitignore` against the canonical managed
+ *      `error`. (JSON validity is checked earlier by
+ *      {@link loadVaultConfig} and is not re-checked here.)
+ *   2. fast + full: reconcile `.gitignore` against the canonical managed
  *      block (`gitignore-block-correct`). Auto-recovered for
  *      install / reset / migration; loud-error for malformed markers.
- *   4. full only: if `<configPath>/config.json` is untracked, stage it
+ *   3. full only: if `<configPath>/config.json` is untracked, stage it
  *      (`config.json-tracked`, auto-recovered) so the next
  *      `git worktree add HEAD` copies it into the worktree. Closes
  *      Issue #14. Skipped at fast level to keep session_start latency
  *      under the ~10 ms target.
- *   5. fast + full: if anything in steps 2–4 changed:
+ *   4. full only: refuse to spawn if `<configPath>/config.json` is
+ *      gitignored by a rule outside the managed block
+ *      (`config.json-not-gitignored-outside-block`, loud-error).
+ *      User-territory ignore rules are explicit user choices that we
+ *      can't auto-rewrite without losing intent.
+ *   5. full only: refuse to spawn if `<configPath>/distill/` contains
+ *      tracked files (`napkin-distill-not-tracked`, loud-error). The
+ *      canonical {@link BLOCK_CONTENT} gitignores the directory; a
+ *      tracked entry is either a stale pre-block commit or an
+ *      explicit `git add -f`, both of which we surface for the user
+ *      to resolve manually.
+ *   6. full only: probe the cache root parent for write access via
+ *      {@link probeWritable} (`cache-root-writable`, loud-error). A
+ *      read-only cache root would fail the worktree spawn at
+ *      `mkdir -p`; surfacing here gives the user a fixable error
+ *      before any git work commits to a worktree.
+ *   7. fast + full: if anything in steps 1–3 changed:
  *      - fresh init -> `git add .` + commit `"napkin: initial vault
  *        commit (auto-distill setup)"`
  *      - existing repo with scaffolded changes -> `git add ...scaffolded`
  *        + commit `"napkin: scaffold auto-distill git config"`
- *   6. fast + full: ensure HEAD resolves to a commit; seed an empty
+ *   8. full only: ensure HEAD resolves to a commit; seed an empty
  *      initial commit when an existing-but-empty repo would leave
- *      `git worktree add HEAD` unable to pin a ref.
+ *      `git worktree add HEAD` unable to pin a ref
+ *      (`vault-head-on-branch`, auto-recovered). Fast-level skips
+ *      so a `session_start` on a hand-bootstrapped repo doesn't
+ *      seed an unsolicited commit; the next full-level call (tick,
+ *      shutdown, or manual `/distill`) seeds lazily when a worktree
+ *      spawn is imminent.
+ *   9. full only: prune orphaned distill worktree registry entries
+ *      via `git worktree prune --expire=now`
+ *      (`no-orphaned-distill-worktrees`, auto-recovered). Cleans up
+ *      registry entries whose worktree directories were removed
+ *      (typically a crashed pi session) so they don't accumulate.
+ *  10. full only: delete `distill/*` branches whose committerdate is
+ *      older than {@link STALE_DISTILL_BRANCH_GRACE_MS} AND have no
+ *      live worktree (`no-stale-distill-branches-over-grace`,
+ *      auto-recovered). The grace gives the user a `git reflog`
+ *      window to recover content from a failed distill before the
+ *      branch tip is collected.
  *
  * Returned `scaffolded` always uses vault-relative paths so notify
  * messages are compact and portable.
@@ -579,6 +984,7 @@ function mergeManagedBlock(
 export function ensureVaultReadyForDistill(
   vault: SetupVault,
   level: HealthLevel,
+  options: SetupOptions = {},
 ): SetupResult {
   const vaultPath = vault.contentPath;
   const findings: HealthFinding[] = [];
@@ -613,27 +1019,6 @@ export function ensureVaultReadyForDistill(
       legacyLayout: { configPath: vault.configPath },
       findings,
     };
-  }
-
-  // `<configPath>/config.json` JSON validity. The file is the user's
-  // hand-edited (or napkin-generated) source of truth for vault config;
-  // a parse failure means later napkin operations will silently fall
-  // back to defaults or crash. Skip the check if the file doesn't
-  // exist — the missing-file case is handled at scaffold time, not
-  // here. We probe it before `git init` so a corrupt config doesn't get
-  // smuggled into the initial commit.
-  const configJsonPath = path.join(vault.configPath, "config.json");
-  if (fs.existsSync(configJsonPath)) {
-    try {
-      JSON.parse(fs.readFileSync(configJsonPath, "utf-8"));
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      findings.push({
-        kind: "error",
-        invariant: INVARIANT_CONFIG_JSON_VALID,
-        message: `${configJsonPath} is not valid JSON: ${msg}`,
-      });
-    }
   }
 
   const gitDir = path.join(vaultPath, ".git");
@@ -690,6 +1075,16 @@ export function ensureVaultReadyForDistill(
   // embedded layout. Closes Issue #14. Auto-recovers by adding the file
   // to scaffolded[] so the existing-repo branch below stages and
   // commits it on the same pass.
+  //
+  // The auto-recovered finding is held back as `pending` and only
+  // pushed onto `findings[]` after the eventual `git add` succeeds.
+  // In the cumulative scenario where the file is also gitignored
+  // outside the managed block (loud-error finding emitted just
+  // below), `git add` will refuse to stage the file and the
+  // existing-repo branch returns with `setup.error`. Pushing the
+  // recovery finding eagerly would produce a false info notify
+  // ("staged for commit") alongside the error notify.
+  let pendingConfigJsonTrackedFinding: HealthFinding | undefined;
   if (level === "full") {
     const configRel = path.relative(
       vaultPath,
@@ -703,13 +1098,111 @@ export function ensureVaultReadyForDistill(
       ]);
       if (tracked.status !== 0) {
         scaffolded.push(configRel);
-        findings.push({
+        pendingConfigJsonTrackedFinding = {
           kind: "auto-recovered",
           invariant: INVARIANT_CONFIG_JSON_TRACKED,
           message: `${configRel} was untracked; staged for commit.`,
           recovery: `git add ${configRel}`,
-        });
+        };
       }
+
+      // Refuse to spawn if the user gitignored `config.json` outside
+      // the napkin-distill managed block. Inside-block drift is
+      // handled automatically by the gitignore-block reset (the
+      // canonical block does not gitignore `config.json`); outside-
+      // block rules are explicit user choices, so we surface a loud
+      // error and let the user decide. The check fires regardless of
+      // whether the file is currently tracked: a user-added rule is
+      // a hazard either way (a future `git rm --cached` would
+      // silently re-untrack the file and the worktree-copy path
+      // breaks).
+      // `--no-index` is load-bearing: without it `git check-ignore`
+      // skips paths already in the index, which would silently disable
+      // this finding the moment the auto-recover stages `config.json`
+      // (i.e. on every healthy second-and-later run). The check must
+      // fire regardless of tracked-state — see the comment above.
+      const ignored = runGit(vaultPath, [
+        "check-ignore",
+        "-v",
+        "--no-index",
+        configRel,
+      ]);
+      if (ignored.status === 0) {
+        const giPathFull = path.join(vaultPath, ".gitignore");
+        const blockRange = parseManagedBlockRange(giPathFull);
+        // `check-ignore -v` may emit one rule per line for paths matched
+        // by multiple ignores (rare; only the last one wins as the
+        // effective rule, but earlier matches are still reported).
+        // Walk every line; if ANY rule is outside the managed block
+        // we surface the error — a user-territory rule is a hazard
+        // even if a managed-block rule also matches.
+        for (const line of ignored.stdout.split("\n")) {
+          if (line.length === 0) continue;
+          const parsed = parseCheckIgnoreVerbose(line);
+          if (!parsed) continue;
+          if (!isLineInsideBlock(parsed.source, parsed.line, blockRange)) {
+            findings.push({
+              kind: "error",
+              invariant: INVARIANT_CONFIG_JSON_NOT_GITIGNORED_OUTSIDE_BLOCK,
+              message: `${configRel} is gitignored at ${parsed.source}:${parsed.line} (outside the napkin-distill managed block); auto-distill cannot track it. Remove the rule from ${parsed.source} or restart pi after fixing it.`,
+            });
+            break;
+          }
+        }
+      }
+    }
+
+    // Refuse to spawn if `<configPath>/distill/` contains tracked
+    // files. The canonical {@link BLOCK_CONTENT} gitignores this
+    // directory — a tracked entry typically means a stale commit
+    // from before the gitignore block was installed, OR a user who
+    // explicitly ran `git add -f`. Auto-untracking via `git rm
+    // --cached -r` could discard staged changes, so we surface a
+    // loud error and let the user resolve manually.
+    const distillRel = path.relative(
+      vaultPath,
+      path.join(vault.configPath, "distill"),
+    );
+    const distillTracked = runGit(vaultPath, [
+      "ls-files",
+      "--",
+      `${distillRel}/`,
+    ]);
+    const trackedDistillPaths = distillTracked.stdout
+      .split("\n")
+      .filter((l) => l.length > 0);
+    if (trackedDistillPaths.length > 0) {
+      // Cap the list embedded in the message so a runaway commit
+      // doesn't bloat the notify text. Three is enough to be
+      // diagnostic; the rest are summarised by count.
+      const sample = trackedDistillPaths.slice(0, 3);
+      const remainder = trackedDistillPaths.length - sample.length;
+      const tail = remainder > 0 ? ` (+${remainder} more)` : "";
+      findings.push({
+        kind: "error",
+        invariant: INVARIANT_NAPKIN_DISTILL_NOT_TRACKED,
+        message: `${distillRel}/ contains tracked files [${sample.join(", ")}]${tail}; auto-untrack would risk data loss. Run \`git rm --cached -r ${distillRel}/\` manually.`,
+      });
+    }
+
+    // Probe writability of the cache root's first existing ancestor.
+    // Walking up handles the fresh-box case where
+    // `~/.cache/napkin-distill/` does not yet exist; the probe lands
+    // on `~/.cache` (typically) and reflects the real writability
+    // state. The probe is injectable via `options.probeWritable` so
+    // tests can exercise the unwritable path without touching
+    // `chmod 0500` (which false-passes under root in CI) or
+    // platform-specific read-only mounts.
+    const probe = options.probeWritable ?? probeWritable;
+    const cacheRoot = resolveCacheRoot(vault.contentPath);
+    const probeDir = walkToFirstExistingAncestor(path.dirname(cacheRoot));
+    const probeResult = probe(probeDir);
+    if (!probeResult.writable) {
+      findings.push({
+        kind: "error",
+        invariant: INVARIANT_CACHE_ROOT_WRITABLE,
+        message: `Cache root parent ${probeDir} is not writable: ${probeResult.error ?? "unknown error"}. Set XDG_CACHE_HOME to a writable directory or fix the permissions.`,
+      });
     }
   }
 
@@ -743,6 +1236,9 @@ export function ensureVaultReadyForDistill(
         findings,
       };
     }
+    if (pendingConfigJsonTrackedFinding) {
+      findings.push(pendingConfigJsonTrackedFinding);
+    }
   } else if (scaffolded.length > 0) {
     // Existing repo: only stage the scaffolding files so we don't sweep in
     // the user's unrelated working changes.
@@ -769,37 +1265,127 @@ export function ensureVaultReadyForDistill(
         findings,
       };
     }
+    if (pendingConfigJsonTrackedFinding) {
+      findings.push(pendingConfigJsonTrackedFinding);
+    }
   }
 
-  // HEAD-valid invariant: createDistillWorktree requires HEAD to resolve
-  // to a commit. The paths above (fresh init OR existing repo + scaffolded
-  // files) produce a commit; the idempotent path (existing repo, nothing
-  // to scaffold) does NOT — so a vault where someone ran `git init` by
-  // hand and never committed leaves HEAD unresolvable. Seed an empty
-  // initial commit so `git worktree add ... HEAD` has something to pin to.
-  // This also covers the narrow window where `git init` succeeded above
-  // (we set `initialized = true`) but scaffolding wrote zero lines
-  // (`.gitignore` already present with our exact content) — that would
-  // fall into neither branch and leave a commit-less repo.
+  // HEAD-valid invariant: createDistillWorktree requires HEAD to
+  // resolve to a commit. The paths above (fresh init OR existing repo
+  // + scaffolded files) produce a commit; the idempotent path
+  // (existing repo, nothing to scaffold) does NOT — so a vault where
+  // someone ran `git init` by hand and never committed leaves HEAD
+  // unresolvable. Seed an empty initial commit so `git worktree add
+  // ... HEAD` has something to pin to. This also covers the narrow
+  // window where `git init` succeeded above (we set
+  // `initialized = true`) but scaffolding wrote zero lines
+  // (`.gitignore` already present with our exact content) — that
+  // would fall into neither branch and leave a commit-less repo.
+  //
+  // Full-level only: a session_start fast-level call on a vault
+  // whose HEAD is currently unresolvable returns clean (no seed,
+  // empty findings). The seed fires lazily on the next full-level
+  // call (auto-distill tick, session_shutdown, or manual /distill
+  // on subdir-layout) where a worktree-based spawn is imminent.
+  // Avoids seeding an unsolicited commit at session_start on
+  // vaults the user is still bootstrapping by hand.
   let seededCommit: SetupResult["seededCommit"];
-  const headAfter = runGit(vaultPath, ["rev-parse", "--verify", "HEAD"]);
-  if (headAfter.status !== 0) {
-    const seed = runGit(vaultPath, [
-      "commit",
-      "--allow-empty",
-      "-q",
-      "-m",
-      "napkin: initial vault commit (auto-distill setup)",
-    ]);
-    if (seed.status !== 0) {
-      return {
-        initialized,
-        scaffolded,
-        error: `git seed commit failed: ${seed.stderr.trim() || "unknown error"}`,
-        findings,
-      };
+  if (level === "full") {
+    const headAfter = runGit(vaultPath, ["rev-parse", "--verify", "HEAD"]);
+    if (headAfter.status !== 0) {
+      const seed = runGit(vaultPath, [
+        "commit",
+        "--allow-empty",
+        "-q",
+        "-m",
+        "napkin: initial vault commit (auto-distill setup)",
+      ]);
+      if (seed.status !== 0) {
+        return {
+          initialized,
+          scaffolded,
+          error: `git seed commit failed: ${seed.stderr.trim() || "unknown error"}`,
+          findings,
+        };
+      }
+      seededCommit = true;
+      findings.push({
+        kind: "auto-recovered",
+        invariant: INVARIANT_VAULT_HEAD_ON_BRANCH,
+        message: `${vaultPath} had a git repo with no commits; seeded empty initial commit so worktree spawn can pin HEAD.`,
+        recovery: "git commit --allow-empty",
+      });
     }
-    seededCommit = true;
+
+    // Orphaned distill worktree-registry entries: `git worktree prune
+    // --verbose --expire=now` removes entries whose worktree
+    // directories have been deleted (typically a crashed pi session).
+    // Prune is safe — it only touches entries pointing at missing
+    // dirs. `--expire=now` overrides git's default 3-month grace
+    // (`gc.worktreePruneExpire`) so freshly-orphaned entries are
+    // cleaned up on the next health check rather than lingering for
+    // months.
+    const prune = runGit(vaultPath, [
+      "worktree",
+      "prune",
+      "--verbose",
+      "--expire=now",
+    ]);
+    // `git worktree prune --verbose` emits its progress to stderr,
+    // not stdout. Combine both streams so the recovery text reflects
+    // every removed registry entry regardless of git's output
+    // routing.
+    const pruneOut = `${prune.stdout}\n${prune.stderr}`.trim();
+    if (pruneOut.length > 0) {
+      findings.push({
+        kind: "auto-recovered",
+        invariant: INVARIANT_NO_ORPHANED_DISTILL_WORKTREES,
+        message: `Pruned orphaned distill worktree registry entries.`,
+        recovery: pruneOut,
+      });
+    }
+
+    // Stale distill branches: any `distill/*` branch with
+    // committerdate older than STALE_DISTILL_BRANCH_GRACE_MS AND no
+    // live worktree pointing at it gets deleted. Reflog grace gives
+    // users a recovery window for content from a failed distill.
+    // Boundary: branches AT exactly the grace age are NOT deleted
+    // (strict `>` comparison) so the boundary tests can pin the
+    // "just under threshold" case deterministically.
+    const branches = runGit(vaultPath, [
+      "for-each-ref",
+      "refs/heads/distill/",
+      "--format=%(refname:short) %(committerdate:unix)",
+    ]);
+    const liveWorktreeBranches = parseLiveWorktreeBranches(vaultPath);
+    const now = (options.now ?? Date.now)();
+    for (const line of branches.stdout.split("\n")) {
+      if (line.length === 0) continue;
+      const spaceIdx = line.lastIndexOf(" ");
+      if (spaceIdx < 0) continue;
+      const refname = line.slice(0, spaceIdx).trim();
+      const tsStr = line.slice(spaceIdx + 1).trim();
+      const tsSec = parseInt(tsStr, 10);
+      if (!refname || !Number.isFinite(tsSec)) continue;
+      const ageMs = now - tsSec * 1000;
+      if (
+        ageMs > STALE_DISTILL_BRANCH_GRACE_MS &&
+        !liveWorktreeBranches.has(refname)
+      ) {
+        const del = runGit(vaultPath, ["branch", "-D", refname]);
+        if (del.status === 0) {
+          findings.push({
+            kind: "auto-recovered",
+            invariant: INVARIANT_NO_STALE_DISTILL_BRANCHES_OVER_GRACE,
+            message: `Deleted stale distill branch ${refname} (${Math.round(ageMs / MS_PER_HOUR)}h old, no live worktree).`,
+            recovery: `git branch -D ${refname}`,
+          });
+        }
+        // If `git branch -D` fails (e.g. the branch is checked out
+        // somewhere we couldn't detect), skip the finding rather
+        // than emit a confusing "deleted" message.
+      }
+    }
   }
 
   return { initialized, scaffolded, seededCommit, findings };

@@ -1,6 +1,6 @@
 # pi-napkin
 
-🧻 [Napkin](https://github.com/cad0p/napkin) integration for [pi](https://github.com/badlogic/pi-mono).
+📜 [Napkin](https://github.com/cad0p/napkin) integration for [pi](https://github.com/badlogic/pi-mono).
 
 Gives a pi agent first-class access to an Obsidian-compatible knowledge vault, with automatic knowledge distillation that safely captures conversation context into notes as you work.
 
@@ -233,7 +233,7 @@ The distill subprocess runs a prompt that asks the model to:
 When you enable `distill.enabled: true` on a vault that isn't a git repo, pi-napkin auto-initializes it on the next session start:
 
 1. Runs `git init`.
-2. Scaffolds `.gitignore` (excludes `.napkin/distill/` — the per-worktree session fork). Distill worktrees themselves live outside the vault (see [Where worktrees live](#where-worktrees-live)), so `.gitignore` doesn't need to exclude them. No `.gitattributes` is written — the agent-driven merge architecture has no driver to register.
+2. Installs the [managed `.gitignore` block](#auto-distill-setup) (excludes `.napkin/distill/` — the per-worktree session fork). Distill worktrees themselves live outside the vault (see [Where worktrees live](#where-worktrees-live)), so `.gitignore` doesn't need to exclude them. No `.gitattributes` is written — the agent-driven merge architecture has no driver to register.
 3. Commits everything as `napkin: initial vault commit (auto-distill setup)`.
 4. Notifies you once, with instructions to undo (`rm -rf <vault>/.git`) or opt out (`distill.enabled: false`).
 
@@ -353,7 +353,71 @@ If you want auto-distill on an existing Obsidian vault:
 2. Start a pi session in the vault.
 3. On session start, pi-napkin prompts to auto-init git if the vault isn't already one.
 
-If your vault IS already a git repo (common for "vault as project"), pi-napkin just adds the `.gitignore` scaffold and moves on.
+If your vault IS already a git repo (common for "vault as project"), pi-napkin just installs the [managed `.gitignore` block](#auto-distill-setup) and moves on.
+
+## Auto-distill setup
+
+Every time pi starts a session in an auto-distill-enabled vault, pi-napkin runs a **health check** that confirms the vault is in a state the worktree-based distill can actually run against. The check is layered into two cadences so the cost of routine checks stays near-zero while the rare expensive checks only fire on the manual `/distill` path.
+
+### The managed `.gitignore` block
+
+pi-napkin owns a single contiguous block in the vault's `.gitignore`, delimited by these exact marker lines:
+
+```gitignore
+# BEGIN NAPKIN-DISTILL MANAGED
+# napkin-distill ephemeral state
+.napkin/distill/
+
+# Obsidian workspace-local state
+.obsidian/workspace*.json
+.obsidian/cache
+.obsidian/.trash/
+
+# Local tmp/cache + common secrets (belt-and-braces; auto-init's
+# `git add .` would otherwise capture them in the initial commit
+# even on vaults that happen to contain dev work).
+# (full canonical body in extensions/distill/auto-setup.ts:BLOCK_CONTENT)
+# END NAPKIN-DISTILL MANAGED
+```
+
+**Inside the markers:** pi-napkin owns the content. Hand-edits between the markers are reset on the next session start — the auto-init / health-check pass rewrites the block to its canonical content if it has drifted.
+
+**Outside the markers:** user territory. pi-napkin's only edit outside the block is removing lines that match canonical block content (a one-time migration cleanup from the 0.3.0 line-by-line format, kept on every run as a self-heal). User-written lines that don't match canonical content are never touched. You can add, remove, or reorder anything else in `.gitignore` and pi-napkin will leave it alone.
+
+The block style is the same Ansible-style sentinel pattern Ansible's `blockinfile` module uses (and Homebrew, oh-my-zsh, etc.) so the boundary between managed and unmanaged content is visually obvious.
+
+### Fast-level vs full-level checks
+
+| Cadence | When | What it covers | Typical cost |
+|---|---|---|---|
+| Fast-level | Every `session_start` (every pi launch in the vault) | Subdir vs legacy-embedded layout, managed gitignore block matches canonical (auto-recover if drift), auto-init `git init` + initial commit if `.git/` is missing | Sub-second (a handful of git probes) |
+| Full-level | On `/distill` (manual) and at each interval-driven auto-distill spawn | Everything fast-level covers, plus: `.napkin/config.json` is git-tracked, vault HEAD resolves to a commit (seed an empty initial commit if a hand-`git init`-ed vault has no commits yet), `.napkin/config.json` not gitignored outside the managed block, `.napkin/distill/` not tracked, cache root writable, no orphaned distill worktree registry entries, no stale `distill/*` branches past the grace period | A few extra git probes; runs only when a worktree is about to be spawned anyway |
+
+Fast-level findings surface as one-shot notifications at session start; the session continues regardless. Full-level findings are gated separately depending on category (below).
+
+### Auto-recover findings (info; distill proceeds)
+
+These are recoverable drift the health check fixes in place. Each emits a single info notification of the form `Auto-distill recovered: <message>` and `/distill` proceeds normally afterward:
+
+- **Managed-block drift** — markers got reordered, content drifted, or canonical lines leaked outside the block. Resolution: rewrite the bracketed region back to canonical and strip any leaked lines from user territory.
+- **Untracked `.napkin/config.json`** (full-level only) — config file exists but isn't yet in git's index. Resolution: stage and commit it (so worktrees can see it).
+- **Vault HEAD resolves to a commit** (full-level only) — the vault is a `git init`-ed repo with zero commits, so `git rev-parse --verify HEAD` fails and `git worktree add HEAD` would have no ref to pin to. Resolution: `git commit --allow-empty` to seed an empty initial commit. (Detached-HEAD-after-distill is a separate post-distill concern surfaced as the `head-not-on-default` outcome reason in the wrapper-side table above; it requires manual recovery.)
+- **Orphaned distill worktrees** (full-level only) — a previous distill crashed and left a `git worktree list` registry entry pointing at a directory that no longer exists. Resolution: `git worktree prune --expire=now`.
+- **Stale `distill/*` branches** (full-level only) — a `distill/*` branch with a committerdate older than the grace period (24h) AND no live worktree pointing at it. Resolution: `git branch -D <branch>`. The reflog grace gives you a recovery window for content from a failed distill.
+
+### Loud-error findings (error; distill aborts)
+
+These are conditions where auto-distill cannot safely proceed. Each emits an error notification of the form `Auto-distill cannot proceed: <message>` and `/distill` aborts before spawning a wrapper:
+
+- **Subdir-layout violation** — vault uses napkin's legacy embedded layout (config at `<vault>/config.json`, no `.napkin/` subdir). Auto-distill needs the subdir layout for worktree-based concurrency to work; see [Migration from legacy layout](#migration-from-legacy-layout).
+- **Malformed `.napkin/config.json`** — file exists but doesn't parse as JSON. Detected by `loadVaultConfig` upstream of the health check itself; auto-distill refuses to guess; fix the file and reload.
+- **`.napkin/config.json` gitignored outside the managed block** (full-level only) — a user-territory rule in `.gitignore` (or a parent `.gitignore` / global ignore) excludes the config file. Worktrees would have no config to read; remove the rule or move it inside the managed block.
+- **`.napkin/distill/` tracked in git** (full-level only) — the per-worktree session fork directory got committed at some point. Untrack it (`git rm --cached -r .napkin/distill/`) before re-running.
+- **Cache root unwritable** (full-level only) — `$XDG_CACHE_HOME/napkin-distill/<hash>/` can't be created or written. Check disk space and permissions on the cache root.
+
+### Opt out
+
+Set `distill.enabled = false` in `.napkin/config.json` (or run `napkin --vault <path> config set --key distill.enabled --value false`). With auto-distill disabled, pi-napkin runs no health checks, installs no managed block, and never touches `.gitignore`. Manual `/distill` still works — it has no concurrency-safety prerequisites.
 
 ## Troubleshooting
 
@@ -438,7 +502,11 @@ CI uses bash-stub fixtures (`extensions/distill/test-fixtures/agent-stubs/`) to 
 bun run verify:e2e
 ```
 
-The script (`scripts/verify-e2e.ts`) creates a tmpdir vault with a bare-repo origin, registers the distill extension against a captured mock `ExtensionAPI`, triggers the `/distill` command handler so the production `runDistillWith` path runs (real wrapper subprocess, real 2-second `setInterval` poller), and asserts on the dispatched UI notification's severity + message together with filesystem post-conditions: no conflict markers, HEAD on default branch, agent's squash commit landed, distill branch removed, worktree removed, outcome sidecar with class `merged-content`, and origin advanced. Exits 0 on PASS, 1 on FAIL. Manual-only — not in CI; cost is roughly $0.50 per run.
+The script (`scripts/verify-e2e.ts`) creates a tmpdir vault by invoking the real `napkin init` CLI, then drives the production session_start handler so auto-init's `git init` + managed `.gitignore` block + initial commit run end-to-end, then triggers the `/distill` command handler so the production `runDistillWith` path runs (real wrapper subprocess, real 2-second `setInterval` poller). It asserts on the dispatched UI notification's severity + message together with filesystem post-conditions: no conflict markers, HEAD on default branch, agent's squash commit landed, distill branch removed, worktree removed, outcome sidecar with class `merged-content`, and origin advanced.
+
+The gate also accepts `--variant <name>` (or `--all`) to exercise the full-level health-check decision points end-to-end — a loud-error path (`config-outside-block`, which aborts before LLM dispatch and costs $0) and an auto-recover path (`orphaned-worktree`, which prunes the orphan and then runs the full distill). The default `healthy` variant is the original gate.
+
+Exits 0 on PASS, 1 on FAIL. Manual-only — not in CI; cost is roughly $0.50 per LLM-driven variant.
 
 This replaces the earlier prompt-only gate. The strict superset matters because the wrapper↔JS-poller seam — where worktree-teardown and outcome-write race — is invisible to a prompt-only harness.
 

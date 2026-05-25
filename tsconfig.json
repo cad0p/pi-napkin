@@ -13,6 +13,10 @@
     "resolveJsonModule": true,
     "types": ["bun"]
   },
-  "include": ["extensions/**/*.ts"],
-  "exclude": ["extensions/**/*.test.ts", "extensions/**/_test-helpers.ts"]
+  "include": ["extensions/**/*.ts", "scripts/**/*.ts"],
+  "exclude": [
+    "extensions/**/*.test.ts",
+    "extensions/**/_test-helpers.ts",
+    "scripts/**/*.test.ts"
+  ]
 }

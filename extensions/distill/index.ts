@@ -172,20 +172,98 @@ export const DEFAULT_DISTILL: DistillConfig = {
   onShutdown: true,
 };
 
+/**
+ * Maximum number of characters from a {@link MalformedVaultConfigError}'s
+ * `parseError` to embed in user-facing notify text.
+ *
+ * `JSON.parse` error messages are usually short (e.g. `Unexpected token
+ * } in JSON at position 42`), but a malformed multi-MB `config.json`
+ * can produce a parse error long enough to overflow the notify
+ * surface. Cap to a value that comfortably fits a single notify line
+ * while leaving the unbounded value on the error object for callers
+ * that want to log it for diagnostics.
+ */
+const MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN = 200;
+
+/**
+ * Bound a {@link MalformedVaultConfigError}'s `parseError` to
+ * {@link MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN} characters.
+ * Long inputs are truncated and suffixed with an ellipsis so the
+ * notify line stays readable; short inputs are returned unchanged.
+ *
+ * Exported for direct use by tests pinning the cap regression.
+ * Every `MalformedVaultConfigError` notify site in this file routes
+ * through this helper so a multi-MB parse error never overflows the
+ * notify surface, regardless of which entry point caught it
+ * (session_start, runDistillWith's pre-flight, or runDistillWith's
+ * setup-failed catch handler).
+ */
+export function formatVaultConfigParseError(parseError: string): string {
+  if (parseError.length <= MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN) {
+    return parseError;
+  }
+  return `${parseError.slice(0, MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN)}… (truncated; full error in console)`;
+}
+
+/**
+ * Thrown by {@link loadVaultConfig} when `<configPath>/config.json` exists
+ * but is not parseable as JSON. Distinct from the missing-file path, which
+ * still returns {@link DEFAULT_DISTILL} (a fresh-vault user has not yet
+ * created the file).
+ *
+ * Callers that own a UI (`session_start`, manual `/distill`) should catch
+ * this and surface a user-actionable error notify so the user knows the
+ * file needs a hand-fix; the file is the user's source of truth and we
+ * cannot guess the intended content. Previously this path failed open
+ * (returned defaults) and short-circuited at the `if (!config.enabled)
+ * return;` line in `session_start` before the user could see any
+ * indication that the config was malformed.
+ */
+export class MalformedVaultConfigError extends Error {
+  readonly configPath: string;
+  readonly parseError: string;
+  constructor(configPath: string, parseError: string) {
+    super(`${configPath} is not valid JSON: ${parseError}`);
+    this.name = "MalformedVaultConfigError";
+    this.configPath = configPath;
+    this.parseError = parseError;
+  }
+}
+
+/**
+ * Read `<vaultPath>/config.json` and return the merged {@link VaultConfig}.
+ *
+ * Two failure modes:
+ *   - File absent: returns {@link DEFAULT_DISTILL} with `showStatus: true`.
+ *     A fresh-vault user has not yet created the file; treating absence
+ *     as defaults keeps `pi` usable on a vault before `napkin init`.
+ *   - File present but malformed JSON: throws {@link
+ *     MalformedVaultConfigError}. Callers with a UI should catch and
+ *     surface a notify so the user knows the file needs a hand-fix.
+ *     Previously this path failed open (returned defaults), which
+ *     masked the parse error as `enabled: false` and short-circuited
+ *     `session_start` before any user-visible signal could fire.
+ */
 export function loadVaultConfig(vaultPath: string): VaultConfig {
   const configPath = path.join(vaultPath, "config.json");
   if (!fs.existsSync(configPath)) {
     return { showStatus: true, distill: DEFAULT_DISTILL };
   }
+  let raw: unknown;
   try {
-    const raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-    return {
-      showStatus: raw.showStatus !== false,
-      distill: { ...DEFAULT_DISTILL, ...(raw.distill || {}) },
-    };
-  } catch {
-    return { showStatus: true, distill: DEFAULT_DISTILL };
+    raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+  } catch (err) {
+    throw new MalformedVaultConfigError(
+      configPath,
+      err instanceof Error ? err.message : String(err),
+    );
   }
+  // biome-ignore lint/suspicious/noExplicitAny: raw shape is user-controlled
+  const r = raw as any;
+  return {
+    showStatus: r?.showStatus !== false,
+    distill: { ...DEFAULT_DISTILL, ...(r?.distill || {}) },
+  };
 }
 
 /**
@@ -407,7 +485,30 @@ export default function (pi: ExtensionAPI) {
     }
     const vaultConfigPath = napkinVault.configPath;
 
-    const { showStatus, distill: config } = loadVaultConfig(vaultConfigPath);
+    let showStatus: boolean;
+    let config: DistillConfig;
+    try {
+      ({ showStatus, distill: config } = loadVaultConfig(vaultConfigPath));
+    } catch (err) {
+      if (err instanceof MalformedVaultConfigError) {
+        // Malformed `config.json` is the user's hand-edit; we cannot
+        // guess the intended shape. Surface a notify so the user can
+        // fix the file and re-launch; skip the rest of session_start
+        // (no health check, no auto-distill arming) because the
+        // session-wide flags downstream depend on a parseable config.
+        // The previous fail-open behavior of `loadVaultConfig` masked
+        // the parse error as `enabled: false` and short-circuited
+        // before any user-visible signal could fire.
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `Auto-distill cannot proceed: ${err.configPath} is not valid JSON (${formatVaultConfigParseError(err.parseError)}). Fix the file by hand and restart pi.`,
+            "error",
+          );
+        }
+        return;
+      }
+      throw err;
+    }
     if (!config.enabled) {
       if (ctx.hasUI && showStatus) {
         ctx.ui.setStatus(
@@ -421,8 +522,8 @@ export default function (pi: ExtensionAPI) {
     // Skip if this is a distill subprocess
     if (process.env.NAPKIN_DISTILL_NO_RECURSE) return;
 
-    // Auto-init git + scaffold .gitignore/.gitattributes so subsequent
-    // worktree operations have the invariants they need. Idempotent and
+    // Auto-init git + scaffold .gitignore so subsequent worktree
+    // operations have the invariants they need. Idempotent and
     // non-throwing — on failure we notify once and disable auto-distill for
     // this session rather than retrying on every interval fire.
     //
@@ -935,9 +1036,28 @@ export default function (pi: ExtensionAPI) {
     }
     const vaultContentPath = vaultInfo.contentPath;
 
-    const { showStatus, distill: config } = loadVaultConfig(
-      vaultInfo.configPath,
-    );
+    let showStatus: boolean;
+    let config: DistillConfig;
+    try {
+      ({ showStatus, distill: config } = loadVaultConfig(vaultInfo.configPath));
+    } catch (err) {
+      if (err instanceof MalformedVaultConfigError) {
+        // Manual `/distill` and the auto-distill tick both flow through
+        // here. A malformed `config.json` means we can't determine
+        // whether distill is enabled or how to parameterise the spawn;
+        // notify the user and skip this run rather than crashing the
+        // command handler / timer callback. The session keeps running
+        // so the user can fix the file and retry.
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `Auto-distill cannot proceed: ${err.configPath} is not valid JSON (${formatVaultConfigParseError(err.parseError)}). Fix the file by hand and retry.`,
+            "error",
+          );
+        }
+        return;
+      }
+      throw err;
+    }
     const sessionFile = ctx.sessionManager.getSessionFile?.();
     if (!sessionFile) return;
 
@@ -1330,9 +1450,24 @@ export default function (pi: ExtensionAPI) {
       };
     } catch (err) {
       const theme = c.hasUI ? c.ui.theme : null;
-      const { showStatus } = loadVaultConfig(
-        new Napkin(c.cwd).vault.configPath,
-      );
+      // Defensive: a malformed `config.json` here cannot prevent the
+      // status repaint (we're already in a setup-failed catch handler
+      // and need to surface SOME signal to the user). Default
+      // `showStatus` to `true` if `loadVaultConfig` itself errors, and
+      // surface the underlying error via notify so the user knows the
+      // file needs a hand-fix rather than seeing only the status
+      // repaint.
+      let showStatus = true;
+      try {
+        ({ showStatus } = loadVaultConfig(new Napkin(c.cwd).vault.configPath));
+      } catch (cfgErr) {
+        if (cfgErr instanceof MalformedVaultConfigError && c.hasUI) {
+          c.ui.notify(
+            `Auto-distill cannot proceed: ${cfgErr.configPath} is not valid JSON (${formatVaultConfigParseError(cfgErr.parseError)}). Fix the file by hand and retry.`,
+            "error",
+          );
+        }
+      }
       if (c.hasUI && theme && showStatus) {
         const msg =
           err instanceof DistillError

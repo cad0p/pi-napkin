@@ -6,7 +6,9 @@ import * as path from "node:path";
 import {
   DEFAULT_DISTILL,
   formatOutcomeNotification,
+  formatVaultConfigParseError,
   loadVaultConfig,
+  MalformedVaultConfigError,
 } from "./index";
 
 /**
@@ -115,8 +117,28 @@ describe("loadVaultConfig", () => {
     expect(cfg.distill.onShutdown === false).toBe(false);
   });
 
-  test("malformed JSON falls back to defaults", () => {
+  test("malformed JSON throws MalformedVaultConfigError with parse detail", () => {
     const vault = track(makeVault("{ not valid json"));
+    let thrown: unknown = null;
+    try {
+      loadVaultConfig(vault);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(MalformedVaultConfigError);
+    const e = thrown as MalformedVaultConfigError;
+    expect(e.configPath).toBe(path.join(vault, "config.json"));
+    expect(e.parseError.length).toBeGreaterThan(0);
+    // Make sure the underlying message embeds the path so notify-text
+    // surfaces a user-actionable file location.
+    expect(e.message).toContain("config.json");
+  });
+
+  test("missing config.json still returns DEFAULT (no throw)", () => {
+    // Counterfactual to the malformed-JSON throw: the missing-file
+    // path stays fail-soft so a fresh vault before `napkin init` is
+    // still usable inside pi.
+    const vault = track(makeVault(null));
     const cfg = loadVaultConfig(vault);
     expect(cfg.distill).toEqual(DEFAULT_DISTILL);
     expect(cfg.showStatus).toBe(true);
@@ -143,6 +165,39 @@ describe("loadVaultConfig", () => {
       provider: "kiro",
       id: "claude-sonnet-4-6",
     });
+  });
+});
+
+describe("formatVaultConfigParseError", () => {
+  // The user-facing notify text embeds the parse-error verbatim.
+  // JSON.parse messages are usually short, but a malformed multi-MB
+  // config.json can produce a parse error long enough to overflow the
+  // notify surface. The formatter caps the embedded text to a
+  // bounded length while leaving the unbounded value on the error
+  // object for callers that want to log it.
+
+  test("short parse error: returned unchanged", () => {
+    const short = "Unexpected token } in JSON at position 42";
+    expect(formatVaultConfigParseError(short)).toBe(short);
+  });
+
+  test("1 KB parse error: bounded with truncation suffix, total length under 300 chars", () => {
+    // Adversarial input: a 1 KB parse-error message. The cap
+    // constant is 200; the formatter appends a short truncation
+    // suffix. We assert the total fits comfortably in a single
+    // notify line (≤ 300 chars covers the cap + suffix without
+    // pinning the exact suffix wording).
+    const longParseError = "x".repeat(1024);
+    const formatted = formatVaultConfigParseError(longParseError);
+    expect(formatted.length).toBeLessThan(300);
+    expect(formatted.length).toBeLessThan(longParseError.length);
+    // Truncation marker is present so the user can tell the message
+    // was clipped.
+    expect(formatted).toContain("truncated");
+  });
+
+  test("empty parse error: returned unchanged", () => {
+    expect(formatVaultConfigParseError("")).toBe("");
   });
 });
 
