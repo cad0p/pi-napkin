@@ -18,6 +18,11 @@ Fixes [#14](https://github.com/cad0p/pi-napkin/issues/14): distill worktrees sho
 - *(distill)* Centralized auto-distill health check (Phase B) ([#17](https://github.com/cad0p/pi-napkin/pull/17))
 
 
+### ⚙️ Miscellaneous Tasks
+
+- Replace 🧻 with 📜 as the napkin emoji ([#18](https://github.com/cad0p/pi-napkin/pull/18))
+
+
 ## [0.3.0] - 2026-05-19
 
 <!-- USER-EDITABLE SECTION START -->
