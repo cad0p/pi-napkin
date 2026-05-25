@@ -24,6 +24,8 @@ Fork drift vs upstream v0.2.4:
 
 - *(distill)* Centralized auto-distill health check (Phase A) ([#15](https://github.com/cad0p/pi-napkin/pull/15))
 
+- *(distill)* Centralized auto-distill health check (Phase B) ([#17](https://github.com/cad0p/pi-napkin/pull/17))
+
 
 ## [0.3.0] - 2026-05-19
 
