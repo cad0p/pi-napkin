@@ -2,6 +2,27 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.1] - 2026-05-25
+
+<!-- USER-EDITABLE SECTION START -->
+
+Fixes [#14](https://github.com/cad0p/pi-napkin/issues/14): distill worktrees showed `Empty vault` when `.napkin/config.json` wasn't git-tracked, forcing users to manually copy it into every worktree. Auto-setup now tracks `config.json` on first run, and a centralized two-tier health check (fast at session_start, full at worktree-spawn) refuses to spawn distill on misconfigured setups instead of producing weird behavior. Landed in two phases: [#15](https://github.com/cad0p/pi-napkin/pull/15) (scaffolding + the actual fix) and [#17](https://github.com/cad0p/pi-napkin/pull/17) (remaining full-level invariants).
+
+<!-- USER-EDITABLE SECTION END -->
+
+
+### 🚀 Features
+
+- *(distill)* Centralized auto-distill health check (Phase A) ([#15](https://github.com/cad0p/pi-napkin/pull/15))
+
+- *(distill)* Centralized auto-distill health check (Phase B) ([#17](https://github.com/cad0p/pi-napkin/pull/17))
+
+
+### ⚙️ Miscellaneous Tasks
+
+- Replace 🧻 with 📜 as the napkin emoji ([#18](https://github.com/cad0p/pi-napkin/pull/18))
+
+
 ## [0.3.0] - 2026-05-19
 
 <!-- USER-EDITABLE SECTION START -->
