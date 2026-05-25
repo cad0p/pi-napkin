@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.3.1] - 2026-05-25
 
 <!-- USER-EDITABLE SECTION START -->
 
