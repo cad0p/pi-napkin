@@ -1,7 +1,7 @@
 {
   "name": "@cad0p/pi-napkin",
   "version": "0.3.0",
-  "description": "🧻 Napkin integration for pi — vault context, knowledge tools, and automatic distillation with git-worktree concurrency safety",
+  "description": "📜 Napkin integration for pi — vault context, knowledge tools, and automatic distillation with git-worktree concurrency safety",
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"
