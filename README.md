@@ -1,6 +1,6 @@
 # pi-napkin
 
-🧻 [Napkin](https://github.com/cad0p/napkin) integration for [pi](https://github.com/badlogic/pi-mono).
+📜 [Napkin](https://github.com/cad0p/napkin) integration for [pi](https://github.com/badlogic/pi-mono).
 
 Gives a pi agent first-class access to an Obsidian-compatible knowledge vault, with automatic knowledge distillation that safely captures conversation context into notes as you work.
 

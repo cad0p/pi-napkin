@@ -78,7 +78,7 @@ export default function (pi: ExtensionAPI) {
     "napkin-context",
     (message, { expanded }, theme) => {
       if (!expanded) {
-        const label = theme.fg("customMessageLabel", "🧻 napkin vault context");
+        const label = theme.fg("customMessageLabel", "📜 napkin vault context");
         const hint = theme.fg("dim", " — Ctrl+O to expand");
         return new Text(label + hint, 1, 0);
       }
@@ -181,7 +181,7 @@ export default function (pi: ExtensionAPI) {
     if (ctx.hasUI && loadShowStatus(n.vault.configPath)) {
       const theme = ctx.ui.theme;
       if (hasVault) {
-        ctx.ui.setStatus("napkin", `🧻${theme.fg("dim", " napkin")}`);
+        ctx.ui.setStatus("napkin", `📜${theme.fg("dim", " napkin")}`);
       } else {
         ctx.ui.setStatus("napkin", theme.fg("dim", "napkin: no NAPKIN.md"));
       }
