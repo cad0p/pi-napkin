@@ -40,8 +40,9 @@ const SUFFICIENTLY_LARGE_INTERVAL_MS = 10_000;
 /**
  * Build a subdir-layout vault with `distill.enabled=true` and an initial
  * commit. The vault is a real git repo; the `.napkin/config.json` is
- * the napkin source-of-truth that the health check reads to enforce
- * `config.json-valid-json`.
+ * the napkin source-of-truth that `loadVaultConfig` reads, and the
+ * health check on top of it enforces the layout + managed-block + git
+ * invariants.
  */
 function createSubdirVault(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "health-wiring-vault-"));
@@ -636,6 +637,87 @@ describe("per-spawn health-check wiring", () => {
       expect(worktreeCount(vault)).toBe(1);
     } finally {
       cleanupWorktrees(vault);
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  // --- session_start with malformed config.json --------------------------
+  //
+  // `loadVaultConfig` previously masked malformed JSON as `enabled: false`
+  // and the session_start handler short-circuited before any user-visible
+  // signal could fire. After the propagation fix, `loadVaultConfig`
+  // throws `MalformedVaultConfigError`; session_start catches it, emits
+  // an actionable error notify, and skips the rest of the handler (no
+  // health check, no auto-distill arming).
+
+  test("session_start on vault with malformed config.json: error notify, no spawn, valid-config session unaffected", async () => {
+    const vault = createSubdirVault();
+    try {
+      // Pre-corrupt `.napkin/config.json` BEFORE session_start. The
+      // helper wrote a parseable JSON; we replace it with a corrupt
+      // string so the parse fails immediately.
+      const cfgPath = path.join(vault, ".napkin", "config.json");
+      fs.writeFileSync(cfgPath, "{ this is not valid JSON");
+
+      const sm = createSession(vault);
+      const { ui, notifyCalls } = makeFakeUI();
+      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+
+      const { api, captured } = makeMockExtensionAPI();
+      distillExtension(api as never);
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.handlers.session_start({ reason: "new" }, ctx as any);
+
+      const errors = notifyCalls.filter((n) => n.severity === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0].msg).toContain(cfgPath);
+      expect(errors[0].msg).toContain("not valid JSON");
+      // Actionable hint: the user needs to know what to do.
+      expect(errors[0].msg.toLowerCase()).toContain("fix");
+
+      // No health-check info notify (auto-recovery channel) and no
+      // worktree spawn. The handler returned before
+      // `ensureVaultReadyForDistill` could run.
+      const infos = notifyCalls.filter((n) => n.severity === "info");
+      expect(infos).toEqual([]);
+      expect(worktreeCount(vault)).toBe(0);
+      // The interval timer is also not armed when session_start aborts
+      // on malformed config — the handler returns before `setInterval`.
+      expect(capturedInterval).toBeNull();
+    } finally {
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  test("session_start on vault with valid config + enabled=false: no error notify, no spawn (regression check)", async () => {
+    // Counterfactual to the malformed-config test above: a parseable
+    // config with `distill.enabled = false` is the explicit-opt-out
+    // case. The handler short-circuits with NO error notify (the
+    // user knows distill is off) and NO auto-init either.
+    const vault = createSubdirVault();
+    try {
+      const cfgPath = path.join(vault, ".napkin", "config.json");
+      fs.writeFileSync(
+        cfgPath,
+        JSON.stringify({
+          vault: { root: ".." },
+          distill: { enabled: false },
+        }),
+      );
+
+      const sm = createSession(vault);
+      const { ui, notifyCalls } = makeFakeUI();
+      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+
+      const { api, captured } = makeMockExtensionAPI();
+      distillExtension(api as never);
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.handlers.session_start({ reason: "new" }, ctx as any);
+
+      expect(notifyCalls.filter((n) => n.severity === "error")).toEqual([]);
+      expect(notifyCalls.filter((n) => n.severity === "info")).toEqual([]);
+      expect(worktreeCount(vault)).toBe(0);
+    } finally {
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });

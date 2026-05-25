@@ -12,7 +12,16 @@ import {
   ensureVaultReadyForDistill,
   GITIGNORE_LINES,
   type HealthLevel,
+  isLineInsideBlock,
   LEGACY_EMBEDDED_LAYOUT_ERROR,
+  parseCheckIgnoreVerbose,
+  parseLiveWorktreeBranches,
+  parseManagedBlockRange,
+  parsePorcelainWorktreeBranches,
+  probeWritable,
+  type SetupOptions,
+  STALE_DISTILL_BRANCH_GRACE_MS,
+  walkToFirstExistingAncestor,
 } from "./auto-setup";
 
 /**
@@ -58,6 +67,7 @@ describe("ensureVaultReadyForDistill", () => {
    */
   function runSetup(
     level: HealthLevel = "fast",
+    options: SetupOptions = {},
   ): ReturnType<typeof ensureVaultReadyForDistill> {
     const saved = {
       name: process.env.GIT_AUTHOR_NAME,
@@ -85,6 +95,7 @@ describe("ensureVaultReadyForDistill", () => {
           configPath: path.join(vault, ".napkin"),
         },
         level,
+        options,
       );
     } finally {
       if (saved.name === undefined) delete process.env.GIT_AUTHOR_NAME;
@@ -324,12 +335,15 @@ describe("ensureVaultReadyForDistill", () => {
   // otherwise the FIRST auto-distill after session_start crashes. The
   // tests below pin each entry path.
 
-  test("FB-2: existing empty repo, idempotent scaffolding — seeds empty commit so HEAD is valid", () => {
-    // Setup: run `git init` in the vault, then pre-install our scaffolding
-    // file with exact content — so mergeManagedBlock writes nothing and the
-    // existing-repo commit branch is SKIPPED. This is the idempotent
-    // re-run path on a vault that happens to have no commits yet. Pre-FB-2
-    // this branch left HEAD unresolvable.
+  test("existing empty repo, idempotent scaffolding at full-level: seeds empty commit so HEAD is valid + emits finding", () => {
+    // Run `git init` in the vault, then pre-install our scaffolding
+    // file with exact content — so mergeManagedBlock writes nothing
+    // and the existing-repo commit branch is SKIPPED. This is the
+    // idempotent re-run path on a vault that happens to have no
+    // commits yet. Without the full-level seed this branch would
+    // leave HEAD unresolvable, and `git worktree add HEAD` in
+    // createDistillWorktree would fail with `fatal: invalid
+    // reference: HEAD`.
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
     // Pre-populate .gitignore with our exact canonical block so the
@@ -341,17 +355,44 @@ describe("ensureVaultReadyForDistill", () => {
     const beforeHead = git(vault, ["rev-parse", "--verify", "HEAD"]);
     expect(beforeHead.status).not.toBe(0);
 
-    const r = runSetup();
+    const r = runSetup("full");
     expect(r.error).toBeUndefined();
     expect(r.initialized).toBe(false);
     expect(r.scaffolded).toEqual([]); // nothing to scaffold
-    expect(r.findings).toEqual([]);
     expect(r.seededCommit).toBe(true);
+    const seedFinding = r.findings.find(
+      (f) => f.invariant === "vault-head-on-branch",
+    );
+    expect(seedFinding).toBeDefined();
+    expect(seedFinding?.kind).toBe("auto-recovered");
 
     // Post-condition: HEAD resolves — subsequent createDistillWorktree
     // won't explode.
     const afterHead = git(vault, ["rev-parse", "--verify", "HEAD"]);
     expect(afterHead.status).toBe(0);
+  });
+
+  test("existing empty repo, idempotent scaffolding at fast-level: does NOT seed (defers to next full-level)", () => {
+    // Counterfactual to the full-level test above. Fast-level
+    // (session_start) on a freshly `git init`-ed but uncommitted
+    // vault returns clean: no seed, no finding. The seed fires
+    // lazily on the next worktree-based spawn (auto-distill tick,
+    // session_shutdown, or manual /distill).
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, ".gitignore"), canonicalBlock());
+
+    const r = runSetup("fast");
+    expect(r.error).toBeUndefined();
+    expect(r.seededCommit).toBeUndefined();
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("vault-head-on-branch");
+    }
+
+    // HEAD remains unresolvable post fast-level call — the gate is
+    // moved, not removed.
+    const afterHead = git(vault, ["rev-parse", "--verify", "HEAD"]);
+    expect(afterHead.status).not.toBe(0);
   });
 
   test("FB-2: existing empty repo, new scaffolding — normal scaffold+commit path still works", () => {
@@ -926,47 +967,6 @@ describe("ensureVaultReadyForDistill", () => {
     expect(before).not.toContain(".env");
   });
 
-  // --- config.json validity ----------------------------------------------
-  //
-  // The vault's config.json is the user's hand-edited (or napkin-
-  // generated) source of truth for vault config. A parse failure means
-  // later napkin operations will silently fall back to defaults or
-  // crash; we surface a loud error so the user can fix the file.
-
-  test("invalid JSON in config.json: error finding, no auto-recovery", () => {
-    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
-    fs.writeFileSync(
-      path.join(vault, ".napkin", "config.json"),
-      "{ this is not valid json",
-    );
-    fs.writeFileSync(path.join(vault, "notes.md"), "# n\n");
-
-    const r = runSetup();
-    expect(r.error).toBeUndefined();
-    expect(r.findings).toContainEqual({
-      kind: "error",
-      invariant: "config.json-valid-json",
-      message: expect.stringContaining("is not valid JSON"),
-    });
-    // The corrupt file is left in place — user must repair it.
-    expect(
-      fs.readFileSync(path.join(vault, ".napkin", "config.json"), "utf-8"),
-    ).toBe("{ this is not valid json");
-  });
-
-  test("missing config.json: no config.json-valid-json finding (skip silently)", () => {
-    // Subdir-layout vault with no config.json yet (the typical fresh-
-    // setup state before `napkin init` runs). The valid-JSON check is
-    // file-existence-gated so we don't false-positive on this.
-    fs.writeFileSync(path.join(vault, "notes.md"), "# n\n");
-
-    const r = runSetup();
-    expect(r.error).toBeUndefined();
-    for (const f of r.findings) {
-      expect(f.invariant).not.toBe("config.json-valid-json");
-    }
-  });
-
   // --- config.json tracked (full-level only; closes Issue #14) ----------
   //
   // Distill worktrees are checked out via `git worktree add HEAD`, which
@@ -1077,6 +1077,869 @@ describe("ensureVaultReadyForDistill", () => {
       ".napkin/config.json",
     ]);
     expect(ls.status).not.toBe(0);
+  });
+
+  // --- config.json-not-gitignored-outside-block (full-level only) -------
+  //
+  // Inside-block drift is recovered by the `gitignore-block-correct`
+  // reset on the next pass (the canonical {@link BLOCK_CONTENT} does
+  // not gitignore `config.json`). Outside-block rules are explicit
+  // user choices, so we surface a loud error and refuse to spawn:
+  // the rule may be intentional (the user opted out of tracking)
+  // and an auto-untrack would lose the user's choice.
+
+  /**
+   * Build an existing-repo + tracked-config.json fixture and return
+   * the vault paths the tests need. Repo has a seed commit and the
+   * canonical managed block already installed; tests append user-
+   * territory rules to `.gitignore` and re-run setup to assert on
+   * the new finding.
+   */
+  function setupExistingRepoWithBlock(): { giPath: string; configRel: string } {
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+    // Run setup once so the managed block is installed and config.json
+    // is tracked. Subsequent test bodies start from a healthy vault.
+    runSetup("full");
+    return {
+      giPath: path.join(vault, ".gitignore"),
+      configRel: ".napkin/config.json",
+    };
+  }
+
+  test("user gitignores config.json outside the managed block: error finding", () => {
+    const { giPath, configRel } = setupExistingRepoWithBlock();
+    // Prepend a user-territory rule above the managed block.
+    const original = fs.readFileSync(giPath, "utf-8");
+    fs.writeFileSync(giPath, `# user territory\n${configRel}\n${original}`);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "user adds rule"]);
+
+    const r = runSetup("full");
+    const finding = r.findings.find(
+      (f) => f.invariant === "config.json-not-gitignored-outside-block",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("error");
+    expect(finding?.message).toContain(configRel);
+    expect(finding?.message).toContain(".gitignore:");
+    // Actionable hint so the user knows where to act.
+    expect(finding?.message.toLowerCase()).toContain("remove");
+  });
+
+  test("managed block contains config.json line (synthetic): no outside-block finding (block reset handles it)", () => {
+    const { giPath, configRel } = setupExistingRepoWithBlock();
+    // Synthetically inject a `config.json` line INSIDE the markers.
+    // The next setup pass first runs the gitignore-block reset (which
+    // removes the drift), so by the time the outside-block check
+    // fires the rule is gone. We assert the absence of the
+    // outside-block finding regardless of whether the reset fires on
+    // this pass or the next.
+    const lines = fs.readFileSync(giPath, "utf-8").split("\n");
+    const endIdx = lines.findIndex((l) =>
+      l.replace(/\s+$/, "").endsWith("END NAPKIN-DISTILL MANAGED"),
+    );
+    expect(endIdx).toBeGreaterThan(0);
+    lines.splice(endIdx, 0, configRel);
+    fs.writeFileSync(giPath, lines.join("\n"));
+
+    const r = runSetup("full");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-not-gitignored-outside-block");
+    }
+  });
+
+  test("config.json not gitignored at all: no finding (regression check)", () => {
+    setupExistingRepoWithBlock();
+    // Healthy vault — no user-territory rule. Subsequent runs are
+    // idempotent.
+    const r = runSetup("full");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-not-gitignored-outside-block");
+    }
+  });
+
+  test("fast-level does NOT run the outside-block check", () => {
+    const { giPath, configRel } = setupExistingRepoWithBlock();
+    const original = fs.readFileSync(giPath, "utf-8");
+    fs.writeFileSync(giPath, `${configRel}\n${original}`);
+    git(vault, ["add", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "user adds rule"]);
+
+    const r = runSetup("fast");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-not-gitignored-outside-block");
+    }
+  });
+
+  // Cumulative scenario: config.json is BOTH untracked AND gitignored
+  // by a user-territory rule outside the managed block. The eventual
+  // `git add .napkin/config.json` from the existing-repo branch will
+  // refuse (gitignored paths are skipped). The auto-recover finding
+  // ("staged for commit") must NOT fire alongside the loud-error
+  // finding — a false info notify would contradict the failure.
+  test("untracked config.json + outside-block gitignore: error finding only, no false config.json-tracked recovery", () => {
+    // Build a vault with a tracked seed but an untracked, gitignored
+    // .napkin/config.json. We can't reuse setupExistingRepoWithBlock
+    // because that helper runs setup once (which would track the file
+    // before we add the gitignore rule).
+    git(vault, ["init", "-q", "-b", "main"]);
+    git(vault, ["config", "commit.gpgsign", "false"]);
+    fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
+    // User-territory rule above the (yet-to-be-installed) managed block.
+    fs.writeFileSync(path.join(vault, ".gitignore"), ".napkin/config.json\n");
+    git(vault, ["add", "seed.md", ".gitignore"]);
+    git(vault, ["commit", "-q", "-m", "seed + user gitignore rule"]);
+
+    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.writeFileSync(
+      path.join(vault, ".napkin", "config.json"),
+      JSON.stringify({ vault: { root: ".." } }),
+    );
+
+    const r = runSetup("full");
+
+    // Loud-error finding fires for the outside-block rule.
+    const outsideBlock = r.findings.find(
+      (f) => f.invariant === "config.json-not-gitignored-outside-block",
+    );
+    expect(outsideBlock).toBeDefined();
+    expect(outsideBlock?.kind).toBe("error");
+
+    // Auto-recover finding must NOT fire — the staging step did not
+    // succeed (or, more precisely: the recovery message would be
+    // wrong if it were emitted). The user fixes the gitignore rule
+    // and re-runs; the next pass tracks the file cleanly.
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("config.json-tracked");
+    }
+
+    // Setup returns with a populated `error` (`git add` refused the
+    // gitignored path) so callers abort the spawn.
+    expect(r.error).toBeDefined();
+    expect(r.error).toContain("git add");
+  });
+
+  // --- napkin-distill-not-tracked (full-level only) ----------------------
+  //
+  // The canonical {@link BLOCK_CONTENT} gitignores `.napkin/distill/`,
+  // so a tracked entry there means a stale commit (predates the
+  // gitignore block) or a deliberate `git add -f`. Auto-untrack would
+  // discard the user's staged changes; refuse to spawn instead.
+
+  test(".napkin/distill/ contains tracked files: error finding with sample paths", () => {
+    const { configRel } = setupExistingRepoWithBlock();
+    // Synthesize a tracked entry under .napkin/distill/. The canonical
+    // gitignore block excludes the directory, so we have to use
+    // `git add -f` to force-stage.
+    const distillDir = path.join(vault, ".napkin", "distill");
+    fs.mkdirSync(distillDir, { recursive: true });
+    fs.writeFileSync(path.join(distillDir, "orphan.txt"), "old content");
+    git(vault, ["add", "-f", ".napkin/distill/orphan.txt"]);
+    git(vault, ["commit", "-q", "-m", "force-stage orphan"]);
+    expect(configRel).toBeDefined(); // silence unused-binding lint
+
+    const r = runSetup("full");
+    const finding = r.findings.find(
+      (f) => f.invariant === "napkin-distill-not-tracked",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("error");
+    expect(finding?.message).toContain(".napkin/distill/orphan.txt");
+    expect(finding?.message).toContain("git rm --cached");
+  });
+
+  test("empty .napkin/distill/ (no tracked files): no finding", () => {
+    setupExistingRepoWithBlock();
+    const r = runSetup("full");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("napkin-distill-not-tracked");
+    }
+  });
+
+  test("fast-level does NOT run the napkin-distill-not-tracked check", () => {
+    setupExistingRepoWithBlock();
+    const distillDir = path.join(vault, ".napkin", "distill");
+    fs.mkdirSync(distillDir, { recursive: true });
+    fs.writeFileSync(path.join(distillDir, "orphan.txt"), "old");
+    git(vault, ["add", "-f", ".napkin/distill/orphan.txt"]);
+    git(vault, ["commit", "-q", "-m", "force"]);
+
+    const r = runSetup("fast");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("napkin-distill-not-tracked");
+    }
+  });
+
+  // --- cache-root-writable (full-level only) -----------------------------
+  //
+  // The probe walks UP from `resolveCacheRoot(vault)`'s parent to the
+  // first existing ancestor so a fresh box where
+  // `~/.cache/napkin-distill/` does not yet exist does not
+  // false-error. Tests inject `probeWritable` via SetupOptions to
+  // exercise the unwritable path without `chmod 0500` (which
+  // false-passes under root in CI) or platform-specific read-only
+  // mounts.
+
+  test("injected probeWritable returns writable=false: error finding", () => {
+    setupExistingRepoWithBlock();
+    const r = runSetup("full", {
+      probeWritable: (_dir) => ({ writable: false, error: "EACCES" }),
+    });
+    const finding = r.findings.find(
+      (f) => f.invariant === "cache-root-writable",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("error");
+    expect(finding?.message).toContain("EACCES");
+    expect(finding?.message).toContain("XDG_CACHE_HOME");
+  });
+
+  test("default probe on a writable tmpdir: no finding (regression check)", () => {
+    // Re-direct XDG_CACHE_HOME to the test's own tmpdir so the probe
+    // lands on a writable directory we know exists. Restored in the
+    // finally to avoid leaking process state across tests.
+    setupExistingRepoWithBlock();
+    const cacheTmp = fs.mkdtempSync(path.join(os.tmpdir(), "cache-probe-"));
+    const saved = process.env.XDG_CACHE_HOME;
+    process.env.XDG_CACHE_HOME = cacheTmp;
+    try {
+      const r = runSetup("full");
+      for (const f of r.findings) {
+        expect(f.invariant).not.toBe("cache-root-writable");
+      }
+    } finally {
+      if (saved === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = saved;
+      fs.rmSync(cacheTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("fresh-box default probe: walks up to ~/.cache when napkin-distill/ does not yet exist", () => {
+    // The fresh-vault scenario: XDG_CACHE_HOME points at a real
+    // writable directory but `<XDG_CACHE_HOME>/napkin-distill/<hash>/`
+    // does not exist yet. The probe walks up from
+    // `<XDG_CACHE_HOME>/napkin-distill/` to `<XDG_CACHE_HOME>` (the
+    // first existing ancestor) and reports writable=true. Without
+    // the walk-up, this would false-error on every fresh box.
+    setupExistingRepoWithBlock();
+    const cacheTmp = fs.mkdtempSync(path.join(os.tmpdir(), "cache-fresh-"));
+    expect(fs.existsSync(path.join(cacheTmp, "napkin-distill"))).toBe(false);
+    const saved = process.env.XDG_CACHE_HOME;
+    process.env.XDG_CACHE_HOME = cacheTmp;
+    try {
+      const r = runSetup("full");
+      for (const f of r.findings) {
+        expect(f.invariant).not.toBe("cache-root-writable");
+      }
+    } finally {
+      if (saved === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = saved;
+      fs.rmSync(cacheTmp, { recursive: true, force: true });
+    }
+  });
+
+  test("fast-level does NOT run the cache-root-writable check", () => {
+    setupExistingRepoWithBlock();
+    const r = runSetup("fast", {
+      probeWritable: (_dir) => ({ writable: false, error: "EACCES" }),
+    });
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("cache-root-writable");
+    }
+  });
+
+  // --- no-orphaned-distill-worktrees + no-stale-distill-branches-over-grace
+  //
+  // The worktree-and-branch lifecycle accumulates two kinds of debris
+  // when distill runs crash or get cleaned up out-of-band: orphaned
+  // worktree-registry entries (dirs deleted but registry entry
+  // remains) and stale distill branches (committerdate older than
+  // STALE_DISTILL_BRANCH_GRACE_MS with no live worktree). Full-level
+  // cleans both up automatically; reflog grace gives users a
+  // recovery window for content from a failed distill.
+
+  /**
+   * Add a worktree at `worktreePath` with a freshly-created branch
+   * `<branch>` rooted at HEAD, then return the worktree path.
+   * Tests use this to simulate the real worktree+branch lifecycle
+   * before introducing drift (dir-deletion / time-warp).
+   */
+  function addWorktreeWithBranch(
+    vaultPath: string,
+    worktreePath: string,
+    branch: string,
+  ): void {
+    const r = git(vaultPath, ["worktree", "add", "-b", branch, worktreePath]);
+    if (r.status !== 0) throw new Error(`worktree add failed: ${r.stderr}`);
+  }
+
+  /**
+   * One hour, in ms. Used to push the injected `now` past
+   * STALE_DISTILL_BRANCH_GRACE_MS by a comfortable margin in tests
+   * that pin the "branch IS deleted past grace" semantics. Wide
+   * enough that filesystem timestamp jitter and the seconds-precision
+   * floor on `committerdate:unix` (vs millisecond-precision
+   * `Date.now()`) can't sneak the boundary tests below the grace.
+   */
+  const STALE_BRANCH_TEST_PADDING_MS = 60 * 60 * 1000;
+
+  test("orphaned worktree (registered, dir deleted): prune emits + auto-recovered finding", () => {
+    setupExistingRepoWithBlock();
+    const wtRoot = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-wt-"));
+    const wtPath = path.join(wtRoot, "orphan-target");
+    addWorktreeWithBranch(vault, wtPath, "distill/orphan-target");
+    // Delete the worktree dir without `git worktree remove`. Now the
+    // registry has an orphan entry pointing at a missing dir.
+    fs.rmSync(wtRoot, { recursive: true, force: true });
+
+    const r = runSetup("full");
+    const finding = r.findings.find(
+      (f) => f.invariant === "no-orphaned-distill-worktrees",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("auto-recovered");
+    // Recovery text carries the prune output — the user sees which
+    // entries were removed.
+    expect(finding?.recovery).toContain("orphan-target");
+  });
+
+  test("distill branch newer than grace, no live worktree: not deleted, no finding", () => {
+    setupExistingRepoWithBlock();
+    // Create a fresh distill branch (committerdate = now). The
+    // grace check requires `> STALE_DISTILL_BRANCH_GRACE_MS`; a
+    // freshly-committed branch is well within grace.
+    git(vault, ["branch", "distill/recent"]);
+
+    const r = runSetup("full");
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("no-stale-distill-branches-over-grace");
+    }
+    // Branch still exists.
+    const exists = git(vault, ["rev-parse", "--verify", "distill/recent"]);
+    expect(exists.status).toBe(0);
+  });
+
+  test("distill branch older than grace, no live worktree: deleted with auto-recovered finding", () => {
+    setupExistingRepoWithBlock();
+    git(vault, ["branch", "distill/stale"]);
+    // Inject a deterministic clock that's `grace + 1h` past the
+    // branch's committerdate. The branch was committed via the seed
+    // commit at real-now; the injected clock makes it look
+    // grace-plus-one-hour old.
+    const realNow = Date.now();
+    const fakeNow =
+      realNow + STALE_DISTILL_BRANCH_GRACE_MS + STALE_BRANCH_TEST_PADDING_MS;
+
+    const r = runSetup("full", { now: () => fakeNow });
+    const finding = r.findings.find(
+      (f) => f.invariant === "no-stale-distill-branches-over-grace",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("auto-recovered");
+    expect(finding?.recovery).toBe("git branch -D distill/stale");
+    // Branch is gone.
+    const exists = git(vault, ["rev-parse", "--verify", "distill/stale"]);
+    expect(exists.status).not.toBe(0);
+  });
+
+  test("distill branch older than grace WITH live worktree: not deleted, no finding", () => {
+    setupExistingRepoWithBlock();
+    const wtRoot = fs.mkdtempSync(path.join(os.tmpdir(), "live-wt-"));
+    const wtPath = path.join(wtRoot, "live");
+    try {
+      addWorktreeWithBranch(vault, wtPath, "distill/live");
+      const realNow = Date.now();
+      const fakeNow =
+        realNow + STALE_DISTILL_BRANCH_GRACE_MS + STALE_BRANCH_TEST_PADDING_MS;
+
+      const r = runSetup("full", { now: () => fakeNow });
+      for (const f of r.findings) {
+        expect(f.invariant).not.toBe("no-stale-distill-branches-over-grace");
+      }
+      // Branch still exists; worktree still registered.
+      const exists = git(vault, ["rev-parse", "--verify", "distill/live"]);
+      expect(exists.status).toBe(0);
+    } finally {
+      // Cleanup: remove the worktree before letting afterEach delete
+      // the vault dir, otherwise git complains.
+      git(vault, ["worktree", "remove", "--force", wtPath]);
+      fs.rmSync(wtRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("distill branch exactly at grace age: not deleted (strict > comparison pins boundary)", () => {
+    setupExistingRepoWithBlock();
+    git(vault, ["branch", "distill/edge"]);
+    // Find the actual committerdate of the branch (in seconds), then
+    // build a fake-now that is exactly `grace` past that date. The
+    // age comparison is `> grace`, so the branch should remain.
+    const tsLine = git(vault, [
+      "for-each-ref",
+      "refs/heads/distill/edge",
+      "--format=%(committerdate:unix)",
+    ]).stdout.trim();
+    const tsSec = parseInt(tsLine, 10);
+    expect(Number.isFinite(tsSec)).toBe(true);
+    const fakeNow = tsSec * 1000 + STALE_DISTILL_BRANCH_GRACE_MS;
+
+    const r = runSetup("full", { now: () => fakeNow });
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("no-stale-distill-branches-over-grace");
+    }
+    const exists = git(vault, ["rev-parse", "--verify", "distill/edge"]);
+    expect(exists.status).toBe(0);
+  });
+
+  // Boundary companions: the "exactly at grace" test above asserts a
+  // property the test setup makes true by construction (ageMs ===
+  // grace, then ageMs > grace is false). It does NOT distinguish a
+  // strict `>` comparison from a `>=` one, nor does it pin the
+  // "branch IS deleted past the boundary" semantics with a tight
+  // margin. The two companions below close that gap with 1 ms
+  // either side of the grace.
+  test("distill branch 1 ms past grace: deleted with auto-recovered finding", () => {
+    setupExistingRepoWithBlock();
+    git(vault, ["branch", "distill/edge-over"]);
+    const tsLine = git(vault, [
+      "for-each-ref",
+      "refs/heads/distill/edge-over",
+      "--format=%(committerdate:unix)",
+    ]).stdout.trim();
+    const tsSec = parseInt(tsLine, 10);
+    expect(Number.isFinite(tsSec)).toBe(true);
+    // 1 ms past the boundary — the strict `>` comparison fires.
+    const fakeNow = tsSec * 1000 + STALE_DISTILL_BRANCH_GRACE_MS + 1;
+
+    const r = runSetup("full", { now: () => fakeNow });
+    const finding = r.findings.find(
+      (f) => f.invariant === "no-stale-distill-branches-over-grace",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("auto-recovered");
+    const exists = git(vault, ["rev-parse", "--verify", "distill/edge-over"]);
+    expect(exists.status).not.toBe(0);
+  });
+
+  test("distill branch 1 ms under grace: not deleted, no finding", () => {
+    setupExistingRepoWithBlock();
+    git(vault, ["branch", "distill/edge-under"]);
+    const tsLine = git(vault, [
+      "for-each-ref",
+      "refs/heads/distill/edge-under",
+      "--format=%(committerdate:unix)",
+    ]).stdout.trim();
+    const tsSec = parseInt(tsLine, 10);
+    expect(Number.isFinite(tsSec)).toBe(true);
+    // 1 ms before the boundary — the branch is still inside grace.
+    const fakeNow = tsSec * 1000 + STALE_DISTILL_BRANCH_GRACE_MS - 1;
+
+    const r = runSetup("full", { now: () => fakeNow });
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("no-stale-distill-branches-over-grace");
+    }
+    const exists = git(vault, ["rev-parse", "--verify", "distill/edge-under"]);
+    expect(exists.status).toBe(0);
+  });
+
+  test("fast-level does NOT run orphan or stale-branch cleanup", () => {
+    setupExistingRepoWithBlock();
+    git(vault, ["branch", "distill/old"]);
+    const realNow = Date.now();
+    const fakeNow =
+      realNow + STALE_DISTILL_BRANCH_GRACE_MS + STALE_BRANCH_TEST_PADDING_MS;
+
+    const r = runSetup("fast", { now: () => fakeNow });
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("no-stale-distill-branches-over-grace");
+      expect(f.invariant).not.toBe("no-orphaned-distill-worktrees");
+    }
+    // Branch still exists.
+    const exists = git(vault, ["rev-parse", "--verify", "distill/old"]);
+    expect(exists.status).toBe(0);
+  });
+});
+
+// --- helper unit tests ---------------------------------------------------
+//
+// `parseManagedBlockRange`, `isLineInsideBlock`, and
+// `parseCheckIgnoreVerbose` underpin the
+// `config.json-not-gitignored-outside-block` invariant. Direct unit
+// tests pin the parsing contract so a regression in any of them surfaces
+// without requiring a full git fixture.
+
+describe("parseManagedBlockRange", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "block-range-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("missing file: null", () => {
+    expect(parseManagedBlockRange(path.join(dir, "nope"))).toBeNull();
+  });
+
+  test("file without markers: null", () => {
+    const p = path.join(dir, ".gitignore");
+    fs.writeFileSync(p, "# user content\n.env\n");
+    expect(parseManagedBlockRange(p)).toBeNull();
+  });
+
+  test("well-formed markers: 1-indexed begin and end lines", () => {
+    const p = path.join(dir, ".gitignore");
+    fs.writeFileSync(
+      p,
+      [
+        "# user content", // line 1
+        ".env", // line 2
+        "", // line 3
+        BLOCK_MARKER_BEGIN, // line 4
+        ".napkin/distill/", // line 5
+        BLOCK_MARKER_END, // line 6
+      ].join("\n"),
+    );
+    expect(parseManagedBlockRange(p)).toEqual({ beginLine: 4, endLine: 6 });
+  });
+
+  test("multiple BEGIN markers: null (malformed)", () => {
+    const p = path.join(dir, ".gitignore");
+    fs.writeFileSync(
+      p,
+      [BLOCK_MARKER_BEGIN, BLOCK_MARKER_BEGIN, BLOCK_MARKER_END].join("\n"),
+    );
+    expect(parseManagedBlockRange(p)).toBeNull();
+  });
+
+  test("END before BEGIN: null (malformed)", () => {
+    const p = path.join(dir, ".gitignore");
+    fs.writeFileSync(p, [BLOCK_MARKER_END, BLOCK_MARKER_BEGIN].join("\n"));
+    expect(parseManagedBlockRange(p)).toBeNull();
+  });
+});
+
+describe("isLineInsideBlock", () => {
+  test("null range: always false (markers absent or malformed)", () => {
+    expect(isLineInsideBlock(".gitignore", 5, null)).toBe(false);
+  });
+
+  test("non-.gitignore source: always false", () => {
+    // Global ignore file or info/exclude — by definition outside the
+    // managed block.
+    expect(
+      isLineInsideBlock("/home/me/.config/git/ignore", 5, {
+        beginLine: 4,
+        endLine: 6,
+      }),
+    ).toBe(false);
+  });
+
+  test("line strictly between markers: true", () => {
+    expect(
+      isLineInsideBlock(".gitignore", 5, { beginLine: 4, endLine: 6 }),
+    ).toBe(true);
+  });
+
+  test("line at BEGIN marker: false (markers are not gitignore patterns)", () => {
+    expect(
+      isLineInsideBlock(".gitignore", 4, { beginLine: 4, endLine: 6 }),
+    ).toBe(false);
+  });
+
+  test("line at END marker: false", () => {
+    expect(
+      isLineInsideBlock(".gitignore", 6, { beginLine: 4, endLine: 6 }),
+    ).toBe(false);
+  });
+
+  test("line above BEGIN: false", () => {
+    expect(
+      isLineInsideBlock(".gitignore", 2, { beginLine: 4, endLine: 6 }),
+    ).toBe(false);
+  });
+
+  test("line below END: false", () => {
+    expect(
+      isLineInsideBlock(".gitignore", 8, { beginLine: 4, endLine: 6 }),
+    ).toBe(false);
+  });
+});
+
+describe("parseCheckIgnoreVerbose", () => {
+  test("canonical line: parses source / line / pattern / pathname", () => {
+    const r = parseCheckIgnoreVerbose(".gitignore:2:.env\t.env");
+    expect(r).toEqual({
+      source: ".gitignore",
+      line: 2,
+      pattern: ".env",
+      pathname: ".env",
+    });
+  });
+
+  test("absolute source with embedded colons: greedy match anchors on line number", () => {
+    // Windows-style absolute paths or sourced global ignore files can
+    // contain colons; the greedy `.+` on source plus the anchored
+    // `\d+` line number recovers the correct split.
+    const r = parseCheckIgnoreVerbose(
+      "C:/Users/me/.gitignore:42:.napkin/config.json\t.napkin/config.json",
+    );
+    expect(r?.source).toBe("C:/Users/me/.gitignore");
+    expect(r?.line).toBe(42);
+    expect(r?.pattern).toBe(".napkin/config.json");
+  });
+
+  test("missing TAB: null (line is not -v output)", () => {
+    expect(parseCheckIgnoreVerbose(".gitignore:2:.env .env")).toBeNull();
+  });
+
+  test("line without colons: null", () => {
+    expect(
+      parseCheckIgnoreVerbose("just-a-pathname\tjust-a-pathname"),
+    ).toBeNull();
+  });
+});
+
+describe("walkToFirstExistingAncestor", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "walk-ancestor-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("existing dir: returns it unchanged", () => {
+    expect(walkToFirstExistingAncestor(dir)).toBe(dir);
+  });
+
+  test("non-existent leaf with existing parent: walks up one level", () => {
+    expect(walkToFirstExistingAncestor(path.join(dir, "missing"))).toBe(dir);
+  });
+
+  test("chain of non-existent dirs: walks up until first existing", () => {
+    expect(walkToFirstExistingAncestor(path.join(dir, "a", "b", "c"))).toBe(
+      dir,
+    );
+  });
+
+  test("root path: returns root (terminates at filesystem boundary)", () => {
+    // path.dirname('/') === '/' on POSIX, so the loop exits.
+    const r = walkToFirstExistingAncestor("/");
+    expect(r).toBe("/");
+  });
+});
+
+describe("probeWritable", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "probe-writable-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("writable tmpdir: writable=true, no error", () => {
+    const r = probeWritable(dir);
+    expect(r.writable).toBe(true);
+    expect(r.error).toBeUndefined();
+    // Probe file is cleaned up.
+    const leftover = fs
+      .readdirSync(dir)
+      .filter((n) => n.startsWith(".napkin-write-probe-"));
+    expect(leftover).toEqual([]);
+  });
+
+  test("non-existent dir: writable=false, error carries underlying message", () => {
+    const missing = path.join(dir, "does-not-exist");
+    const r = probeWritable(missing);
+    expect(r.writable).toBe(false);
+    expect(r.error).toBeDefined();
+    expect(r.error?.length).toBeGreaterThan(0);
+  });
+});
+
+describe("parseLiveWorktreeBranches", () => {
+  let vault: string;
+  beforeEach(() => {
+    vault = fs.mkdtempSync(path.join(os.tmpdir(), "live-wt-"));
+    spawnSync("git", ["init", "-q", "-b", "main", vault]);
+    spawnSync("git", [
+      "-C",
+      vault,
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "user.email=t@e",
+      "-c",
+      "user.name=t",
+      "commit",
+      "--allow-empty",
+      "-q",
+      "-m",
+      "seed",
+    ]);
+  });
+  afterEach(() => {
+    fs.rmSync(vault, { recursive: true, force: true });
+  });
+
+  test("single worktree: returns set with the main branch", () => {
+    const r = parseLiveWorktreeBranches(vault);
+    expect(r).toContain("main");
+  });
+
+  test("with a distill worktree: returns both branches with refs/heads/ stripped", () => {
+    const wtRoot = fs.mkdtempSync(path.join(os.tmpdir(), "plw-"));
+    const wtPath = path.join(wtRoot, "work");
+    try {
+      spawnSync("git", [
+        "-C",
+        vault,
+        "worktree",
+        "add",
+        "-b",
+        "distill/test-x",
+        wtPath,
+      ]);
+      const r = parseLiveWorktreeBranches(vault);
+      expect(r).toContain("main");
+      expect(r).toContain("distill/test-x");
+    } finally {
+      spawnSync("git", ["-C", vault, "worktree", "remove", "--force", wtPath]);
+      fs.rmSync(wtRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("non-git path: returns empty set", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "plw-nogit-"));
+    try {
+      expect(parseLiveWorktreeBranches(tmp).size).toBe(0);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("parsePorcelainWorktreeBranches", () => {
+  // Direct unit tests for the strict-parser shape, with synthetic
+  // porcelain input. Pins the contract that any `branch` line whose
+  // ref does NOT start with `refs/heads/` is skipped, NOT added with
+  // the unstripped fallback. A regression that re-introduces a
+  // `branches.add(ref)` else branch would let the wrong-shaped key
+  // leak into the stale-branch comparator and silently mismatch the
+  // short-name set the comparator expects.
+
+  test("standard porcelain output: returns short names with refs/heads/ stripped", () => {
+    // Two records separated by a blank line. Mirrors the shape
+    // `git worktree list --porcelain` actually emits: `worktree`
+    // pointer, `HEAD` sha, `branch` ref.
+    const stdout = [
+      "worktree /path/to/main",
+      "HEAD abc123",
+      "branch refs/heads/main",
+      "",
+      "worktree /path/to/distill-fork",
+      "HEAD def456",
+      "branch refs/heads/distill/2026-05-21",
+      "",
+    ].join("\n");
+    const r = parsePorcelainWorktreeBranches(stdout);
+    expect(r.size).toBe(2);
+    expect(r.has("main")).toBe(true);
+    expect(r.has("distill/2026-05-21")).toBe(true);
+  });
+
+  test("detached worktree (no branch line): contributes nothing", () => {
+    // git emits `detached` instead of a `branch` line for detached
+    // HEAD worktrees. The short-name set should be unaffected.
+    const stdout = [
+      "worktree /path/to/main",
+      "HEAD abc123",
+      "branch refs/heads/main",
+      "",
+      "worktree /path/to/detached",
+      "HEAD def456",
+      "detached",
+      "",
+    ].join("\n");
+    const r = parsePorcelainWorktreeBranches(stdout);
+    expect(r.size).toBe(1);
+    expect(r.has("main")).toBe(true);
+  });
+
+  test("bare-flag record (HEAD-pointer only): contributes nothing", () => {
+    // Bare repos emit a `bare` line and have neither `HEAD` nor
+    // `branch`. A real bare-repo `git worktree list --porcelain`
+    // looks like a single record with `worktree` + `bare`.
+    const stdout = ["worktree /path/to/bare.git", "bare", ""].join("\n");
+    const r = parsePorcelainWorktreeBranches(stdout);
+    expect(r.size).toBe(0);
+  });
+
+  test("empty input: returns empty set without throw", () => {
+    const r = parsePorcelainWorktreeBranches("");
+    expect(r.size).toBe(0);
+  });
+
+  test("malformed input (missing fields, extra blank lines): graceful return", () => {
+    // Stress-test the loop: extra blank lines, a record missing the
+    // `HEAD` field, and a `branch` line whose ref is NOT prefixed
+    // with `refs/heads/`. The strict parser must skip the
+    // unrecognised ref shape (NOT add the unstripped value) and
+    // tolerate the structural noise.
+    const stdout = [
+      "",
+      "",
+      "worktree /path/to/main",
+      "branch refs/heads/main",
+      "",
+      "worktree /path/to/oddity",
+      "branch refs/remotes/origin/feat-x",
+      "",
+      "worktree /path/to/another-oddity",
+      "branch refs/tags/v1.0.0",
+      "",
+    ].join("\n");
+    const r = parsePorcelainWorktreeBranches(stdout);
+    expect(r.size).toBe(1);
+    expect(r.has("main")).toBe(true);
+    // Pin the strict-parser invariant: non-`refs/heads/` shapes are
+    // skipped, NOT added under their full ref name. A regression
+    // that re-introduces an `else { branches.add(ref) }` fallback
+    // would put `refs/remotes/origin/feat-x` (and similar) into
+    // the set; this assertion fails in that case.
+    expect(r.has("refs/remotes/origin/feat-x")).toBe(false);
+    expect(r.has("refs/tags/v1.0.0")).toBe(false);
+    expect(r.has("feat-x")).toBe(false);
+    expect(r.has("v1.0.0")).toBe(false);
+  });
+
+  test("branch line with extra whitespace: ref is trimmed before prefix check", () => {
+    // The parser calls `.trim()` on the ref slice. The test input
+    // below has FOUR spaces after `branch`, so `slice("branch ".length)`
+    // produces `"   refs/heads/main   "` (3 leading + 3 trailing).
+    // Without `.trim()`, the leading whitespace makes
+    // `ref.startsWith("refs/heads/")` return FALSE, so `branches` stays
+    // empty and `r.has("main")` would be false. The test pins the
+    // trim by exercising the leading-whitespace path; trailing-only
+    // whitespace would still match the prefix but emit a name with a
+    // trailing space that mismatches the comparator (also asserted
+    // below via `r.has("main ")`).
+    const stdout = [
+      "worktree /path/to/main",
+      "branch    refs/heads/main   ",
+      "",
+    ].join("\n");
+    const r = parsePorcelainWorktreeBranches(stdout);
+    expect(r.has("main")).toBe(true);
+    expect(r.has("main ")).toBe(false);
   });
 });
 

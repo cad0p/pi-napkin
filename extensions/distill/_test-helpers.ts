@@ -149,8 +149,34 @@ export function makeWrapperScaffold(prefix: string): WrapperScaffold {
   spawnSync("git", ["-C", vault, "commit", "-m", "seed"]);
 
   const sm = SessionManager.create(parentCwd, sessionsDir);
-  sm.appendMessage({ role: "user", content: "hello" });
-  sm.appendMessage({ role: "assistant", content: "hi" });
+  // appendMessage's typed-parts shape: pi-coding-agent's Message types
+  // require timestamp on every message and an array-of-parts content for
+  // assistant messages (UserMessage still accepts string). The fixture
+  // below is the minimum that satisfies the SDK types; downstream
+  // consumers only care that the JSONL exists and parses, not its
+  // contents.
+  sm.appendMessage({
+    role: "user",
+    content: "hello",
+    timestamp: Date.now(),
+  });
+  sm.appendMessage({
+    role: "assistant",
+    content: [{ type: "text", text: "hi" }],
+    api: "faux",
+    provider: "faux",
+    model: "faux",
+    usage: {
+      input: 0,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 0,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    },
+    stopReason: "stop",
+    timestamp: Date.now(),
+  });
   const sessionFile = sm.getSessionFile();
   if (!sessionFile || !fs.existsSync(sessionFile)) {
     throw new Error("failed to create test session on disk");
