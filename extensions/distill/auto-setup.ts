@@ -144,6 +144,8 @@ export const BLOCK_MARKER_END = "# END NAPKIN-DISTILL MANAGED";
 export const BLOCK_CONTENT: readonly string[] = [
   "# napkin-distill ephemeral state",
   ".napkin/distill/",
+  "# Per-machine config overrides",
+  ".napkin/config.local.json",
   "",
   "# Obsidian workspace-local state",
   ".obsidian/workspace*.json",
@@ -928,7 +930,7 @@ function mergeManagedBlock(
  *   1. fast + full: if `.git/` is missing, run `git init -q -b main`
  *      (`vault-is-git-repo`, auto-recovered). Failure here aborts with
  *      `error`. (JSON validity is checked earlier by
- *      {@link loadVaultConfig} and is not re-checked here.)
+ *      the napkin SDK config loading and is not re-checked here.)
  *   2. fast + full: reconcile `.gitignore` against the canonical managed
  *      block (`gitignore-block-correct`). Auto-recovered for
  *      install / reset / migration; loud-error for malformed markers.

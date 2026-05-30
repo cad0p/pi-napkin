@@ -2,7 +2,11 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Napkin } from "@cad0p/napkin";
+import {
+  MalformedConfigError,
+  Napkin,
+  type NapkinConfig,
+} from "@cad0p/napkin";
 import type {
   CustomEntry,
   ExtensionAPI,
@@ -173,97 +177,104 @@ export const DEFAULT_DISTILL: DistillConfig = {
 };
 
 /**
- * Maximum number of characters from a {@link MalformedVaultConfigError}'s
+ * Extract the distill config from the napkin config.
  * `parseError` to embed in user-facing notify text.
  *
- * `JSON.parse` error messages are usually short (e.g. `Unexpected token
- * } in JSON at position 42`), but a malformed multi-MB `config.json`
- * can produce a parse error long enough to overflow the notify
- * surface. Cap to a value that comfortably fits a single notify line
- * while leaving the unbounded value on the error object for callers
- * that want to log it for diagnostics.
- */
-const MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN = 200;
-
 /**
- * Bound a {@link MalformedVaultConfigError}'s `parseError` to
- * {@link MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN} characters.
- * Long inputs are truncated and suffixed with an ellipsis so the
- * notify line stays readable; short inputs are returned unchanged.
+ * Extract the distill config from the napkin config.
  *
- * Exported for direct use by tests pinning the cap regression.
- * Every `MalformedVaultConfigError` notify site in this file routes
- * through this helper so a multi-MB parse error never overflows the
- * notify surface, regardless of which entry point caught it
- * (session_start, runDistillWith's pre-flight, or runDistillWith's
- * setup-failed catch handler).
+ * The napkin SDK handles config merging (config.json + config.local.json),
+ * so this function just extracts and normalizes the distill section.
+ *
+ * Returns {@link DEFAULT_DISTILL} if the distill section is missing.
  */
-export function formatVaultConfigParseError(parseError: string): string {
-  if (parseError.length <= MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN) {
-    return parseError;
+/**
+ * Extract and validate the distill config from the napkin config.
+ *
+ * The napkin SDK handles config merging (config.json + config.local.json),
+ * so this function just extracts and validates the distill section.
+ *
+ * Throws {@link MalformedDistillConfigError} if the distill section exists
+ * but has invalid types (e.g. enabled is not a boolean).
+ */
+export function getDistillConfig(
+  config: NapkinConfig,
+  configPath?: string,
+): VaultConfig {
+  // biome-ignore lint/suspicious/noExplicitAny: config shape is user-controlled
+  const raw = config as any;
+  const distill = raw?.distill;
+
+  // Validate distill section types if present
+  if (distill !== undefined && distill !== null) {
+    if (typeof distill !== "object") {
+      throw new MalformedDistillConfigError(
+        configPath || "config.json",
+        `distill must be an object, got ${typeof distill}`,
+      );
+    }
+    if (distill.enabled !== undefined && typeof distill.enabled !== "boolean") {
+      throw new MalformedDistillConfigError(
+        configPath || "config.json",
+        `distill.enabled must be a boolean, got ${typeof distill.enabled}`,
+      );
+    }
+    if (
+      distill.intervalMinutes !== undefined &&
+      typeof distill.intervalMinutes !== "number"
+    ) {
+      throw new MalformedDistillConfigError(
+        configPath || "config.json",
+        `distill.intervalMinutes must be a number, got ${typeof distill.intervalMinutes}`,
+      );
+    }
+    if (
+      distill.model !== undefined &&
+      distill.model !== null &&
+      (typeof distill.model !== "object" ||
+        typeof distill.model.provider !== "string" ||
+        typeof distill.model.id !== "string")
+    ) {
+      throw new MalformedDistillConfigError(
+        configPath || "config.json",
+        `distill.model must be { provider: string, id: string }`,
+      );
+    }
   }
-  return `${parseError.slice(0, MALFORMED_CONFIG_PARSE_ERROR_DISPLAY_MAX_LEN)}… (truncated; full error in console)`;
+
+  return {
+    showStatus: raw?.showStatus !== false,
+    distill: { ...DEFAULT_DISTILL, ...(distill || {}) },
+  };
 }
 
 /**
- * Thrown by {@link loadVaultConfig} when `<configPath>/config.json` exists
- * but is not parseable as JSON. Distinct from the missing-file path, which
- * still returns {@link DEFAULT_DISTILL} (a fresh-vault user has not yet
- * created the file).
- *
- * Callers that own a UI (`session_start`, manual `/distill`) should catch
- * this and surface a user-actionable error notify so the user knows the
- * file needs a hand-fix; the file is the user's source of truth and we
- * cannot guess the intended content. Previously this path failed open
- * (returned defaults) and short-circuited at the `if (!config.enabled)
- * return;` line in `session_start` before the user could see any
- * indication that the config was malformed.
+ * Thrown when the distill section in config is malformed.
  */
-export class MalformedVaultConfigError extends Error {
+export class MalformedDistillConfigError extends Error {
   readonly configPath: string;
   readonly parseError: string;
   constructor(configPath: string, parseError: string) {
-    super(`${configPath} is not valid JSON: ${parseError}`);
-    this.name = "MalformedVaultConfigError";
+    super(`distill config in ${configPath}: ${parseError}`);
+    this.name = "MalformedDistillConfigError";
     this.configPath = configPath;
     this.parseError = parseError;
   }
 }
 
 /**
- * Read `<vaultPath>/config.json` and return the merged {@link VaultConfig}.
+ * Load vault config using the napkin SDK.
  *
- * Two failure modes:
- *   - File absent: returns {@link DEFAULT_DISTILL} with `showStatus: true`.
- *     A fresh-vault user has not yet created the file; treating absence
- *     as defaults keeps `pi` usable on a vault before `napkin init`.
- *   - File present but malformed JSON: throws {@link
- *     MalformedVaultConfigError}. Callers with a UI should catch and
- *     surface a notify so the user knows the file needs a hand-fix.
- *     Previously this path failed open (returned defaults), which
- *     masked the parse error as `enabled: false` and short-circuited
- *     `session_start` before any user-visible signal could fire.
+ * This is the preferred way to get the distill config — it uses the SDK's
+ * config loading which handles config.local.json merging.
+ *
+ * Throws:
+ * - {@link MalformedConfigError} if config.json or config.local.json contains malformed JSON
+ * - {@link MalformedDistillConfigError} if the distill section is malformed
  */
-export function loadVaultConfig(vaultPath: string): VaultConfig {
-  const configPath = path.join(vaultPath, "config.json");
-  if (!fs.existsSync(configPath)) {
-    return { showStatus: true, distill: DEFAULT_DISTILL };
-  }
-  let raw: unknown;
-  try {
-    raw = JSON.parse(fs.readFileSync(configPath, "utf-8"));
-  } catch (err) {
-    throw new MalformedVaultConfigError(
-      configPath,
-      err instanceof Error ? err.message : String(err),
-    );
-  }
-  // biome-ignore lint/suspicious/noExplicitAny: raw shape is user-controlled
-  const r = raw as any;
-  return {
-    showStatus: r?.showStatus !== false,
-    distill: { ...DEFAULT_DISTILL, ...(r?.distill || {}) },
-  };
+export function loadVaultConfigFromSdk(napkin: Napkin): VaultConfig {
+  const config = napkin.config();
+  return getDistillConfig(config as NapkinConfig, napkin.vault.configPath);
 }
 
 /**
@@ -477,34 +488,28 @@ export default function (pi: ExtensionAPI) {
     // (if any) is re-read further down when distill is enabled for the session.
     autoDistillSuppressed = false;
 
-    let napkinVault: { configPath: string; contentPath: string };
+    let napkin: Napkin;
     try {
-      napkinVault = new Napkin(ctx.cwd).vault;
+      napkin = new Napkin(ctx.cwd);
     } catch {
       return;
     }
-    const vaultConfigPath = napkinVault.configPath;
+    const napkinVault = napkin.vault;
 
     let showStatus: boolean;
     let config: DistillConfig;
     try {
-      ({ showStatus, distill: config } = loadVaultConfig(vaultConfigPath));
+      ({ showStatus, distill: config } = loadVaultConfigFromSdk(napkin));
     } catch (err) {
-      if (err instanceof MalformedVaultConfigError) {
-        // Malformed `config.json` is the user's hand-edit; we cannot
-        // guess the intended shape. Surface a notify so the user can
-        // fix the file and re-launch; skip the rest of session_start
-        // (no health check, no auto-distill arming) because the
-        // session-wide flags downstream depend on a parseable config.
-        // The previous fail-open behavior of `loadVaultConfig` masked
-        // the parse error as `enabled: false` and short-circuited
-        // before any user-visible signal could fire.
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `Auto-distill cannot proceed: ${err.configPath} is not valid JSON (${formatVaultConfigParseError(err.parseError)}). Fix the file by hand and restart pi.`,
-            "error",
-          );
-        }
+      if (
+        (err instanceof MalformedConfigError ||
+          err instanceof MalformedDistillConfigError) &&
+        ctx.hasUI
+      ) {
+        ctx.ui.notify(
+          `Auto-distill cannot proceed: ${err.message}`,
+          "error",
+        );
         return;
       }
       throw err;
@@ -722,18 +727,19 @@ export default function (pi: ExtensionAPI) {
     // first prevents the rare race where the interval fires during shutdown
     // and we end up with two concurrent spawns on the same content.
     //
-    // Config is re-read via loadVaultConfig rather than captured from
-    // session_start — handler scope keeps closures small, and the cost of
-    // one extra JSON parse at shutdown is negligible.
+    // Config is re-read via SDK rather than captured from session_start —
+    // handler scope keeps closures small, and the cost of one extra
+    // config load at shutdown is negligible.
     try {
-      let vaultInfo: { configPath: string; contentPath: string } | null = null;
+      let napkin: Napkin | null = null;
       try {
-        vaultInfo = new Napkin(ctx.cwd).vault;
+        napkin = new Napkin(ctx.cwd);
       } catch {
         // No vault resolvable — skip spawn, proceed to final resets.
       }
-      if (vaultInfo) {
-        const { distill: config } = loadVaultConfig(vaultInfo.configPath);
+      if (napkin) {
+        const vaultInfo = napkin.vault;
+        const { distill: config } = loadVaultConfigFromSdk(napkin);
         const sessionFile = ctx.sessionManager.getSessionFile?.();
         const currentSize =
           sessionFile && fs.existsSync(sessionFile)
@@ -1028,35 +1034,31 @@ export default function (pi: ExtensionAPI) {
   function runDistillWith(ctx: RunCtx, strategy: DistillStrategy): void {
     if (isRunning) return;
 
-    let vaultInfo: { configPath: string; contentPath: string };
+    let napkin: Napkin;
     try {
-      vaultInfo = new Napkin(ctx.cwd).vault;
+      napkin = new Napkin(ctx.cwd);
     } catch {
       return;
     }
+    const vaultInfo = napkin.vault;
     const vaultContentPath = vaultInfo.contentPath;
 
     let showStatus: boolean;
     let config: DistillConfig;
     try {
-      ({ showStatus, distill: config } = loadVaultConfig(vaultInfo.configPath));
+      ({ showStatus, distill: config } = loadVaultConfigFromSdk(napkin));
     } catch (err) {
-      if (err instanceof MalformedVaultConfigError) {
-        // Manual `/distill` and the auto-distill tick both flow through
-        // here. A malformed `config.json` means we can't determine
-        // whether distill is enabled or how to parameterise the spawn;
-        // notify the user and skip this run rather than crashing the
-        // command handler / timer callback. The session keeps running
-        // so the user can fix the file and retry.
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            `Auto-distill cannot proceed: ${err.configPath} is not valid JSON (${formatVaultConfigParseError(err.parseError)}). Fix the file by hand and retry.`,
-            "error",
-          );
-        }
-        return;
+      if (
+        (err instanceof MalformedConfigError ||
+          err instanceof MalformedDistillConfigError) &&
+        ctx.hasUI
+      ) {
+        ctx.ui.notify(
+          `Auto-distill cannot proceed: ${err.message}`,
+          "error",
+        );
       }
-      throw err;
+      return;
     }
     const sessionFile = ctx.sessionManager.getSessionFile?.();
     if (!sessionFile) return;
@@ -1459,14 +1461,9 @@ export default function (pi: ExtensionAPI) {
       // repaint.
       let showStatus = true;
       try {
-        ({ showStatus } = loadVaultConfig(new Napkin(c.cwd).vault.configPath));
+        ({ showStatus } = loadVaultConfigFromSdk(new Napkin(c.cwd)));
       } catch (cfgErr) {
-        if (cfgErr instanceof MalformedVaultConfigError && c.hasUI) {
-          c.ui.notify(
-            `Auto-distill cannot proceed: ${cfgErr.configPath} is not valid JSON (${formatVaultConfigParseError(cfgErr.parseError)}). Fix the file by hand and retry.`,
-            "error",
-          );
-        }
+        // Config loading failed — keep showStatus as true (default)
       }
       if (c.hasUI && theme && showStatus) {
         const msg =
@@ -1511,8 +1508,7 @@ export default function (pi: ExtensionAPI) {
       // toggling the session flag has no effect.
       let vaultDistillEnabled = false;
       try {
-        const vaultConfigPath = new Napkin(ctx.cwd).vault.configPath;
-        vaultDistillEnabled = loadVaultConfig(vaultConfigPath).distill.enabled;
+        vaultDistillEnabled = loadVaultConfigFromSdk(new Napkin(ctx.cwd)).distill.enabled;
       } catch {
         // No vault — treat as disabled at vault level.
       }

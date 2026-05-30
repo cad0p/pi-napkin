@@ -59,6 +59,17 @@ const NODE_REACHABLE_VIA_STRIPPED_PATH =
     env: { PATH: NAPKIN_NODE_STRIPPED_PATH },
   }).stdout.trim() !== "";
 
+// Probe whether napkin is reachable via NAPKIN_STRIPPED_PATH (which
+// includes NODE_BIN_DIR). When napkin and node share the same bin
+// directory (e.g. both installed via mise), stripping napkin from PATH
+// while keeping node doesn't actually work — the test would exercise
+// the wrong code path.
+const NAPKIN_REACHABLE_VIA_STRIPPED_PATH =
+  spawnSync("sh", ["-c", "command -v napkin"], {
+    encoding: "utf-8",
+    env: { PATH: NAPKIN_STRIPPED_PATH },
+  }).stdout.trim() !== "";
+
 /**
  * Tests for `spawnDistillInWorktree` split into two groups:
  *   - unit: mock the `spawn` function, verify we pass the right args to the
@@ -611,6 +622,17 @@ describe("distill-wrapper.sh (integration)", () => {
     // exits 1, the cleanup trap removes the worktree, and the error
     // log records the diagnostic + the PATH the wrapper saw (R7-SC-10
     // — forensic info for the user to fix their environment).
+    if (NAPKIN_REACHABLE_VIA_STRIPPED_PATH) {
+      // node and napkin share the same bin directory (e.g. both
+      // installed via mise) — stripping napkin from PATH while keeping
+      // node doesn't actually work. Skip with a diagnostic rather than
+      // asserting on the wrong code path.
+      console.warn(
+        "[skip] napkin is reachable via NODE_BIN_DIR on this host; " +
+          "the missing-napkin guard cannot be exercised here.",
+      );
+      return;
+    }
     const { createDistillWorkspace } = require("./distill-workspace");
     const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
