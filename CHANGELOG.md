@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+
+Fixes [#14](https://github.com/cad0p/pi-napkin/issues/14): distill worktrees showed `Empty vault` when `.napkin/config.json` wasn't git-tracked, forcing users to manually copy it into every worktree. Auto-setup now tracks `config.json` on first run, and a centralized two-tier health check (fast at session_start, full at worktree-spawn) refuses to spawn distill on misconfigured setups instead of producing weird behavior. Landed in two phases: [#15](https://github.com/cad0p/pi-napkin/pull/15) (scaffolding + the actual fix) and [#17](https://github.com/cad0p/pi-napkin/pull/17) (remaining full-level invariants).
+
+<!-- USER-EDITABLE SECTION END -->
+
+
+### ⚙️ Miscellaneous Tasks
+
+- *(gitignore)* .DS_Store ([#20](https://github.com/cad0p/pi-napkin/pull/20))
+
+
 ## [0.3.1] - 2026-05-25
 
 <!-- USER-EDITABLE SECTION START -->
