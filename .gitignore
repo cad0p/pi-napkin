@@ -3,3 +3,4 @@ node_modules/
 # pnpm — not used; we standardized on bun for local dev and CI (mirrors
 # cad0p/napkin). bun.lock IS committed for reproducibility.
 pnpm-lock.yaml
+.DS_Store
