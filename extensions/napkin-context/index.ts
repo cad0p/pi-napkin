@@ -239,10 +239,22 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Read a note from the napkin vault by name or path",
     parameters: Type.Object({
       file: Type.String({ description: "File name or path to read" }),
+      section: Type.Optional(
+        Type.String({
+          description: "Heading to extract (exact text without # prefix)",
+        }),
+      ),
+      page: Type.Optional(
+        Type.Number({ description: "Page number for paginated output" }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const n = getNapkin(ctx.cwd);
-      const result = n.read(params.file);
+      // @ts-expect-error -- opts param added in napkin >=0.9.0
+      const result = n.read(params.file, {
+        section: params.section,
+        page: params.page,
+      }) as { path: string; content: string };
 
       return {
         content: [{ type: "text", text: result.content }],
@@ -253,6 +265,46 @@ export default function (pi: ExtensionAPI) {
       const t =
         (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       t.setText(formatKbResult(result, options, theme, 10));
+      return t;
+    },
+  });
+
+  pi.registerTool({
+    name: "kb_outline",
+    label: "KB Outline",
+    description: "List headings in a knowledge base file",
+    promptSnippet:
+      "List headings in a napkin vault note to understand its structure",
+    parameters: Type.Object({
+      file: Type.String({ description: "File name or path" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const n = getNapkin(ctx.cwd);
+      let headings: { level: number; text: string; line: number }[];
+      try {
+        headings = n.outline(params.file);
+      } catch (e: unknown) {
+        return {
+          content: [{ type: "text", text: (e as Error).message }],
+          details: { headings: [] },
+        };
+      }
+
+      const absPath = path.join(n.vault.contentPath, params.file);
+      const lines = [`File: ${absPath}`];
+      for (const h of headings) {
+        lines.push(`${"#".repeat(h.level)} ${h.text}`);
+      }
+
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        details: { path: absPath, headings },
+      };
+    },
+    renderResult(result, options, theme, context) {
+      const t =
+        (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      t.setText(formatKbResult(result, options, theme, 15));
       return t;
     },
   });
