@@ -31,7 +31,10 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { Napkin } from "@cad0p/napkin";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import {
+  parseSessionEntries,
+  SessionManager,
+} from "@earendil-works/pi-coding-agent";
 import { buildDistillPrompt } from "./distill-prompt";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
 
@@ -148,6 +151,8 @@ export function generateDistillBranchName(
  */
 export const DISTILL_SUBDIR = path.join(".napkin", "distill");
 
+export const DISTILL_PROMPT_CACHE_KEY_ENV = "NAPKIN_DISTILL_PROMPT_CACHE_KEY";
+
 /**
  * Resolve the root directory where this vault's distill worktrees live.
  * Follows XDG Base Directory Spec: `~/.cache/napkin-distill/<hash>/` by
@@ -216,6 +221,12 @@ function assertVaultIsGitRepo(vaultPath: string): void {
       `vault not a git repo: ${vaultPath} (auto-distill requires git; Phase C wires auto-init)`,
     );
   }
+}
+
+function readSessionId(sessionFile: string): string | undefined {
+  const entries = parseSessionEntries(fs.readFileSync(sessionFile, "utf-8"));
+  const header = entries.find((e) => e.type === "session");
+  return header?.id;
 }
 
 /**
@@ -939,6 +950,7 @@ export function spawnDistillInWorktree(
   const spawnFn = opts.spawnFn ?? spawn;
 
   const workspace = createDistillWorkspace(vault, sessionFile, parentCwd);
+  const parentSessionId = readSessionId(sessionFile);
 
   const defaultBranch = detectDefaultBranch(vault);
 
@@ -1007,6 +1019,9 @@ export function spawnDistillInWorktree(
     env: {
       ...process.env,
       NAPKIN_DISTILL_NO_RECURSE: "1",
+      ...(parentSessionId
+        ? { [DISTILL_PROMPT_CACHE_KEY_ENV]: parentSessionId }
+        : {}),
     },
   });
   proc.unref();

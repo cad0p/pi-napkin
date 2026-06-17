@@ -10,6 +10,7 @@ import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { TIMEOUT_BIN_DIR, withNapkinOnPath } from "./_test-helpers";
 import {
   cleanupDistillWorkspace,
+  DISTILL_PROMPT_CACHE_KEY_ENV,
   type DistillWorkspace,
   spawnDistillInWorktree,
 } from "./distill-workspace";
@@ -283,6 +284,25 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     // system prompt cwd line byte-identical to the parent's.
     expect(opts.cwd).toBe(parentCwd);
     expect(opts.env.NAPKIN_DISTILL_NO_RECURSE).toBe("1");
+  });
+
+  test("passes parent session id as distill prompt-cache key env", () => {
+    const { spawnFn, calls } = makeMockSpawn();
+    const result = spawnDistillInWorktree({
+      vault,
+      sessionFile,
+      parentCwd: sessionDir,
+      maxDurationSecs: 600,
+      spawnFn,
+    });
+    workspaces.push(result.workspace);
+
+    const parentHeader = JSON.parse(
+      fs.readFileSync(sessionFile, "utf-8").split("\n")[0],
+    ) as { id: string };
+    expect(calls[0].options.env[DISTILL_PROMPT_CACHE_KEY_ENV]).toBe(
+      parentHeader.id,
+    );
   });
 
   test("passes model through when provided", () => {

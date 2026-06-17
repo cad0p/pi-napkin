@@ -22,6 +22,7 @@ import {
   type ActiveDistill,
   cleanupDistillWorkspace,
   cleanupStaleWorktrees,
+  DISTILL_PROMPT_CACHE_KEY_ENV,
   DistillError,
   type DistillOutcome,
   findDistillErrorLogForBranch,
@@ -34,6 +35,29 @@ import {
 import { surfaceHealthFindings, surfaceSetupError } from "./health-notify";
 import { getSessionTouchedFiles } from "./session-touched-files";
 import { shouldDistillOnShutdown } from "./should-distill-on-shutdown";
+
+/**
+ * Distill subprocesses run on forked session files for persistence isolation,
+ * but OpenAI-style providers derive `prompt_cache_key` from the forked
+ * session id. When the wrapper provides the parent session id via env, patch
+ * only payloads that already opted into a concrete prompt_cache_key. This
+ * keeps unsupported providers / cacheRetention="none" payloads unchanged.
+ */
+export function applyDistillPromptCacheKey(
+  payload: unknown,
+  promptCacheKey = process.env[DISTILL_PROMPT_CACHE_KEY_ENV],
+): unknown | undefined {
+  if (!promptCacheKey || typeof payload !== "object" || payload === null) {
+    return undefined;
+  }
+  if (Array.isArray(payload)) return undefined;
+  if (!Object.hasOwn(payload, "prompt_cache_key")) return undefined;
+
+  const current = (payload as { prompt_cache_key?: unknown }).prompt_cache_key;
+  if (current === undefined || current === promptCacheKey) return undefined;
+
+  return { ...payload, prompt_cache_key: promptCacheKey };
+}
 
 export interface DistillConfig {
   enabled: boolean;
@@ -439,6 +463,10 @@ export default function (pi: ExtensionAPI) {
     intervalMs: number;
   };
   let uiRef: DistillUIRef | null = null;
+
+  pi.on("before_provider_request", (event) =>
+    applyDistillPromptCacheKey(event.payload),
+  );
 
   function renderIdleStatus(): void {
     if (!uiRef?.hasUI || !uiRef.showStatus) return;

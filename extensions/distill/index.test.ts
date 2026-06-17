@@ -3,7 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { DISTILL_PROMPT_CACHE_KEY_ENV } from "./distill-workspace";
 import {
+  applyDistillPromptCacheKey,
   DEFAULT_DISTILL,
   formatOutcomeNotification,
   formatVaultConfigParseError,
@@ -22,6 +24,40 @@ function makeVault(configJson: string | null): string {
   }
   return dir;
 }
+
+describe("applyDistillPromptCacheKey", () => {
+  const saved = process.env[DISTILL_PROMPT_CACHE_KEY_ENV];
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env[DISTILL_PROMPT_CACHE_KEY_ENV];
+    else process.env[DISTILL_PROMPT_CACHE_KEY_ENV] = saved;
+  });
+
+  test("patches OpenAI-style payload prompt_cache_key from env", () => {
+    process.env[DISTILL_PROMPT_CACHE_KEY_ENV] = "parent-session-id";
+    expect(
+      applyDistillPromptCacheKey({
+        model: "gpt-5.1",
+        prompt_cache_key: "fork-session-id",
+        input: [],
+      }),
+    ).toEqual({
+      model: "gpt-5.1",
+      prompt_cache_key: "parent-session-id",
+      input: [],
+    });
+  });
+
+  test("leaves payloads without a concrete prompt_cache_key unchanged", () => {
+    process.env[DISTILL_PROMPT_CACHE_KEY_ENV] = "parent-session-id";
+    expect(applyDistillPromptCacheKey({ model: "claude", messages: [] })).toBe(
+      undefined,
+    );
+    expect(
+      applyDistillPromptCacheKey({ model: "gpt", prompt_cache_key: undefined }),
+    ).toBe(undefined);
+  });
+});
 
 describe("loadVaultConfig", () => {
   const tempDirs: string[] = [];
