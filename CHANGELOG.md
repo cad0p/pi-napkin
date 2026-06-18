@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(distill)* Preserve OpenAI prompt cache key ([#22](https://github.com/cad0p/pi-napkin/pull/22))
+
+### ⚙️ Miscellaneous Tasks
+
+- *(gitignore)* .DS_Store ([#20](https://github.com/cad0p/pi-napkin/pull/20))
+
+
 ## [0.3.1] - 2026-05-25
 
 <!-- USER-EDITABLE SECTION START -->
