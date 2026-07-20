@@ -12,6 +12,10 @@ All notable changes to this project will be documented in this file.
 
 - *(distill)* Preserve OpenAI prompt cache key ([#22](https://github.com/cad0p/pi-napkin/pull/22))
 
+### 🚜 Refactor
+
+- *(distill)* Drop napkin_distill_status agent tool ([#25](https://github.com/cad0p/pi-napkin/pull/25))
+
 ### ⚙️ Miscellaneous Tasks
 
 - *(gitignore)* .DS_Store ([#20](https://github.com/cad0p/pi-napkin/pull/20))
