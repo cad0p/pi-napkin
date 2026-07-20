@@ -51,8 +51,8 @@ jobs:
           git config --global init.defaultBranch main
       - run: pnpm install --frozen-lockfile
       - name: Lint
-        run: pnpm lint
+        run: biome check extensions/
       - name: Type check
-        run: pnpm typecheck
+        run: tsc --noEmit
       - name: Run tests
-        run: pnpm test
+        run: vitest run

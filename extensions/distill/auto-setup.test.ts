@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { rmSyncRetry } from "./_test-helpers";
 
 import {
   BLOCK_CONTENT,
@@ -59,7 +58,7 @@ describe("ensureVaultReadyForDistill", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(vault);
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   /**
@@ -324,7 +323,7 @@ describe("ensureVaultReadyForDistill", () => {
       }
     } finally {
       fs.chmodSync(ro, 0o700);
-      rmSyncRetry(ro);
+      fs.rmSync(ro, { recursive: true, force: true });
     }
   });
 
@@ -1318,7 +1317,7 @@ describe("ensureVaultReadyForDistill", () => {
     } finally {
       if (saved === undefined) delete process.env.XDG_CACHE_HOME;
       else process.env.XDG_CACHE_HOME = saved;
-      rmSyncRetry(cacheTmp);
+      fs.rmSync(cacheTmp, { recursive: true, force: true });
     }
   });
 
@@ -1342,7 +1341,7 @@ describe("ensureVaultReadyForDistill", () => {
     } finally {
       if (saved === undefined) delete process.env.XDG_CACHE_HOME;
       else process.env.XDG_CACHE_HOME = saved;
-      rmSyncRetry(cacheTmp);
+      fs.rmSync(cacheTmp, { recursive: true, force: true });
     }
   });
 
@@ -1398,7 +1397,7 @@ describe("ensureVaultReadyForDistill", () => {
     addWorktreeWithBranch(vault, wtPath, "distill/orphan-target");
     // Delete the worktree dir without `git worktree remove`. Now the
     // registry has an orphan entry pointing at a missing dir.
-    rmSyncRetry(wtRoot);
+    fs.rmSync(wtRoot, { recursive: true, force: true });
 
     const r = runSetup("full");
     const finding = r.findings.find(
@@ -1471,7 +1470,7 @@ describe("ensureVaultReadyForDistill", () => {
       // Cleanup: remove the worktree before letting afterEach delete
       // the vault dir, otherwise git complains.
       git(vault, ["worktree", "remove", "--force", wtPath]);
-      rmSyncRetry(wtRoot);
+      fs.rmSync(wtRoot, { recursive: true, force: true });
     }
   });
 
@@ -1581,7 +1580,7 @@ describe("parseManagedBlockRange", () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "block-range-"));
   });
   afterEach(() => {
-    rmSyncRetry(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   test("missing file: null", () => {
@@ -1713,7 +1712,7 @@ describe("walkToFirstExistingAncestor", () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "walk-ancestor-"));
   });
   afterEach(() => {
-    rmSyncRetry(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   test("existing dir: returns it unchanged", () => {
@@ -1743,7 +1742,7 @@ describe("probeWritable", () => {
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "probe-writable-"));
   });
   afterEach(() => {
-    rmSyncRetry(dir);
+    fs.rmSync(dir, { recursive: true, force: true });
   });
 
   test("writable tmpdir: writable=true, no error", () => {
@@ -1788,7 +1787,7 @@ describe("parseLiveWorktreeBranches", () => {
     ]);
   });
   afterEach(() => {
-    rmSyncRetry(vault);
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("single worktree: returns set with the main branch", () => {
@@ -1814,7 +1813,7 @@ describe("parseLiveWorktreeBranches", () => {
       expect(r).toContain("distill/test-x");
     } finally {
       spawnSync("git", ["-C", vault, "worktree", "remove", "--force", wtPath]);
-      rmSyncRetry(wtRoot);
+      fs.rmSync(wtRoot, { recursive: true, force: true });
     }
   });
 
@@ -1823,7 +1822,7 @@ describe("parseLiveWorktreeBranches", () => {
     try {
       expect(parseLiveWorktreeBranches(tmp).size).toBe(0);
     } finally {
-      rmSyncRetry(tmp);
+      fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
 });
@@ -1950,7 +1949,7 @@ describe("countTrackedFiles", () => {
     vault = fs.mkdtempSync(path.join(os.tmpdir(), "count-files-"));
   });
   afterEach(() => {
-    rmSyncRetry(vault);
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("returns -1 when not a git repo", () => {

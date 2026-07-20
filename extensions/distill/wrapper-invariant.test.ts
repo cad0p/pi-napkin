@@ -57,11 +57,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import {
-  makeWrapperScaffold,
-  rmSyncRetry,
-  withNapkinOnPath,
-} from "./_test-helpers";
+import { makeWrapperScaffold, withNapkinOnPath } from "./_test-helpers";
 import {
   createDistillWorkspace,
   findDistillOutcomeForBranch,
@@ -130,7 +126,7 @@ function stageSlowGitShim(): {
     shimDir,
     realGit,
     restore() {
-      rmSyncRetry(shimDir);
+      fs.rmSync(shimDir, { recursive: true, force: true });
     },
   };
 }
@@ -276,7 +272,7 @@ describe("wrapper invariant: write_outcome before worktree-removal", () => {
       ).not.toBeNull();
       expect(outcomeAtRaceWindow?.outcomeClass).toBe("merged-content");
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   }, 60_000);
 
@@ -420,7 +416,7 @@ describe("wrapper invariant: write_outcome before worktree-removal", () => {
       if (savedPath === undefined) delete process.env.PATH;
       else process.env.PATH = savedPath;
       shim.restore();
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   }, 60_000);
 });

@@ -7,7 +7,6 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   makeFakeUI,
   makeMockExtensionAPI,
-  rmSyncRetry,
   TIMEOUT_BIN_DIR,
   withNapkinOnPath,
 } from "./_test-helpers";
@@ -316,8 +315,8 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
       }
     }
     spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
-    rmSyncRetry(vault);
-    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
+    fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
@@ -446,7 +445,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     for (const d of newTmpDirs) {
       fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
     }
-    rmSyncRetry(nonGitVault);
+    fs.rmSync(nonGitVault, { recursive: true, force: true });
   });
 
   test("/distill on a git vault with distill.enabled=false falls back to tmp dir (no git side effects)", async () => {
@@ -500,7 +499,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     for (const d of newTmpDirs) {
       fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
     }
-    rmSyncRetry(disabledVault);
+    fs.rmSync(disabledVault, { recursive: true, force: true });
   });
 
   test("/distill on a legacy-embedded git vault falls back to tmp dir (SEC-R4-1)", async () => {
@@ -574,7 +573,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     for (const d of newTmpDirs) {
       fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
     }
-    rmSyncRetry(legacyVault);
+    fs.rmSync(legacyVault, { recursive: true, force: true });
   });
 });
 
@@ -662,8 +661,8 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
       }
     }
     spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
-    rmSyncRetry(vault);
-    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
+    fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = savedXdgCache;
   });
@@ -826,8 +825,8 @@ describe("runDistillWith outcome dispatch (POST-CONV-5)", () => {
       }
     }
     spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
-    rmSyncRetry(vault);
-    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
+    fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = savedXdgCache;
   });

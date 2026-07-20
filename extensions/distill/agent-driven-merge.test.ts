@@ -40,7 +40,6 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
   makeWrapperScaffold,
-  rmSyncRetry,
   runWrapperWithStub,
   withNapkinOnPath,
 } from "./_test-helpers";
@@ -132,7 +131,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       // Vault should have the agent's content committed.
       expect(fs.existsSync(path.join(s.vault, "distilled.md"))).toBe(true);
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
@@ -162,7 +161,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       expect(noteContent).not.toMatch(/^>{7} /m);
       expect(noteContent).toContain("merged distill + main");
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
@@ -184,7 +183,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       expect(parsed?.outcomeClass).toBe("failed:markers-after-agent-exit");
       expect(parsed?.recoveryHint).toMatch(/git -C .* revert HEAD --no-edit/);
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
@@ -206,7 +205,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       }).stdout.trim();
       expect(postSha).toBe(r.preSha);
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
@@ -244,7 +243,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       // landed on default.
       expect(fs.existsSync(path.join(s.vault, "dangling.md"))).toBe(false);
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
@@ -305,7 +304,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
         .filter((f) => !f.endsWith(".warning.log"));
       expect(fatalLogs.length).toBe(0);
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
@@ -337,7 +336,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       ).stdout.trim();
       expect(localSha).toBe(originSha);
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
@@ -355,7 +354,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-local");
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
@@ -420,7 +419,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       // Distilled content from the agent must be on default.
       expect(fs.existsSync(path.join(s.vault, "pulled-merged.md"))).toBe(true);
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
@@ -443,7 +442,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       expect(parsed?.outcomeClass).toBe("failed:agent-timeout");
       expect(parsed?.recoveryHint).toMatch(/maxDurationMinutes/);
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   }, 30_000);
 
@@ -477,7 +476,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       );
       expect(logBody).toContain("simulated crash");
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 });

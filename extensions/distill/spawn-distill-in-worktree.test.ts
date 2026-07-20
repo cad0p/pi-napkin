@@ -6,11 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import {
-  rmSyncRetry,
-  TIMEOUT_BIN_DIR,
-  withNapkinOnPath,
-} from "./_test-helpers";
+import { TIMEOUT_BIN_DIR, withNapkinOnPath } from "./_test-helpers";
 import {
   cleanupDistillWorkspace,
   createDistillWorkspace,
@@ -161,9 +157,9 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
   afterEach(() => {
     for (const w of workspaces) cleanupDistillWorkspace(vault, w);
     workspaces.length = 0;
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
-    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
@@ -379,9 +375,9 @@ describe("distill-wrapper.sh (integration)", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
-    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
@@ -959,9 +955,9 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
-    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
@@ -1009,9 +1005,9 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
-    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
     if (napkinPathRestore) {

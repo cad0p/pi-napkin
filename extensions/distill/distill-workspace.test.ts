@@ -4,7 +4,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { rmSyncRetry } from "./_test-helpers";
 
 import {
   cleanupDistillWorkspace,
@@ -118,7 +117,7 @@ describe("resolveCacheRoot (XDG cache placement)", () => {
         root.startsWith(`${fakeCache}${path.sep}napkin-distill${path.sep}`),
       ).toBe(true);
     } finally {
-      rmSyncRetry(fakeCache);
+      fs.rmSync(fakeCache, { recursive: true, force: true });
     }
   });
 
@@ -185,8 +184,8 @@ describe("resolveCacheRoot (XDG cache placement)", () => {
       const viaLink = resolveCacheRoot(symlink);
       expect(viaLink).toBe(viaReal);
     } finally {
-      rmSyncRetry(realDir);
-      rmSyncRetry(linkDir);
+      fs.rmSync(realDir, { recursive: true, force: true });
+      fs.rmSync(linkDir, { recursive: true, force: true });
     }
   });
 
@@ -207,7 +206,7 @@ describe("resolveCacheRoot (XDG cache placement)", () => {
         true,
       );
     } finally {
-      rmSyncRetry(dir);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });
@@ -220,7 +219,7 @@ describe("createDistillWorktree", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(vault);
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("creates a git worktree on a fresh branch rooted at HEAD", () => {
@@ -248,7 +247,7 @@ describe("createDistillWorktree", () => {
         createDistillWorktree(noGit, "distill/aa-1", path.join(noGit, "wt")),
       ).toThrow(DistillError);
     } finally {
-      rmSyncRetry(noGit);
+      fs.rmSync(noGit, { recursive: true, force: true });
     }
   });
 
@@ -285,7 +284,7 @@ describe("createDistillWorktree", () => {
         expect((err as Error).message).toMatch(/HEAD unresolvable/);
       }
     } finally {
-      rmSyncRetry(emptyRepo);
+      fs.rmSync(emptyRepo, { recursive: true, force: true });
     }
   });
 
@@ -312,7 +311,7 @@ describe("removeDistillWorktree", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(vault);
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("removes worktree + branch", () => {
@@ -338,7 +337,7 @@ describe("removeDistillWorktree", () => {
 
   test("no-ops cleanly if vault is gone", () => {
     const gone = fs.mkdtempSync(path.join(os.tmpdir(), "gone-"));
-    rmSyncRetry(gone);
+    fs.rmSync(gone, { recursive: true, force: true });
     expect(() =>
       removeDistillWorktree(gone, "/tmp/wt", "distill/zz-1"),
     ).not.toThrow();
@@ -388,8 +387,8 @@ describe("createDistillWorkspace", () => {
       cleanupDistillWorkspace(vault, w);
     }
     workspaces.length = 0;
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   function track<T extends { worktreePath: string; branchName: string }>(
@@ -489,7 +488,7 @@ describe("createDistillWorkspace", () => {
         createDistillWorkspace(noGit, sourceSession, sessionDir),
       ).toThrow(DistillError);
     } finally {
-      rmSyncRetry(noGit);
+      fs.rmSync(noGit, { recursive: true, force: true });
     }
   });
 
@@ -544,8 +543,8 @@ describe("cleanupDistillWorkspace", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("removes worktree tree and branch", () => {
@@ -580,8 +579,8 @@ describe("readDistillMeta", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("returns parsed meta for a real workspace", () => {
@@ -607,7 +606,7 @@ describe("readDistillMeta", () => {
       fs.mkdirSync(path.join(dir, DISTILL_SUBDIR), { recursive: true });
       expect(readDistillMeta(dir)).toBeNull();
     } finally {
-      rmSyncRetry(dir);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -621,7 +620,7 @@ describe("readDistillMeta", () => {
       );
       expect(readDistillMeta(dir)).toBeNull();
     } finally {
-      rmSyncRetry(dir);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 
@@ -635,7 +634,7 @@ describe("readDistillMeta", () => {
       );
       expect(readDistillMeta(dir)).toBeNull();
     } finally {
-      rmSyncRetry(dir);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 });
@@ -715,8 +714,8 @@ describe("cleanupStaleWorktrees", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("no-op when vault has no .git (returns 0)", () => {
@@ -724,7 +723,7 @@ describe("cleanupStaleWorktrees", () => {
     try {
       expect(cleanupStaleWorktrees({ contentPath: noGit })).toBe(0);
     } finally {
-      rmSyncRetry(noGit);
+      fs.rmSync(noGit, { recursive: true, force: true });
     }
   });
 
@@ -858,8 +857,8 @@ describe("createDistillWorkspace records startSha", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("meta.json.startSha matches vault HEAD at create-time", () => {
@@ -900,8 +899,8 @@ describe("getActiveDistills", () => {
       }
     }
     toCleanup.length = 0;
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("returns [] when vault has no .git", () => {
@@ -909,7 +908,7 @@ describe("getActiveDistills", () => {
     try {
       expect(getActiveDistills({ contentPath: noGit })).toEqual([]);
     } finally {
-      rmSyncRetry(noGit);
+      fs.rmSync(noGit, { recursive: true, force: true });
     }
   });
 
@@ -1013,8 +1012,8 @@ describe("getUnmergedDistillBranches", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("returns [] when no distill branches exist", () => {
@@ -1026,7 +1025,7 @@ describe("getUnmergedDistillBranches", () => {
     try {
       expect(getUnmergedDistillBranches({ contentPath: noGit })).toEqual([]);
     } finally {
-      rmSyncRetry(noGit);
+      fs.rmSync(noGit, { recursive: true, force: true });
     }
   });
 
@@ -1094,8 +1093,8 @@ describe("getDistillState (consolidated enumeration, CLN-3)", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("no .git → both halves empty", () => {
@@ -1106,7 +1105,7 @@ describe("getDistillState (consolidated enumeration, CLN-3)", () => {
         unmerged: [],
       });
     } finally {
-      rmSyncRetry(noGit);
+      fs.rmSync(noGit, { recursive: true, force: true });
     }
   });
 
@@ -1200,9 +1199,9 @@ describe("R2-4: getActiveDistills skips branch listing", () => {
   afterEach(() => {
     if (origPath === undefined) delete process.env.PATH;
     else process.env.PATH = origPath;
-    rmSyncRetry(shimDir);
-    rmSyncRetry(sessionDir);
-    rmSyncRetry(vault);
+    fs.rmSync(shimDir, { recursive: true, force: true });
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   const readLog = (): string[] =>

@@ -26,7 +26,6 @@ import {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { rmSyncRetry } from "./_test-helpers";
 
 import { getDistillTouchedFilesPostSquash } from "./distill-workspace";
 import { computeOverlapForCompletion } from "./index";
@@ -185,7 +184,7 @@ describe("getDistillTouchedFilesPostSquash (R7-PERF-2)", () => {
     vault = createGitVault();
   });
   afterEach(() => {
-    rmSyncRetry(vault);
+    fs.rmSync(vault, { recursive: true, force: true });
   });
 
   test("undefined startSha: returns empty (legacy meta fallback)", () => {
@@ -254,8 +253,8 @@ describe("per-completion overlap notice (integration, R7-PERF-2)", () => {
   });
 
   afterEach(() => {
-    rmSyncRetry(vault);
-    rmSyncRetry(sessionDir);
+    fs.rmSync(vault, { recursive: true, force: true });
+    fs.rmSync(sessionDir, { recursive: true, force: true });
   });
 
   test("end-to-end: distill touched + session touched same file → custom message appended", () => {

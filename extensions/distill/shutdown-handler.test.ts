@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { rmSyncRetry, withNapkinOnPath } from "./_test-helpers";
+import { cleanupDistillWorktrees, withNapkinOnPath } from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -216,18 +216,6 @@ function countWorktrees(vault: string): number {
 }
 
 /** Best-effort cleanup of any dangling distill worktrees in `vault`. */
-function cleanupWorktrees(vault: string): void {
-  const d = resolveCacheRoot(vault);
-  if (!fs.existsSync(d)) return;
-  for (const entry of fs.readdirSync(d)) {
-    const wt = path.join(d, entry);
-    spawnSync("git", ["-C", vault, "worktree", "remove", "--force", wt], {
-      encoding: "utf-8",
-    });
-  }
-  spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
-}
-
 describe("session_shutdown handler (Item 8)", () => {
   let vault: string;
   let sm: SessionManager;
@@ -297,11 +285,11 @@ describe("session_shutdown handler (Item 8)", () => {
     }
     globalThis.setInterval = originalSetInterval;
     if (vault) {
-      cleanupWorktrees(vault);
-      rmSyncRetry(vault);
+      cleanupDistillWorktrees(vault);
+      fs.rmSync(vault, { recursive: true, force: true });
     }
     // Tear down the per-test XDG cache dir (where worktrees live now).
-    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
@@ -428,7 +416,7 @@ describe("session_shutdown handler (Item 8)", () => {
         captured.handlers.session_shutdown({ reason: "quit" }, ctx),
       ).resolves.toBeUndefined();
     } finally {
-      rmSyncRetry(bogusCwd);
+      fs.rmSync(bogusCwd, { recursive: true, force: true });
     }
   });
 
@@ -582,10 +570,10 @@ describe("session_shutdown handler — interval-fires-before-shutdown race (G5)"
     }
     globalThis.setInterval = originalSetInterval;
     if (vault) {
-      cleanupWorktrees(vault);
-      rmSyncRetry(vault);
+      cleanupDistillWorktrees(vault);
+      fs.rmSync(vault, { recursive: true, force: true });
     }
-    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
@@ -709,10 +697,10 @@ describe("session_start handler \u2014 legacy-embedded layout blocks setup", () 
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     globalThis.setInterval = originalSetInterval;
     if (vault) {
-      cleanupWorktrees(vault);
-      rmSyncRetry(vault);
+      cleanupDistillWorktrees(vault);
+      fs.rmSync(vault, { recursive: true, force: true });
     }
-    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
+    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });

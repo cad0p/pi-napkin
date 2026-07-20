@@ -5,7 +5,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { rmSyncRetry } from "./_test-helpers";
 
 import { spawnDistill } from "./index";
 
@@ -79,10 +78,10 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
   });
 
   afterEach(() => {
-    for (const d of tmpDirs) rmSyncRetry(d);
+    for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true });
     tmpDirs.length = 0;
-    rmSyncRetry(cwd);
-    rmSyncRetry(sessionDir);
+    fs.rmSync(cwd, { recursive: true, force: true });
+    fs.rmSync(sessionDir, { recursive: true, force: true });
   });
 
   test("spawns `bash -c <template> _ <positional args>` (no interpolated command string)", () => {

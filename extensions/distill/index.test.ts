@@ -2,7 +2,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { rmSyncRetry } from "./_test-helpers";
 
 import { DISTILL_PROMPT_CACHE_KEY_ENV } from "./distill-workspace";
 import {
@@ -69,7 +68,7 @@ describe("loadVaultConfig", () => {
 
   afterEach(() => {
     for (const dir of tempDirs) {
-      rmSyncRetry(dir);
+      fs.rmSync(dir, { recursive: true, force: true });
     }
   });
 

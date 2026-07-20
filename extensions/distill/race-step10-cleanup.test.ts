@@ -74,11 +74,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import {
-  makeWrapperScaffold,
-  rmSyncRetry,
-  withNapkinOnPath,
-} from "./_test-helpers";
+import { makeWrapperScaffold, withNapkinOnPath } from "./_test-helpers";
 import {
   createDistillWorkspace,
   findDistillOutcomeForBranch,
@@ -255,7 +251,7 @@ describe("agent step-10 / wrapper outcome-write race (regression)", () => {
         `JS-side dispatch on the race-window snapshot would notify the user with "terminated abnormally" on a successful distill${diag()}`,
       ).not.toMatch(/terminated abnormally/i);
     } finally {
-      rmSyncRetry(s.root);
+      fs.rmSync(s.root, { recursive: true, force: true });
     }
   }, 60_000);
 });
