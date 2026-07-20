@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - *(distill)* Preserve OpenAI prompt cache key ([#22](https://github.com/cad0p/pi-napkin/pull/22))
+- Use optional chain in getSessionTouchedFiles ([#27](https://github.com/cad0p/pi-napkin/pull/27))
 
 ### 🚜 Refactor
 
