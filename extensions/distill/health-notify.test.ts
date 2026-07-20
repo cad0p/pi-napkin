@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 
 import type { HealthFinding } from "./auto-setup";
 import { surfaceHealthFindings, surfaceSetupError } from "./health-notify";

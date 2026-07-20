@@ -17,17 +17,16 @@
  *     parity preserved, message persists in history.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import {
   type SessionEntry,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { killDistillWrappers } from "./_test-helpers";
 import { getDistillTouchedFilesPostSquash } from "./distill-workspace";
 import { computeOverlapForCompletion } from "./index";
 
@@ -185,6 +184,7 @@ describe("getDistillTouchedFilesPostSquash (R7-PERF-2)", () => {
     vault = createGitVault();
   });
   afterEach(() => {
+    killDistillWrappers(vault);
     fs.rmSync(vault, { recursive: true, force: true });
   });
 
@@ -254,6 +254,7 @@ describe("per-completion overlap notice (integration, R7-PERF-2)", () => {
   });
 
   afterEach(() => {
+    killDistillWrappers(vault);
     fs.rmSync(vault, { recursive: true, force: true });
     fs.rmSync(sessionDir, { recursive: true, force: true });
   });

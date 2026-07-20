@@ -13,7 +13,7 @@
  * covered in `overlap-completion.test.ts`.
  */
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import { formatOverlapNotice, intersectFiles } from "./index";
 
 describe("intersectFiles", () => {

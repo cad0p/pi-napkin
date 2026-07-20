@@ -36,9 +36,9 @@
  * R8-CC-2.
  */
 
-import { describe, expect, test } from "bun:test";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { describe, expect, test } from "vitest";
 
 const PI_SESSION_MANAGER_DTS = join(
   __dirname,

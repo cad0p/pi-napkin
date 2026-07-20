@@ -14,8 +14,8 @@
  * internal extractFileOpsFromMessage still exists at the expected path.
  */
 
-import { describe, expect, test } from "bun:test";
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import { describe, expect, test } from "vitest";
 import {
   extractBashRedirectionTargets,
   extractFileOpsFromMessage,

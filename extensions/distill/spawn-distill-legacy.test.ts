@@ -1,11 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import { spawnDistill } from "./index";
 

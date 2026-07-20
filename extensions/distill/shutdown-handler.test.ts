@@ -1,11 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { withNapkinOnPath } from "./_test-helpers";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { cleanupDistillWorktrees, withNapkinOnPath } from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -216,19 +215,6 @@ function countWorktrees(vault: string): number {
   return fs.readdirSync(d).length;
 }
 
-/** Best-effort cleanup of any dangling distill worktrees in `vault`. */
-function cleanupWorktrees(vault: string): void {
-  const d = resolveCacheRoot(vault);
-  if (!fs.existsSync(d)) return;
-  for (const entry of fs.readdirSync(d)) {
-    const wt = path.join(d, entry);
-    spawnSync("git", ["-C", vault, "worktree", "remove", "--force", wt], {
-      encoding: "utf-8",
-    });
-  }
-  spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
-}
-
 describe("session_shutdown handler (Item 8)", () => {
   let vault: string;
   let sm: SessionManager;
@@ -298,7 +284,7 @@ describe("session_shutdown handler (Item 8)", () => {
     }
     globalThis.setInterval = originalSetInterval;
     if (vault) {
-      cleanupWorktrees(vault);
+      cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
     // Tear down the per-test XDG cache dir (where worktrees live now).
@@ -583,7 +569,7 @@ describe("session_shutdown handler — interval-fires-before-shutdown race (G5)"
     }
     globalThis.setInterval = originalSetInterval;
     if (vault) {
-      cleanupWorktrees(vault);
+      cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
     if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
@@ -710,7 +696,7 @@ describe("session_start handler \u2014 legacy-embedded layout blocks setup", () 
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     globalThis.setInterval = originalSetInterval;
     if (vault) {
-      cleanupWorktrees(vault);
+      cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
     if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });

@@ -1,11 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
+  cleanupDistillWorktrees,
   makeFakeUI,
   makeMockExtensionAPI,
   TIMEOUT_BIN_DIR,
@@ -305,17 +305,10 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     _napkinPath = null;
     // Best-effort cleanup of any dangling worktrees + branches the detached
     // wrapper may have left during the test window. Worktrees live under
-    // the per-test XDG cache dir set in beforeEach.
-    const worktreesDir = resolveCacheRoot(vault);
-    if (fs.existsSync(worktreesDir)) {
-      for (const entry of fs.readdirSync(worktreesDir)) {
-        const wt = path.join(worktreesDir, entry);
-        spawnSync("git", ["-C", vault, "worktree", "remove", "--force", wt], {
-          encoding: "utf-8",
-        });
-      }
-    }
-    spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
+    // the per-test XDG cache dir set in beforeEach. Kill the wrapper pid
+    // first so its file handles release before rmSync (see
+    // cleanupDistillWorktrees in _test-helpers.ts).
+    cleanupDistillWorktrees(vault);
     fs.rmSync(vault, { recursive: true, force: true });
     if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
@@ -700,8 +693,8 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
     // quickly with the missing-napkin guard).
     const worktreesDir = resolveCacheRoot(vault);
     const start = Date.now();
-    // Cap the polling loop just under the bun:test per-test deadline
-    // (set on the test below). Anything longer is dead code — bun would
+    // Cap the polling loop just under the vitest per-test deadline
+    // (set on the test below). Anything longer is dead code — vitest would
     // kill the test before this loop noticed.
     const timeoutMs = 18_000;
     while (Date.now() - start < timeoutMs) {
@@ -737,7 +730,7 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
     expect(
       fs.existsSync(worktreesDir) ? fs.readdirSync(worktreesDir).length : 0,
     ).toBe(0);
-  }, 20_000); // bun:test per-test timeout (default 5000ms is too tight given the 2s poll interval; 20s is comfortable headroom for slow CI runners under load)
+  }, 20_000); // vitest per-test timeout (default 5000ms is too tight given the 2s poll interval; 20s is comfortable headroom for slow CI runners under load)
 });
 
 // ---------------------------------------------------------------------------

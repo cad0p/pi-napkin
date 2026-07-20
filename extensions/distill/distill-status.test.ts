@@ -14,7 +14,7 @@
  *     unmerged case)
  */
 
-import { describe, expect, test } from "bun:test";
+import { describe, expect, test } from "vitest";
 import type { ActiveDistill } from "./distill-workspace";
 import { formatDistillStatus } from "./index";
 

@@ -27,13 +27,13 @@
  * is representative.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { cleanupDistillWorktrees } from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -137,18 +137,6 @@ function countWorktrees(vault: string): number {
   return fs.readdirSync(d).length;
 }
 
-function cleanupWorktrees(vault: string): void {
-  const d = resolveCacheRoot(vault);
-  if (!fs.existsSync(d)) return;
-  for (const entry of fs.readdirSync(d)) {
-    const wt = path.join(d, entry);
-    spawnSync("git", ["-C", vault, "worktree", "remove", "--force", wt], {
-      encoding: "utf-8",
-    });
-  }
-  spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
-}
-
 describe("runDistillWith pollHandle timeout (G8)", () => {
   let vault: string;
   let originalSetInterval: typeof setInterval;
@@ -221,7 +209,7 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
     }
     globalThis.setInterval = originalSetInterval;
     if (vault) {
-      cleanupWorktrees(vault);
+      cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
     if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });

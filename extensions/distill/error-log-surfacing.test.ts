@@ -14,11 +14,11 @@
  * lifecycle is end-to-end.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { killDistillWrappers } from "./_test-helpers";
 import {
   findDistillErrorLogForBranch,
   findDistillOutcomeForBranch,
@@ -214,6 +214,7 @@ describe("resolveDistillErrorDir", () => {
     process.env.HOME = xdgConfigHome;
   });
   afterEach(() => {
+    killDistillWrappers(vault);
     fs.rmSync(vault, { recursive: true, force: true });
     fs.rmSync(xdgConfigHome, { recursive: true, force: true });
     if (savedXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;

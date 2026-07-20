@@ -12,9 +12,83 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-
-import { createDistillWorkspace } from "./distill-workspace";
+import { createDistillWorkspace, resolveCacheRoot } from "./distill-workspace";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
+
+/**
+ * Kill any detached distill wrapper subprocess still running for the
+ * given vault. The wrapper writes its own pid to each worktree's
+ * `meta.json` on startup; read those, SIGTERM the pids, and wait briefly
+ * for exit. This must run BEFORE `git worktree remove` / `fs.rmSync` in
+ * test teardown — otherwise the wrapper's cleanup trap races the test's
+ * `afterEach` and `fs.rmSync(vault)` fails with ENOTEMPTY on Linux
+ * (file handles still held by the not-yet-exited wrapper).
+ *
+ * No-op when no worktrees exist or no meta.json is readable. Pids that
+ * are already dead (ESRCH on kill) are silently skipped.
+ */
+export function killDistillWrappers(vault: string): void {
+  const cacheRoot = resolveCacheRoot(vault);
+  if (!fs.existsSync(cacheRoot)) return;
+  for (const entry of fs.readdirSync(cacheRoot)) {
+    const metaPath = path.join(
+      cacheRoot,
+      entry,
+      ".napkin",
+      "distill",
+      "meta.json",
+    );
+    let pid: number | undefined;
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+      if (typeof meta.pid === "number") pid = meta.pid;
+    } catch {
+      // No meta.json or unreadable — nothing to kill.
+    }
+    if (pid === undefined || pid <= 0) continue;
+    try {
+      // Kill the wrapper's entire process group (negative pid) so any
+      // children it spawned (git, the agent stub) also exit and release
+      // file handles. The wrapper is detached so it leads its own group.
+      process.kill(-pid, "SIGTERM");
+    } catch (e) {
+      // ESRCH = already dead; ignore. Anything else is unexpected but
+      // non-fatal in teardown — don't mask the real test failure.
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH") continue;
+    }
+    // Wait up to ~300ms for the wrapper to exit so its file handles
+    // release before the caller removes the worktree / vault dir.
+    for (let i = 0; i < 30; i++) {
+      try {
+        process.kill(pid, 0);
+        // Still alive — wait 10ms and retry.
+        spawnSync("sleep", ["0.01"], { shell: false });
+      } catch {
+        break; // ESRCH — exited.
+      }
+    }
+  }
+}
+
+/**
+ * Remove all distill worktrees for a vault: kill any live wrapper pids
+ * (see `killDistillWrappers`), then `git worktree remove --force` each
+ * and prune. Centralizes the cleanup that was duplicated across
+ * shutdown-handler, health-check-wiring, and pollhandle-timeout tests.
+ */
+export function cleanupDistillWorktrees(vault: string): void {
+  killDistillWrappers(vault);
+  const d = resolveCacheRoot(vault);
+  if (!fs.existsSync(d)) return;
+  for (const entry of fs.readdirSync(d)) {
+    const wt = path.join(d, entry);
+    spawnSync("git", ["-C", vault, "worktree", "remove", "--force", wt], {
+      encoding: "utf-8",
+    });
+  }
+  spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
+}
 
 /**
  * Absolute path of the directory holding `timeout(1)` (or `gtimeout`

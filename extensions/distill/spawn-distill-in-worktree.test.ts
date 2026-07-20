@@ -1,17 +1,22 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { spawn } from "node:child_process";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { TIMEOUT_BIN_DIR, withNapkinOnPath } from "./_test-helpers";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import {
+  killDistillWrappers,
+  TIMEOUT_BIN_DIR,
+  withNapkinOnPath,
+} from "./_test-helpers";
 import {
   cleanupDistillWorkspace,
+  createDistillWorkspace,
   DISTILL_PROMPT_CACHE_KEY_ENV,
   type DistillWorkspace,
+  detectDefaultBranch,
   spawnDistillInWorktree,
 } from "./distill-workspace";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
@@ -154,6 +159,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
   });
 
   afterEach(() => {
+    killDistillWrappers(vault);
     for (const w of workspaces) cleanupDistillWorkspace(vault, w);
     workspaces.length = 0;
     fs.rmSync(sessionDir, { recursive: true, force: true });
@@ -452,7 +458,6 @@ describe("distill-wrapper.sh (integration)", () => {
     // parent pi session). The wrapper MUST overwrite that with its own
     // pid ($$) so liveness checks against the recorded pid track the
     // wrapper's lifetime, not the long-lived parent session's.
-    const { createDistillWorkspace } = require("./distill-workspace");
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
@@ -542,7 +547,6 @@ describe("distill-wrapper.sh (integration)", () => {
     const repoRoot = path.resolve(__dirname, "..", "..");
     const localBin = path.join(repoRoot, "node_modules", ".bin");
     const augmentedPath = `${localBin}${path.delimiter}${process.env.PATH ?? ""}`;
-    const { createDistillWorkspace } = require("./distill-workspace");
     const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
@@ -631,7 +635,6 @@ describe("distill-wrapper.sh (integration)", () => {
     // exits 1, the cleanup trap removes the worktree, and the error
     // log records the diagnostic + the PATH the wrapper saw (R7-SC-10
     // — forensic info for the user to fix their environment).
-    const { createDistillWorkspace } = require("./distill-workspace");
     const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
@@ -708,7 +711,6 @@ describe("distill-wrapper.sh (integration)", () => {
       );
       return;
     }
-    const { createDistillWorkspace } = require("./distill-workspace");
     const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
@@ -771,7 +773,6 @@ describe("distill-wrapper.sh (integration)", () => {
     // environment may not have napkin on PATH at all). Without this
     // pin, a future refactor that moves the shim install above the
     // SKIP_PI gate would silently break those tests' isolation.
-    const { createDistillWorkspace } = require("./distill-workspace");
     const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
     const errorDir = path.join(vault, ".napkin", "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
@@ -839,7 +840,6 @@ describe("distill-wrapper.sh (integration)", () => {
   // dropped pi-self-committed content (POST-CONV-1; real failure:
   // dropped commit a13e8b1).
   test("meta.json without startSha hard-fails with diagnostic (R12-CC-3, R12-SC-5)", () => {
-    const { createDistillWorkspace } = require("./distill-workspace");
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
@@ -968,7 +968,6 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
   });
 
   test("detectDefaultBranch returns 'master' for a master-default vault", () => {
-    const { detectDefaultBranch } = require("./distill-workspace");
     expect(detectDefaultBranch(vault)).toBe("master");
   });
 });
@@ -1067,7 +1066,6 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
   }
 
   test("rm -rf fallback removes leaf when git worktree remove leaves gitignored content (POST-CONV-3, R13-CC-1)", () => {
-    const { createDistillWorkspace } = require("./distill-workspace");
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,
@@ -1111,7 +1109,6 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
   });
 
   test("rmdir removes parent vault-hash dir after last distill cleared (POST-CONV-4, R13-CC-1)", () => {
-    const { createDistillWorkspace } = require("./distill-workspace");
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
       sessionFile,

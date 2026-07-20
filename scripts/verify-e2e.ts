@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * verify-e2e — full-runtime gate for the distill flow.
  *
@@ -173,6 +173,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
@@ -201,13 +202,14 @@ const DISTILL_MAX_DURATION_MINUTES = 10;
 /**
  * Path to the `napkin` CLI shipped via the `@cad0p/napkin` dependency.
  * Resolved relative to the script's location so this works both in
- * local dev (`bun run verify:e2e`) and on a GitHub Actions runner that
- * has done `bun install` — both populate `node_modules/.bin/napkin`
+ * local dev (`pnpm run verify:e2e`) and on a GitHub Actions runner that
+ * has done `pnpm install` — both populate `node_modules/.bin/napkin`
  * with a shim pointing at `dist/main.js`. Avoids depending on the
  * caller's PATH being augmented with `node_modules/.bin/`.
  */
+const _here = path.dirname(fileURLToPath(import.meta.url));
 const NAPKIN_BIN = path.resolve(
-  import.meta.dir,
+  _here,
   "..",
   "node_modules",
   ".bin",
@@ -1780,10 +1782,14 @@ async function main(): Promise<number> {
   }
 }
 
-// Only run when invoked directly (`bun run verify:e2e` / shebang). When
+// Only run when invoked directly (`pnpm run verify:e2e` / shebang). When
 // imported from a test file (e.g. `scripts/verify-e2e.test.ts`), the
 // module's exported helpers are pulled in without triggering the gate.
-if (import.meta.main) {
+// Node has no `import.meta.main`; detect direct invocation by comparing
+// the resolved entry path to this module's file path.
+const _thisFile = fileURLToPath(import.meta.url);
+const _isMain = path.resolve(process.argv[1] ?? "") === _thisFile;
+if (_isMain) {
   main()
     .then((code) => process.exit(code))
     .catch((e) => {

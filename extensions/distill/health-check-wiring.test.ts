@@ -1,12 +1,12 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
+  cleanupDistillWorktrees,
   makeFakeUI,
   makeMockExtensionAPI,
   withNapkinOnPath,
@@ -234,18 +234,6 @@ describe("per-spawn health-check wiring", () => {
    * before `fs.rmSync(vault)` runs. Idempotent: a no-op when no
    * worktrees were created (the spawn-aborted tests).
    */
-  function cleanupWorktrees(vault: string): void {
-    const dir = resolveCacheRoot(vault);
-    if (!fs.existsSync(dir)) return;
-    for (const entry of fs.readdirSync(dir)) {
-      spawnSync(
-        "git",
-        ["-C", vault, "worktree", "remove", "--force", path.join(dir, entry)],
-        { encoding: "utf-8" },
-      );
-    }
-  }
-
   // --- runAutoDistill (interval tick) ------------------------------------
 
   test("runAutoDistill on healthy vault: no error notify, worktree created", async () => {
@@ -271,7 +259,7 @@ describe("per-spawn health-check wiring", () => {
       expect(notifyCalls.filter((n) => n.severity === "info")).toEqual([]);
       expect(worktreeCount(vault)).toBe(1);
     } finally {
-      cleanupWorktrees(vault);
+      cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
@@ -347,7 +335,7 @@ describe("per-spawn health-check wiring", () => {
       expect(infos[0].msg).toContain("(installed)");
       expect(worktreeCount(vault)).toBe(1);
     } finally {
-      cleanupWorktrees(vault);
+      cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
@@ -400,7 +388,7 @@ describe("per-spawn health-check wiring", () => {
       const errors = notifyCalls.filter((n) => n.severity === "error");
       expect(errors).toEqual([]);
     } finally {
-      cleanupWorktrees(vault);
+      cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
@@ -636,7 +624,7 @@ describe("per-spawn health-check wiring", () => {
       expect(notifyCalls.filter((n) => n.severity === "info")).toEqual([]);
       expect(worktreeCount(vault)).toBe(1);
     } finally {
-      cleanupWorktrees(vault);
+      cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
     }
   });
