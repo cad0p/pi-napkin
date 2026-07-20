@@ -72,11 +72,5 @@
     "@earendil-works/pi-tui": ">=0.74.0",
     "@sinclair/typebox": "^0.34.49"
   },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "esbuild",
-      "@google/genai"
-    ]
-  },
   "license": "MIT"
 }
