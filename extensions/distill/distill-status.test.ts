@@ -1,12 +1,10 @@
 /**
- * Unit tests for the `/distill-status` and `napkin_distill_status` surfaces.
+ * Unit tests for the `/distill-status` surface.
  *
- * Both surfaces share the same underlying data (worktree enumeration via
- * `getActiveDistills` + orphan-branch enumeration via
- * `getUnmergedDistillBranches`), but differ in presentation. The
- * presentation layer is extracted into pure formatters exported from
- * `./index.ts` so these tests can run without mocking the full pi
- * `ExtensionAPI`.
+ * The command reads worktree enumeration via `getActiveDistills` +
+ * orphan-branch enumeration via `getUnmergedDistillBranches`, then formats
+ * via the pure `formatDistillStatus` exported from `./index.ts` so these
+ * tests can run without mocking the full pi `ExtensionAPI`.
  *
  * The input side (`collectDistillStatus`) is covered indirectly via the
  * integration-style tests in `distill-workspace.test.ts` for the helpers
@@ -14,12 +12,11 @@
  *   - formatter output shape for 0 / 1 / N active distills
  *   - formatter handling of unmerged branches (including the no-active +
  *     unmerged case)
- *   - JSON tool output shape for the agent
  */
 
 import { describe, expect, test } from "bun:test";
 import type { ActiveDistill } from "./distill-workspace";
-import { distillStatusToJson, formatDistillStatus } from "./index";
+import { formatDistillStatus } from "./index";
 
 function makeActive(overrides: Partial<ActiveDistill>): ActiveDistill {
   return {
@@ -128,66 +125,5 @@ describe("formatDistillStatus", () => {
     expect(
       formatDistillStatus([makeActive({ elapsedMs: 1999 })], []),
     ).toContain(" 1s");
-  });
-});
-
-describe("distillStatusToJson", () => {
-  test("empty state serialises to empty arrays", () => {
-    const json = distillStatusToJson([], []);
-    const parsed = JSON.parse(json);
-    expect(parsed).toEqual({ active: [], unmerged: [] });
-  });
-
-  test("one active distill: JSON shape matches spec's return shape", () => {
-    const json = distillStatusToJson(
-      [
-        makeActive({
-          pid: 48312,
-          branch: "distill/abc-123",
-          elapsedMs: 84_000,
-          sessionPath: "/tmp/sessions/main.jsonl",
-        }),
-      ],
-      [],
-    );
-    const parsed = JSON.parse(json);
-    // Spec-mandated shape: { active: [{ pid, branch, elapsedSeconds, session }], unmerged: [] }
-    expect(parsed.active).toHaveLength(1);
-    expect(parsed.active[0]).toMatchObject({
-      pid: 48312,
-      branch: "distill/abc-123",
-      elapsedSeconds: 84,
-      session: "main.jsonl",
-    });
-    expect(parsed.unmerged).toEqual([]);
-  });
-
-  test("active with unknown session serialises as session=null", () => {
-    const json = distillStatusToJson([makeActive({ sessionPath: null })], []);
-    const parsed = JSON.parse(json);
-    expect(parsed.active[0].session).toBeNull();
-  });
-
-  test("unmerged branches pass through as-is", () => {
-    const json = distillStatusToJson(
-      [],
-      ["distill/xyz-456", "distill/old-789"],
-    );
-    const parsed = JSON.parse(json);
-    expect(parsed.unmerged).toEqual(["distill/xyz-456", "distill/old-789"]);
-  });
-
-  test("dead pid is reflected via alive=false so the agent can distinguish states", () => {
-    const json = distillStatusToJson(
-      [makeActive({ pid: 99999, alive: false })],
-      [],
-    );
-    const parsed = JSON.parse(json);
-    expect(parsed.active[0].alive).toBe(false);
-  });
-
-  test("JSON output is valid UTF-8 and reparseable", () => {
-    const json = distillStatusToJson([makeActive({})], ["distill/x"]);
-    expect(() => JSON.parse(json)).not.toThrow();
   });
 });
