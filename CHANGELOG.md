@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 ### ⚙️ Miscellaneous Tasks
 
 - *(gitignore)* .DS_Store ([#20](https://github.com/cad0p/pi-napkin/pull/20))
+- Migrate from bun to pnpm + vitest ([#26](https://github.com/cad0p/pi-napkin/pull/26))
 
 
 ## [0.3.1] - 2026-05-25
