@@ -207,7 +207,7 @@ export function getSessionTouchedFiles(sm: SessionEntriesSource): Set<string> {
   for (const entry of sm.getEntries()) {
     if (entry.type !== "message") continue;
     const msg = (entry as { message?: AssistantMessageShape }).message;
-    if (!msg || msg.role !== "assistant") continue;
+    if (msg?.role !== "assistant") continue;
     for (const p of extractFileOpsFromMessage(msg)) {
       out.add(p);
     }
