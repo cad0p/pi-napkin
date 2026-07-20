@@ -10,7 +10,7 @@ pi-napkin depends on the [`@cad0p/napkin`](https://github.com/cad0p/napkin) CLI.
 
 ```bash
 npm install -g @cad0p/napkin
-# or: bun add -g @cad0p/napkin
+# or: pnpm add -g @cad0p/napkin
 ```
 
 Then install the pi-napkin extension:
@@ -495,7 +495,7 @@ Why manual: PR #12 deliberately avoids automatic migration. The orphaned `.gitat
 CI uses bash-stub fixtures (`extensions/distill/test-fixtures/agent-stubs/`) to cover the agent-behavior space without burning tokens. For ad-hoc re-validation that the full runtime — wrapper subprocess + agent + JS-side polling — still walks cleanly through a real model, run:
 
 ```bash
-bun run verify:e2e
+pnpm run verify:e2e
 ```
 
 The script (`scripts/verify-e2e.ts`) creates a tmpdir vault by invoking the real `napkin init` CLI, then drives the production session_start handler so auto-init's `git init` + managed `.gitignore` block + initial commit run end-to-end, then triggers the `/distill` command handler so the production `runDistillWith` path runs (real wrapper subprocess, real 2-second `setInterval` poller). It asserts on the dispatched UI notification's severity + message together with filesystem post-conditions: no conflict markers, HEAD on default branch, agent's squash commit landed, distill branch removed, worktree removed, outcome sidecar with class `merged-content`, and origin advanced.

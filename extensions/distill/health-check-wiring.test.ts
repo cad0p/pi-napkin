@@ -1,14 +1,14 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
   makeFakeUI,
   makeMockExtensionAPI,
+  rmSyncRetry,
   withNapkinOnPath,
 } from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
@@ -220,7 +220,7 @@ describe("per-spawn health-check wiring", () => {
       process.env.XDG_CACHE_HOME = _savedXdgCache;
     else delete process.env.XDG_CACHE_HOME;
     globalThis.setInterval = originalSetInterval;
-    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
   });
 
   function worktreeCount(vault: string): number {
@@ -272,7 +272,7 @@ describe("per-spawn health-check wiring", () => {
       expect(worktreeCount(vault)).toBe(1);
     } finally {
       cleanupWorktrees(vault);
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -314,7 +314,7 @@ describe("per-spawn health-check wiring", () => {
       expect(errors[0].msg).toContain("malformed");
       expect(worktreeCount(vault)).toBe(0);
     } finally {
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -348,7 +348,7 @@ describe("per-spawn health-check wiring", () => {
       expect(worktreeCount(vault)).toBe(1);
     } finally {
       cleanupWorktrees(vault);
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -401,7 +401,7 @@ describe("per-spawn health-check wiring", () => {
       expect(errors).toEqual([]);
     } finally {
       cleanupWorktrees(vault);
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -441,7 +441,7 @@ describe("per-spawn health-check wiring", () => {
       expect(errors[0].msg).toContain("malformed");
       expect(worktreeCount(vault)).toBe(0);
     } finally {
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -496,7 +496,7 @@ describe("per-spawn health-check wiring", () => {
         fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
       }
     } finally {
-      fs.rmSync(legacyVault, { recursive: true, force: true });
+      rmSyncRetry(legacyVault);
     }
   });
 
@@ -542,7 +542,7 @@ describe("per-spawn health-check wiring", () => {
       expect(errors[0].msg).toContain("malformed");
       expect(worktreeCount(vault)).toBe(0);
     } finally {
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -601,7 +601,7 @@ describe("per-spawn health-check wiring", () => {
       // check nor any spawn ran.
       expect(notifyCalls).toEqual([]);
     } finally {
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -637,7 +637,7 @@ describe("per-spawn health-check wiring", () => {
       expect(worktreeCount(vault)).toBe(1);
     } finally {
       cleanupWorktrees(vault);
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -685,7 +685,7 @@ describe("per-spawn health-check wiring", () => {
       // on malformed config — the handler returns before `setInterval`.
       expect(capturedInterval).toBeNull();
     } finally {
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -718,7 +718,7 @@ describe("per-spawn health-check wiring", () => {
       expect(notifyCalls.filter((n) => n.severity === "info")).toEqual([]);
       expect(worktreeCount(vault)).toBe(0);
     } finally {
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -776,7 +776,7 @@ describe("per-spawn health-check wiring", () => {
       expect(errors[0].msg).toContain("failed to write scaffolding");
       expect(worktreeCount(vault)).toBe(0);
     } finally {
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -806,7 +806,7 @@ describe("per-spawn health-check wiring", () => {
       expect(errors[0].msg).toContain("failed to write scaffolding");
       expect(worktreeCount(vault)).toBe(0);
     } finally {
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 
@@ -843,7 +843,7 @@ describe("per-spawn health-check wiring", () => {
       expect(errors[0].msg).toContain("failed to write scaffolding");
       expect(worktreeCount(vault)).toBe(0);
     } finally {
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
   });
 });

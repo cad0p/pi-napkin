@@ -6,12 +6,12 @@
  * a wall cost of ~$0.50 per LLM variant. A failing unit test catches
  * the regression at `bun test` cost.
  *
- * `bun test` discovers `scripts/*.test.ts` independently of tsconfig's
- * include surface, so this file runs as part of the regular suite.
- * Importing from `verify-e2e.ts` is side-effect-free thanks to the
- * `import.meta.main` guard around `main()`.
+ * `vitest` discovers `scripts/*.test.ts` via its glob config, so this
+ * file runs as part of the regular suite. Importing from `verify-e2e.ts`
+ * is side-effect-free thanks to the direct-invocation guard around
+ * `main()` (Node has no `import.meta.main`).
  */
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 
 import {
   isAbortVariant,

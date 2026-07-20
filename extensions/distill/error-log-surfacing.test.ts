@@ -14,10 +14,11 @@
  * lifecycle is end-to-end.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { rmSyncRetry } from "./_test-helpers";
 
 import {
   findDistillErrorLogForBranch,
@@ -31,7 +32,7 @@ describe("findDistillErrorLogForBranch (R7-SC-3)", () => {
     errorDir = fs.mkdtempSync(path.join(os.tmpdir(), "find-errlog-"));
   });
   afterEach(() => {
-    fs.rmSync(errorDir, { recursive: true, force: true });
+    rmSyncRetry(errorDir);
   });
 
   test("error dir doesn't exist: returns null", () => {
@@ -122,7 +123,7 @@ describe("findDistillOutcomeForBranch (POST-CONV-5)", () => {
     errorDir = fs.mkdtempSync(path.join(os.tmpdir(), "find-outcome-"));
   });
   afterEach(() => {
-    fs.rmSync(errorDir, { recursive: true, force: true });
+    rmSyncRetry(errorDir);
   });
 
   test("missing dir: returns null", () => {
@@ -214,8 +215,8 @@ describe("resolveDistillErrorDir", () => {
     process.env.HOME = xdgConfigHome;
   });
   afterEach(() => {
-    fs.rmSync(vault, { recursive: true, force: true });
-    fs.rmSync(xdgConfigHome, { recursive: true, force: true });
+    rmSyncRetry(vault);
+    rmSyncRetry(xdgConfigHome);
     if (savedXdgConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = savedXdgConfigHome;
     if (savedHome === undefined) delete process.env.HOME;

@@ -15,15 +15,16 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: pnpm/action-setup@v4
+        # pnpm version is pinned via the `packageManager` field in
+        # package.json (pnpm@11.10.0). action-setup reads that field
+        # automatically, so a pnpm release regression can't break CI
+        # without an explicit bump in this repo (CI-A-3 — never-deferrable
+        # per the methodology guide's third-party dep version pin rule).
+      - uses: actions/setup-node@v4
         with:
-          # Pinned to the contributor-machine version so a bun-internal
-          # release regression (test runner, fs API, bun:test semantics)
-          # can't break CI without an explicit bump in this repo
-          # (CI-A-3 — never-deferrable per the methodology guide's
-          # third-party dep version pin rule). Bump deliberately when
-          # a new bun release ships something useful.
-          bun-version: 1.3.13
+          node-version: lts/*
+          cache: pnpm
       # macOS doesn't ship GNU coreutils. The distill wrapper depends on
       # timeout(1) (or gtimeout) for the agent task's hard wall-clock
       # budget; without coreutils the wrapper fails fast on macOS at
@@ -48,10 +49,10 @@ jobs:
           git config --global user.email "ci@pi-napkin.test"
           git config --global user.name "pi-napkin CI"
           git config --global init.defaultBranch main
-      - run: bun install
+      - run: pnpm install --frozen-lockfile
       - name: Lint
-        run: bunx biome check extensions/
+        run: pnpm lint
       - name: Type check
-        run: bunx tsc --noEmit
+        run: pnpm typecheck
       - name: Run tests
-        run: bun test
+        run: pnpm test

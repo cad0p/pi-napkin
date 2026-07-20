@@ -17,6 +17,34 @@ import { createDistillWorkspace } from "./distill-workspace";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
 
 /**
+ * fs.rmSync with a brief retry loop to tolerate ENOTEMPTY/EBUSY when a
+ * spawned distill wrapper subprocess hasn't fully released file handles
+ * yet. Under vitest the wrapper's cleanup trap can race the test's
+ * afterEach rmSync by a few milliseconds; retrying after a short
+ * synchronous sleep resolves it without masking real errors (the retry
+ * only fires on ENOTEMPTY/EBUSY).
+ *
+ * bun:test's timing happened to win this race more often; vitest's
+ * different subprocess-exit ordering exposes it. The retry is bounded
+ * (10 attempts × 50ms = 500ms max) so a genuinely stuck dir still fails.
+ */
+export function rmSyncRetry(target: string): void {
+  for (let attempt = 0; attempt < 10; attempt++) {
+    try {
+      fs.rmSync(target, { recursive: true, force: true });
+      return;
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ENOTEMPTY" && code !== "EBUSY") throw e;
+      // Synchronous sleep — let the wrapper's exit handlers drain.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+    }
+  }
+  // Final attempt — let it throw if still failing.
+  fs.rmSync(target, { recursive: true, force: true });
+}
+
+/**
  * Absolute path of the directory holding `timeout(1)` (or `gtimeout`
  * on macOS-with-Homebrew-coreutils). The wrapper hard-fails at
  * startup if neither is reachable (CI-A-1 / CLEAN-A-1 / SEC-A-3),

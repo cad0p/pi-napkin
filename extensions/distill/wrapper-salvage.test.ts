@@ -22,14 +22,15 @@
  * in research/v2-v3-verification.md.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
   makeWrapperScaffold,
+  rmSyncRetry,
   runWrapperWithStub,
   withNapkinOnPath,
   writePiStub,
@@ -121,7 +122,7 @@ git -C "${s.vault}" commit -m "distill: with markers" >/dev/null
       // recovery action for marker-corruption).
       expect(parsed?.recoveryHint).toMatch(/git -C .* revert HEAD --no-edit/);
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -148,7 +149,7 @@ git -C "${s.vault}" checkout -q -b feature-branch
       // default-branch invariant.
       expect(parsed?.recoveryHint).toMatch(/git -C .* checkout main/);
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -173,7 +174,7 @@ git -C "${s.vault}" checkout -q -b feature-branch
       // Hint should reference reflog as the recovery channel.
       expect(parsed?.recoveryHint).toMatch(/reflog/i);
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -193,7 +194,7 @@ git -C "${s.vault}" checkout -q -b feature-branch
       // remediation knob, since timeout means the budget was too low.
       expect(parsed?.recoveryHint).toMatch(/maxDurationMinutes/);
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   }, 30_000);
 
@@ -221,7 +222,7 @@ git -C "${s.vault}" commit -m "distill: x" >/dev/null
       expect(parsed?.outcomeClass).toBe("merged-content");
       expect(parsed?.recoveryHint).toBeNull();
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 });
@@ -325,7 +326,7 @@ exit $?
       expect(r.rc).toBe(0);
       expect(r.stillExists).toBe(false);
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      rmSyncRetry(root);
     }
   });
 
@@ -360,7 +361,7 @@ exit $?
       expect(fs.existsSync(path.join(sneaky, "sentinel.txt"))).toBe(true);
       expect(r.stderr).toMatch(/not a descendant of expected cache root/);
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      rmSyncRetry(root);
     }
   });
 
@@ -380,7 +381,7 @@ exit $?
       expect(r.rc).toBe(1);
       expect(r.stillExists).toBe(true);
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      rmSyncRetry(root);
     }
   });
 });

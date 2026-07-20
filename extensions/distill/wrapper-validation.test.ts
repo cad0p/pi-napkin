@@ -28,14 +28,15 @@
  * HEAD off main. The wrapper proceeds to validate.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
   makeWrapperScaffold,
+  rmSyncRetry,
   runWrapperWithStub,
   withNapkinOnPath,
   writePiStub,
@@ -83,7 +84,7 @@ git -C "${s.vault}" commit -m "distill: test" >/dev/null
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -103,7 +104,7 @@ git -C "${s.vault}" checkout -q -b feature-branch
       expect(r.exitCode).toBe(1);
       expect(r.outcome).toBe("failed:head-not-on-default");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -150,7 +151,7 @@ git -C "${s.vault}" checkout -q --detach "$seed_sha"
       expect(logBody).toMatch(/detached/i);
       expect(logBody).toContain("main");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -204,7 +205,7 @@ git -C "${s.vault}" checkout -q -b feature-branch
       // wrapper's dispatch.
       expect(r.outcome).toBe("failed:head-not-on-default");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -229,7 +230,7 @@ git -C "${s.vault}" commit -m "distill: clean" >/dev/null
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -261,7 +262,7 @@ git -C "${s.vault}" commit -m "distill: with markers" >/dev/null
       expect(r.exitCode).toBe(1);
       expect(r.outcome).toBe("failed:markers-after-agent-exit");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -298,7 +299,7 @@ git -C "${s.vault}" commit -m "distill: setext heading" >/dev/null
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -329,7 +330,7 @@ git -C "${s.vault}" commit -m "distill: doc with single marker" >/dev/null
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -361,7 +362,7 @@ git -C "${s.vault}" commit -m "distill: doc with two markers" >/dev/null
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -394,7 +395,7 @@ git -C "${s.vault}" commit -m "distill: split markers" >/dev/null
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -434,7 +435,7 @@ git -C "${s.vault}" commit -m "distill: full doc example" >/dev/null
       expect(r.exitCode).toBe(1);
       expect(r.outcome).toBe("failed:markers-after-agent-exit");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -498,7 +499,7 @@ git -C "${s.vault}" commit -m "distill: clean pre-existing markers" >/dev/null
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -532,7 +533,7 @@ git -C "${s.vault}" commit -m "distill: new note" >/dev/null
       const raw = fs.readFileSync(r.outcomePath as string, "utf-8");
       expect(raw).toContain("already present in the vault before");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -569,7 +570,7 @@ git -C "${s.vault}" commit -m "distill: agent-induced markers" >/dev/null
       expect(r.exitCode).toBe(1);
       expect(r.outcome).toBe("failed:markers-after-agent-exit");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -605,7 +606,7 @@ git -C "${s.vault}" commit -m "distill: with markers" >/dev/null
       expect(r.exitCode).toBe(1);
       expect(r.outcome).toBe("failed:markers-after-agent-exit");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -691,7 +692,7 @@ git -C "${s.vault}" commit -m "distill: clean note" >/dev/null
       // step, gated on manual inspection.
       expect(raw).toContain("manually for unresolved");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -716,7 +717,7 @@ git -C "${s.vault}" commit -m "distill: x" >/dev/null
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -729,7 +730,7 @@ git -C "${s.vault}" commit -m "distill: x" >/dev/null
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("no-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -762,7 +763,7 @@ git -C "${s.vault}" commit -m "distill: y" >/dev/null
       expect(remotes).toBe("");
       expect(r.outcome).toBe("merged-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -791,7 +792,7 @@ git -C "${s.vault}" commit -m "distill: ahead" >/dev/null
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-local");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -870,7 +871,7 @@ git -C "${s.vault}" commit -m "distill: local" >/dev/null
       expect(sidecar).toMatch(/diverged/);
       expect(sidecar).toMatch(/teammate|another clone/i);
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -886,7 +887,7 @@ git -C "${s.vault}" commit -m "distill: local" >/dev/null
       expect(r.exitCode).toBe(1);
       expect(r.outcome).toBe("failed:agent-exit-nonzero");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 
@@ -900,7 +901,7 @@ git -C "${s.vault}" commit -m "distill: local" >/dev/null
       expect(r.exitCode).toBe(1);
       expect(r.outcome).toBe("failed:agent-timeout");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   }, 30_000);
 
@@ -957,7 +958,7 @@ touch ${JSON.stringify(stubMarker)}
       // require some other mechanism to kill the child.
       expect(elapsedMs).toBeLessThan(15_000);
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   }, 30_000);
 });
@@ -1037,7 +1038,7 @@ exit $?
       // No .tmp file left behind — the rename consumed it.
       expect(r.files.some((f) => f.endsWith(".tmp"))).toBe(false);
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      rmSyncRetry(root);
     }
   });
 
@@ -1057,7 +1058,7 @@ exit $?
       );
       expect(r.files.some((f) => f.endsWith(".tmp"))).toBe(false);
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      rmSyncRetry(root);
     }
   });
 
@@ -1076,7 +1077,7 @@ exit $?
       );
       expect(second.files.some((f) => f.endsWith(".tmp"))).toBe(false);
     } finally {
-      fs.rmSync(root, { recursive: true, force: true });
+      rmSyncRetry(root);
     }
   });
 
@@ -1111,7 +1112,7 @@ git -C "${s.vault}" commit -m "distill: x" >/dev/null
         pathHandle.restore();
       }
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 });
@@ -1172,7 +1173,7 @@ git -C "${s.vault}" commit -m "distill: x" >/dev/null
         pathHandle.restore();
       }
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   });
 });

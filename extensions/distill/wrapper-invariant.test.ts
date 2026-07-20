@@ -51,13 +51,17 @@
  * and `write_outcome` being called.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
-import { makeWrapperScaffold, withNapkinOnPath } from "./_test-helpers";
+import {
+  makeWrapperScaffold,
+  rmSyncRetry,
+  withNapkinOnPath,
+} from "./_test-helpers";
 import {
   createDistillWorkspace,
   findDistillOutcomeForBranch,
@@ -126,7 +130,7 @@ function stageSlowGitShim(): {
     shimDir,
     realGit,
     restore() {
-      fs.rmSync(shimDir, { recursive: true, force: true });
+      rmSyncRetry(shimDir);
     },
   };
 }
@@ -272,7 +276,7 @@ describe("wrapper invariant: write_outcome before worktree-removal", () => {
       ).not.toBeNull();
       expect(outcomeAtRaceWindow?.outcomeClass).toBe("merged-content");
     } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   }, 60_000);
 
@@ -416,7 +420,7 @@ describe("wrapper invariant: write_outcome before worktree-removal", () => {
       if (savedPath === undefined) delete process.env.PATH;
       else process.env.PATH = savedPath;
       shim.restore();
-      fs.rmSync(s.root, { recursive: true, force: true });
+      rmSyncRetry(s.root);
     }
   }, 60_000);
 });

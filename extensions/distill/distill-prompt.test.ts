@@ -18,11 +18,12 @@
  * `buildDistillPrompt(inputs)` against the shipped artifact unchanged.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { rmSyncRetry } from "./_test-helpers";
 import {
   buildDistillPrompt,
   buildDistillPromptFromFile,
@@ -197,7 +198,7 @@ describe("buildDistillPrompt — template error paths", () => {
   });
 
   afterAll(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    rmSyncRetry(tmpDir);
   });
 
   test("throws when a required placeholder is missing from the template", () => {
@@ -242,7 +243,7 @@ describe("buildDistillPromptFromFile — path-injection seam (CI-A-5)", () => {
   });
 
   afterAll(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
+    rmSyncRetry(tmpDir);
   });
 
   test("buildDistillPromptFromFile against a copy returns same output as buildDistillPrompt", () => {

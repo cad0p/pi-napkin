@@ -27,13 +27,13 @@
  * is representative.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-
 import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { rmSyncRetry } from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -222,9 +222,9 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
     globalThis.setInterval = originalSetInterval;
     if (vault) {
       cleanupWorktrees(vault);
-      fs.rmSync(vault, { recursive: true, force: true });
+      rmSyncRetry(vault);
     }
-    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (xdgCacheDir) rmSyncRetry(xdgCacheDir);
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });

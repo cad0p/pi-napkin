@@ -1,6 +1,6 @@
-// Bun Snapshot v1, https://bun.sh/docs/test/snapshots
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`buildDistillPrompt — full-document snapshot (regression guard, PR #12 C3) rendered prompt matches snapshot at canonical inputs 1`] = `
+exports[`buildDistillPrompt — full-document snapshot (regression guard, PR #12 C3) > rendered prompt matches snapshot at canonical inputs 1`] = `
 "Your distill content lives in the git worktree at /home/user/.cache/napkin-distill/a1b2c3d4e5f6a7b8/abc123-1700000000. Use \`git -C /home/user/.cache/napkin-distill/a1b2c3d4e5f6a7b8/abc123-1700000000\` for all git operations there — your shell cwd is NOT the worktree. Edit files in the worktree by absolute path under \`/home/user/.cache/napkin-distill/a1b2c3d4e5f6a7b8/abc123-1700000000/...\` (or \`cd /home/user/.cache/napkin-distill/a1b2c3d4e5f6a7b8/abc123-1700000000\` first if your tool supports it).
 
 For the distill-content phase (steps 1-6), edit files only inside \`/home/user/.cache/napkin-distill/a1b2c3d4e5f6a7b8/abc123-1700000000\`; do not edit files under \`/home/user/Goldmine\`. Writing distill content to \`/home/user/Goldmine\` directly bypasses the worktree's isolation and causes the merge in steps 7-8 to silently include none of your changes. The integration phase (steps 7-9) explicitly runs \`git -C /home/user/Goldmine\` commands to squash and push — those are correct and required, not a violation of this rule.

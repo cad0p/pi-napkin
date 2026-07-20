@@ -39,10 +39,11 @@
  * the function source to confirm no new asymmetric branches.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { rmSyncRetry } from "./_test-helpers";
 
 const PI_SYSTEM_PROMPT_PATH = path.join(
   __dirname,
@@ -93,8 +94,8 @@ describe("system-prompt cache parity (POST-R6-CACHE / R7-PERF-1)", () => {
   });
 
   afterEach(() => {
-    fs.rmSync(parentCwd, { recursive: true, force: true });
-    fs.rmSync(worktreePath, { recursive: true, force: true });
+    rmSyncRetry(parentCwd);
+    rmSyncRetry(worktreePath);
   });
 
   test("two builds with cwd=parentCwd produce byte-identical system prompts (parent ⇄ distill match)", async () => {

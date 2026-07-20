@@ -1,6 +1,5 @@
 node_modules/
 
-# pnpm — not used; we standardized on bun for local dev and CI (mirrors
-# cad0p/napkin). bun.lock IS committed for reproducibility.
-pnpm-lock.yaml
+# pnpm is the package manager for local dev and CI. pnpm-lock.yaml is
+# committed for reproducibility (replaces the former bun.lock).
 .DS_Store
