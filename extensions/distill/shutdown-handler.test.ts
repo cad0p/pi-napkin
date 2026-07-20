@@ -215,7 +215,6 @@ function countWorktrees(vault: string): number {
   return fs.readdirSync(d).length;
 }
 
-/** Best-effort cleanup of any dangling distill worktrees in `vault`. */
 describe("session_shutdown handler (Item 8)", () => {
   let vault: string;
   let sm: SessionManager;
