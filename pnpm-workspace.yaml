@@ -1,3 +1,5 @@
-onlyBuiltDependencies:
-  - esbuild
-  - "@google/genai"
+allowBuilds:
+  esbuild: true
+  "@google/genai": true
+  protobufjs: false
+  glimpseui: false
