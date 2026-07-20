@@ -6,7 +6,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { TIMEOUT_BIN_DIR, withNapkinOnPath } from "./_test-helpers";
+import {
+  killDistillWrappers,
+  TIMEOUT_BIN_DIR,
+  withNapkinOnPath,
+} from "./_test-helpers";
 import {
   cleanupDistillWorkspace,
   createDistillWorkspace,
@@ -155,6 +159,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
   });
 
   afterEach(() => {
+    killDistillWrappers(vault);
     for (const w of workspaces) cleanupDistillWorkspace(vault, w);
     workspaces.length = 0;
     fs.rmSync(sessionDir, { recursive: true, force: true });

@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
+  cleanupDistillWorktrees,
   makeFakeUI,
   makeMockExtensionAPI,
   TIMEOUT_BIN_DIR,
@@ -304,17 +305,10 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     _napkinPath = null;
     // Best-effort cleanup of any dangling worktrees + branches the detached
     // wrapper may have left during the test window. Worktrees live under
-    // the per-test XDG cache dir set in beforeEach.
-    const worktreesDir = resolveCacheRoot(vault);
-    if (fs.existsSync(worktreesDir)) {
-      for (const entry of fs.readdirSync(worktreesDir)) {
-        const wt = path.join(worktreesDir, entry);
-        spawnSync("git", ["-C", vault, "worktree", "remove", "--force", wt], {
-          encoding: "utf-8",
-        });
-      }
-    }
-    spawnSync("git", ["-C", vault, "worktree", "prune"], { encoding: "utf-8" });
+    // the per-test XDG cache dir set in beforeEach. Kill the wrapper pid
+    // first so its file handles release before rmSync (see
+    // cleanupDistillWorktrees in _test-helpers.ts).
+    cleanupDistillWorktrees(vault);
     fs.rmSync(vault, { recursive: true, force: true });
     if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
