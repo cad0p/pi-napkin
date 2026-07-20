@@ -1033,7 +1033,7 @@ export function spawnDistillInWorktree(
 }
 
 // ============================================================================
-// Status helpers (/distill-status + napkin_distill_status tool, Phase C2)
+// Status helpers (/distill-status, Phase C2)
 // ============================================================================
 
 /**
@@ -1043,9 +1043,6 @@ export function spawnDistillInWorktree(
  * Liveness (`alive`) is decided at read time via `process.kill(pid, 0)`,
  * so a freshly crashed wrapper is reported with `alive: false` (and
  * `/distill-status` renders it as stale).
- *
- * Fields are kept flat + JSON-friendly so the pi tool can serialize the
- * array directly.
  */
 export interface ActiveDistill {
   pid: number;
@@ -1081,8 +1078,8 @@ export interface ActiveDistill {
  *
  * Invokes `git worktree list --porcelain` exactly once and does NOT touch
  * the branch list — so callers that only need the active set (e.g. the
- * `/distill-status` slash command and `napkin_distill_status` agent tool)
- * don't pay for a `git branch` invocation they don't need.
+ * `/distill-status` slash command) don't pay for a `git branch` invocation
+ * they don't need.
  * (R2-4: restored a pre-CLN-3 fast path.)
  */
 export function getActiveDistills(vault: StaleCleanupVault): ActiveDistill[] {

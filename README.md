@@ -66,10 +66,6 @@ The [`napkin` skill](skills/napkin/SKILL.md) gives the agent a full CLI referenc
 - `/distill-auto-this-session` — Turn the automatic timer off / on for the current session. Persists across pi restarts.
 - `/distill-status` — Show active background distill processes for the current vault.
 
-### Agent tool
-
-- `napkin_distill_status` — JSON version of `/distill-status`, for the agent to query programmatically before making concurrent vault edits.
-
 ## Auto-distill requires subdir vault layout
 
 Auto-distill (interval + shutdown) uses git worktrees for concurrency safety.
