@@ -167,11 +167,23 @@ describe("per-spawn health-check wiring", () => {
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
   const _savedXdgCache = process.env.XDG_CACHE_HOME;
   const _savedPiBin = process.env.NAPKIN_DISTILL_PI_BIN;
+  // Per-test TMPDIR redirect: `os.tmpdir()` is read live from $TMPDIR, so
+  // redirecting it here isolates both the tests' `readdirSync(os.tmpdir())`
+  // scans AND `spawnDistill`'s `mkdtempSync(os.tmpdir(), "napkin-distill-")`
+  // (the legacy tmpdir spawn path in index.ts) from sibling test files
+  // running in parallel forks. Without this, parallel execution lets other
+  // files' `napkin-distill-*` entries pollute these scans (false positives).
+  const _savedTmpdir = process.env.TMPDIR;
+  let tmpdirScratch: string;
   let originalSetInterval: typeof setInterval;
   let capturedInterval: (() => void) | null = null;
 
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    tmpdirScratch = fs.mkdtempSync(
+      path.join(os.tmpdir(), "health-wiring-tmpdir-"),
+    );
+    process.env.TMPDIR = tmpdirScratch;
     xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "health-wiring-xdg-"));
     process.env.XDG_CACHE_HOME = xdgCacheDir;
     // Stub pi with /usr/bin/true so any wrapper that does spawn exits
@@ -221,6 +233,10 @@ describe("per-spawn health-check wiring", () => {
     else delete process.env.XDG_CACHE_HOME;
     globalThis.setInterval = originalSetInterval;
     if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    if (tmpdirScratch)
+      fs.rmSync(tmpdirScratch, { recursive: true, force: true });
+    if (_savedTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = _savedTmpdir;
   });
 
   function worktreeCount(vault: string): number {

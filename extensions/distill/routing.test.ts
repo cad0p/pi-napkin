@@ -254,12 +254,22 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
   let xdgCacheDir: string;
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
   const _savedXdgCache = process.env.XDG_CACHE_HOME;
+  // Per-test TMPDIR redirect: `os.tmpdir()` is read live from $TMPDIR,
+  // so redirecting it here isolates both the tests' `readdirSync(os.tmpdir())`
+  // scans AND `spawnDistill`'s `mkdtempSync(os.tmpdir(), "napkin-distill-")`
+  // (the legacy tmpdir spawn path in index.ts) from sibling test files
+  // running in parallel forks. Without this, parallel execution lets other
+  // files' `napkin-distill-*` entries pollute these scans (false positives).
+  const _savedTmpdir = process.env.TMPDIR;
+  let tmpdirScratch: string;
   // POST-R6-CACHE: shim install requires napkin on PATH; CI runners don't
   // have a global install. Augment via the shared helper. (R7-CI-2.)
   let _napkinPath: { restore: () => void } | null = null;
 
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
+    tmpdirScratch = fs.mkdtempSync(path.join(os.tmpdir(), "routing-tmpdir-"));
+    process.env.TMPDIR = tmpdirScratch;
     xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "routing-xdg-"));
     process.env.XDG_CACHE_HOME = xdgCacheDir;
     _napkinPath = withNapkinOnPath();
@@ -313,6 +323,10 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
+    if (tmpdirScratch)
+      fs.rmSync(tmpdirScratch, { recursive: true, force: true });
+    if (_savedTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = _savedTmpdir;
   });
 
   /**
