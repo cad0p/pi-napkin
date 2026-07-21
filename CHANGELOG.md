@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.3.2] - 2026-07-20
+## [0.3.2] - 2026-07-21
 
 <!-- USER-EDITABLE SECTION START -->
 
