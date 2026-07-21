@@ -2,10 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.3.2] - 2026-07-20
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+
+Maintenance release since [0.3.1]. No user-facing behavior changes — just fixes and tooling.
+
+- **Distill prompt cache preserved** across session forks ([#22](https://github.com/cad0p/pi-napkin/pull/22)): forked distill subprocesses now reuse the parent's OpenAI `prompt_cache_key` instead of paying for a cache miss on every distill.
+- **Tooling migration** ([#26](https://github.com/cad0p/pi-napkin/pull/26), [#28](https://github.com/cad0p/pi-napkin/pull/28)): moved from bun to pnpm + vitest, and enabled parallel test execution — CI test time dropped from ~74s to ~56s on ubuntu.
+- **Removed** the redundant `napkin_distill_status` agent tool ([#25](https://github.com/cad0p/pi-napkin/pull/25)).
+
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🐛 Bug Fixes
