@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.3.2] - 2026-07-21
+
+<!-- USER-EDITABLE SECTION START -->
+
+Maintenance release since [0.3.1]. No user-facing behavior changes — just fixes and tooling.
+
+- **Distill prompt cache preserved** across session forks ([#22](https://github.com/cad0p/pi-napkin/pull/22)): forked distill subprocesses now reuse the parent's OpenAI `prompt_cache_key` instead of paying for a cache miss on every distill.
+- **Tooling migration** ([#26](https://github.com/cad0p/pi-napkin/pull/26), [#28](https://github.com/cad0p/pi-napkin/pull/28)): moved from bun to pnpm + vitest, and enabled parallel test execution — CI test time dropped from ~74s to ~56s on ubuntu.
+- **Removed** the redundant `napkin_distill_status` agent tool ([#25](https://github.com/cad0p/pi-napkin/pull/25)).
+
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(distill)* Preserve OpenAI prompt cache key ([#22](https://github.com/cad0p/pi-napkin/pull/22))
+- Use optional chain in getSessionTouchedFiles ([#27](https://github.com/cad0p/pi-napkin/pull/27))
+
+### 🚜 Refactor
+
+- *(distill)* Drop napkin_distill_status agent tool ([#25](https://github.com/cad0p/pi-napkin/pull/25))
+
+### ⚙️ Miscellaneous Tasks
+
+- *(gitignore)* .DS_Store ([#20](https://github.com/cad0p/pi-napkin/pull/20))
+- Migrate from bun to pnpm + vitest ([#26](https://github.com/cad0p/pi-napkin/pull/26))
+- Enable test parallelism (remove singleFork) ([#28](https://github.com/cad0p/pi-napkin/pull/28))
+
+
 ## [0.3.1] - 2026-05-25
 
 <!-- USER-EDITABLE SECTION START -->
