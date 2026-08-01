@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@cad0p/napkin':
-        specifier: ^0.8.1
-        version: 0.8.1
+        specifier: ^0.10.0
+        version: 0.10.0
       '@earendil-works/pi-coding-agent':
         specifier: '>=0.74.0'
         version: 0.80.10(ws@8.21.1)(zod@4.4.3)
@@ -206,8 +206,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@cad0p/napkin@0.8.1':
-    resolution: {integrity: sha512-Mwo0+TToQZ0Q2nlpiSOtAjHNKMR+jQS8W/1oXf+KN7ONtgkvUw0L60B3rphAxDc058m3ygMIqadqg5EMkGYjAQ==}
+  '@cad0p/napkin@0.10.0':
+    resolution: {integrity: sha512-umdkz+7Ypdh83IwF5P93pKeBxeSVhBTjNCztEZgqSdGZQjAiltVprt9zB1OFlydiQKMoH9e5cE9CZ/65w+FxrQ==}
     hasBin: true
 
   '@earendil-works/pi-agent-core@0.80.10':
@@ -1645,12 +1645,13 @@ snapshots:
   '@biomejs/cli-win32-x64@2.5.4':
     optional: true
 
-  '@cad0p/napkin@0.8.1':
+  '@cad0p/napkin@0.10.0':
     dependencies:
       chalk: 5.6.2
       commander: 14.0.3
       gray-matter: 4.0.3
       jexl: 2.3.0
+      jiti: 2.7.0
       js-yaml: 4.3.0
       minisearch: 7.2.0
       sql.js: 1.14.1
