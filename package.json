@@ -65,7 +65,7 @@
     "vitest": "^2.1.0"
   },
   "dependencies": {
-    "@cad0p/napkin": "^0.8.1"
+    "@cad0p/napkin": "^0.10.0"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0",
