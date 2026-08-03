@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.4.0] - 2026-08-03
+
+<!-- USER-EDITABLE SECTION START -->
+
+Picks up @cad0p/napkin **0.10.1**, which fixes the warm-path content recall
+regression that briefly shipped in napkin 0.10.0 (searches after the first
+returned only basename hits — e.g. 22 results instead of 388 on a large vault;
+cad0p/napkin#22). napkin 0.10.0/0.10.1 also brings the search performance
+rewrite (basename-only MiniSearch + in-memory substring scan) that takes full-
+vault search on ~2700-file vaults from minutes to ~2s warm / ~2.5s cold.
+
+- **deps**: `@cad0p/napkin` 0.8.1 → 0.10.1 ([#31](https://github.com/cad0p/pi-napkin/pull/31))
+- **new**: `search-smoke.test.ts` extension smoke test (real `napkin init` vault;
+  asserts recall, case-insensitivity, and a <2s perf ceiling vs the current
+  napkin line)
+- **new**: `extensions/napkin-deps.d.ts` — shim declarations for napkin's untyped
+  transitive deps (`sql.js`, `jexl`, `js-yaml`) so `tsc --noEmit` stays clean
+  against napkin's TS-source-shipped package
+- **tooling**: bumped `minimumReleaseAgeExclude` for the freshly published
+  napkin line (supply-chain gate)
+
+<!-- USER-EDITABLE SECTION END -->
+
+
 ## [0.3.2] - 2026-07-21
 
 <!-- USER-EDITABLE SECTION START -->
