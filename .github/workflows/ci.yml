@@ -16,11 +16,15 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
-        # pnpm version is pinned via the `packageManager` field in
-        # package.json (pnpm@11.10.0). action-setup reads that field
-        # automatically, so a pnpm release regression can't break CI
-        # without an explicit bump in this repo (CI-A-3 — never-deferrable
-        # per the methodology guide's third-party dep version pin rule).
+        with:
+          # Pinned explicitly (pnpm@11.10.0) instead of via the
+          # `packageManager` field in package.json, which is intentionally
+          # absent so local machines can use their own pnpm (mise) without
+          # pnpm's launcher trying to self-switch. The explicit pin keeps
+          # the same CI guarantee (CI-A-3 — never-deferrable per the
+          # methodology guide's third-party dep version pin rule): a pnpm
+          # release regression can't break CI without an explicit bump here.
+          version: 11.10.0
       - uses: actions/setup-node@v6
         with:
           node-version: lts/*
