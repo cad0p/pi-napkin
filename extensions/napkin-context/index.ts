@@ -197,31 +197,60 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Search the napkin vault for notes by keyword or topic",
     parameters: Type.Object({
       query: Type.String({ description: "Search query" }),
+      page: Type.Optional(
+        Type.Number({
+          description:
+            "Page number (1-based). Pass page+1 when the previous result says to continue.",
+        }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const n = getNapkin(ctx.cwd);
-      const results = n.search(params.query);
+      const page = params.page ?? 1;
+      const res = n.searchPaginated(params.query, { page });
 
-      if (results.length === 0) {
+      if (res.results.length === 0) {
         return {
           content: [{ type: "text", text: "No results found." }],
-          details: { results: [] },
+          details: { results: [], page },
         };
       }
 
-      const text = results
+      // Vault notes often store whole paragraphs on a single source line, so
+      // match-only snippets can still be 700+ chars. Cap per-file snippet
+      // count and per-line length; full context stays reachable via kb_read.
+      const MAX_SNIPPETS_PER_FILE = 5;
+      const MAX_SNIPPET_LINE_CHARS = 200;
+      let text = res.results
         .map((r) => {
           let entry = `**${r.file}**`;
-          if (r.snippets && r.snippets.length > 0) {
-            entry += `\n${r.snippets.map((s) => `  ${s.text}`).join("\n")}`;
+          const snips = r.snippets ?? [];
+          if (snips.length > 0) {
+            const shown = snips.slice(0, MAX_SNIPPETS_PER_FILE);
+            entry += `\n${shown
+              .map((s) => {
+                const line =
+                  s.text.length > MAX_SNIPPET_LINE_CHARS
+                    ? `${s.text.slice(0, MAX_SNIPPET_LINE_CHARS)}…`
+                    : s.text;
+                return `  ${line}`;
+              })
+              .join("\n")}`;
+            if (snips.length > MAX_SNIPPETS_PER_FILE) {
+              entry += `\n  … (+${snips.length - MAX_SNIPPETS_PER_FILE} more matches — use kb_read for full context)`;
+            }
           }
           return entry;
         })
         .join("\n\n");
 
+      if (page < res.totalPages) {
+        text += `\n\n[Page ${page} of ${res.totalPages}. Use kb_search with page ${page + 1} to continue.]`;
+      }
+
       return {
         content: [{ type: "text", text }],
-        details: { results },
+        details: { results: res.results, page, totalPages: res.totalPages },
       };
     },
     renderResult(result, options, theme, context) {
@@ -239,10 +268,21 @@ export default function (pi: ExtensionAPI) {
     promptSnippet: "Read a note from the napkin vault by name or path",
     parameters: Type.Object({
       file: Type.String({ description: "File name or path to read" }),
+      section: Type.Optional(
+        Type.String({
+          description: "Heading to extract (exact text without # prefix)",
+        }),
+      ),
+      page: Type.Optional(
+        Type.Number({ description: "Page number for paginated output" }),
+      ),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const n = getNapkin(ctx.cwd);
-      const result = n.read(params.file);
+      const result = n.read(params.file, {
+        section: params.section,
+        page: params.page,
+      });
 
       return {
         content: [{ type: "text", text: result.content }],
@@ -253,6 +293,55 @@ export default function (pi: ExtensionAPI) {
       const t =
         (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
       t.setText(formatKbResult(result, options, theme, 10));
+      return t;
+    },
+  });
+
+  pi.registerTool({
+    name: "kb_outline",
+    label: "KB Outline",
+    description: "List headings in a knowledge base file",
+    promptSnippet:
+      "List headings in a napkin vault note to understand its structure",
+    parameters: Type.Object({
+      file: Type.String({ description: "File name or path" }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const n = getNapkin(ctx.cwd);
+      let headings: { level: number; text: string; line: number }[];
+      try {
+        headings = n.outline(params.file);
+      } catch (e: unknown) {
+        return {
+          content: [{ type: "text", text: (e as Error).message }],
+          details: { headings: [] },
+        };
+      }
+
+      // outline() doesn't return the resolved path and bare note names can
+      // resolve into subfolders, so probe a 1-byte read which returns the
+      // resolved path. Fall back to the naive join if resolution fails.
+      let absPath = path.join(n.vault.contentPath, params.file);
+      try {
+        absPath = n.read(params.file, { page: 1, pageSize: 1 }).path;
+      } catch {
+        // keep the join fallback
+      }
+
+      const lines = [`File: ${absPath}`];
+      for (const h of headings) {
+        lines.push(`${"#".repeat(h.level)} ${h.text}`);
+      }
+
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        details: { path: absPath, headings },
+      };
+    },
+    renderResult(result, options, theme, context) {
+      const t =
+        (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+      t.setText(formatKbResult(result, options, theme, 15));
       return t;
     },
   });

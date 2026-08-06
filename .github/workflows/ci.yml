@@ -16,11 +16,17 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: pnpm/action-setup@v6
-        # pnpm version is pinned via the `packageManager` field in
-        # package.json (pnpm@11.10.0). action-setup reads that field
-        # automatically, so a pnpm release regression can't break CI
-        # without an explicit bump in this repo (CI-A-3 — never-deferrable
-        # per the methodology guide's third-party dep version pin rule).
+        with:
+          # Major-only pin: stay on pnpm 11 (new majors can change lockfile
+          # format / CLI surface) while 11.x minors flow in automatically.
+          # The `packageManager` field is intentionally absent so local
+          # machines can use their own pnpm (mise) without the launcher
+          # self-switching. Tradeoff vs an exact pin: pnpm minors can change
+          # behavior (e.g. the 11.x minimumReleaseAge supply-chain gate that
+          # added minimumReleaseAgeExclude to pnpm-workspace.yaml) — CI-red
+          # is the signal and the fix is a one-line bump or exclude.
+          # `--frozen-lockfile` keeps installs deterministic across minors.
+          version: 11
       - uses: actions/setup-node@v6
         with:
           node-version: lts/*
