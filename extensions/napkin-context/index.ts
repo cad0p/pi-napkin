@@ -216,11 +216,29 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      // Vault notes often store whole paragraphs on a single source line, so
+      // match-only snippets can still be 700+ chars. Cap per-file snippet
+      // count and per-line length; full context stays reachable via kb_read.
+      const MAX_SNIPPETS_PER_FILE = 5;
+      const MAX_SNIPPET_LINE_CHARS = 200;
       let text = res.results
         .map((r) => {
           let entry = `**${r.file}**`;
-          if (r.snippets && r.snippets.length > 0) {
-            entry += `\n${r.snippets.map((s) => `  ${s.text}`).join("\n")}`;
+          const snips = r.snippets ?? [];
+          if (snips.length > 0) {
+            const shown = snips.slice(0, MAX_SNIPPETS_PER_FILE);
+            entry += `\n${shown
+              .map((s) => {
+                const line =
+                  s.text.length > MAX_SNIPPET_LINE_CHARS
+                    ? `${s.text.slice(0, MAX_SNIPPET_LINE_CHARS)}…`
+                    : s.text;
+                return `  ${line}`;
+              })
+              .join("\n")}`;
+            if (snips.length > MAX_SNIPPETS_PER_FILE) {
+              entry += `\n  … (+${snips.length - MAX_SNIPPETS_PER_FILE} more matches — use kb_read for full context)`;
+            }
           }
           return entry;
         })
