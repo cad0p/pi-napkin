@@ -157,7 +157,7 @@ export default function (pi: ExtensionAPI) {
               "## Napkin vault context\n" +
                 "You have access to a napkin vault (Obsidian-compatible knowledge base). " +
                 "Here is the vault overview. Use the kb_search tool to find specific content, " +
-                "and the kb_read tool to read files.\n\n" +
+                "kb_read to read files, and kb_outline to see file structure.\n\n" +
                 overview,
               true,
             );
@@ -247,6 +247,10 @@ export default function (pi: ExtensionAPI) {
       if (page < res.totalPages) {
         text += `\n\n[Page ${page} of ${res.totalPages}. Use kb_search with page ${page + 1} to continue.]`;
       }
+
+      text +=
+        "\n\nHINT: Use kb_read <file> to open a full file. " +
+        "Use kb_outline <file> to see its structure.";
 
       return {
         content: [{ type: "text", text }],
