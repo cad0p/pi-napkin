@@ -2,6 +2,37 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.0] - 2026-08-07
+
+<!-- USER-EDITABLE SECTION START -->
+The injected vault overview now reports when it has been capped: with
+`@cad0p/napkin` 0.12.0, listings sort by (depth, note count desc, path) and
+`overview.maxRows` (default 100) trims the tail — the extension appends
+"… N more folders (M notes) — use kb_search to find specific content" so
+agents know the vault is bigger than what's shown. Also fixes the vault-root
+row rendering as "//" (now "./") in the session context.
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(extension)* Render collapsed subfolder counts in overview ([#43](https://github.com/cad0p/pi-napkin/pull/43))
+- *(extension)* Render overview truncation footer + bump napkin 0.12.0 ([#48](https://github.com/cad0p/pi-napkin/pull/48))
+
+### 🐛 Bug Fixes
+
+- *(extension)* Render vault root as ./ instead of // in overview ([#46](https://github.com/cad0p/pi-napkin/pull/46))
+
+### 📚 Documentation
+
+- Point AGENTS.md vault check at kb tools ([#39](https://github.com/cad0p/pi-napkin/pull/39))
+- Make AGENTS.md bootstrap mandatory for every request ([#42](https://github.com/cad0p/pi-napkin/pull/42))
+- Point AGENTS.md kanban check at gh project ([#47](https://github.com/cad0p/pi-napkin/pull/47))
+
+### 🧪 Testing
+
+- *(extension)* Cover overview sibling-collapse rendering ([#44](https://github.com/cad0p/pi-napkin/pull/44))
+
+
 ## [0.5.0] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
