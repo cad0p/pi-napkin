@@ -221,10 +221,16 @@ describe("kb_read", () => {
     expect(t1.length).toBeLessThan(50_100);
     expect(t2).not.toContain("continue");
     expect(t2.length).toBeLessThan(50_000);
-    // page 1 + page 2 reassemble the file (minus the page hint suffix)
-    expect(
-      t1.replace(/\n\n\[Page 1 of 2. Use --page 2 to continue.\]$/, "") + t2,
-    ).toBe(big);
+    // page 1 + page 2 reassemble the file (minus the page hint + the
+    // always-on outline nudge the SDK appends to every paginated page)
+    const NUDGE =
+      "\n\nHINT: Use napkin outline --file <file> to see its structure.";
+    const strip = (s: string) =>
+      s
+        // nudge is appended last, so strip it first, then the page hint
+        .replace(new RegExp(`${NUDGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), "")
+        .replace(/\n\n\[Page 1 of 2. Use --page 2 to continue.]$/, "");
+    expect(strip(t1) + strip(t2)).toBe(big);
   });
 
   test("reports the resolved path for bare names in details", async () => {

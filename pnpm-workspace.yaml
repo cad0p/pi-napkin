@@ -4,4 +4,4 @@ allowBuilds:
   protobufjs: false
   glimpseui: false
 minimumReleaseAgeExclude:
-  - '@cad0p/napkin@0.10.0 || 0.11.0'
+  - '@cad0p/napkin@0.10.0 || 0.11.0 || 0.11.1'
