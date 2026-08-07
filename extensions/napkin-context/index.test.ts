@@ -350,6 +350,20 @@ describe("vault overview (session context)", () => {
     expect(injected[0]).toContain("other/");
   });
 
+  test("renders vault-root row as ./ instead of //", async () => {
+    const files: Record<string, string> = {};
+    // A note directly at the vault root (not NAPKIN.md, which is skipped)
+    files["stray.md"] = "# Stray\n\nroot-level leftover note with unique terms\n";
+    const vault = makeVault(files);
+
+    const { injected, calls } = await runSessionStart(vault);
+
+    expect(calls).toBe(1);
+    expect(injected[0]).toContain("./");
+    expect(injected[0]).not.toContain("//");
+    expect(injected[0]).toContain("notes: 1");
+  });
+
   test("does not collapse heterogeneous sibling subfolders", async () => {
     const files: Record<string, string> = {};
     const topics = [

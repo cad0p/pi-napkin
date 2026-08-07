@@ -61,7 +61,10 @@ function getOverview(n: Napkin): string | null {
         const collapsed = folder.collapsedFolders
           ? ` (+${folder.collapsedFolders} similar subfolders)`
           : "";
-        text += `${folder.path}/${collapsed}\n`;
+        // The SDK reports the vault root as "/"; the CLI renders it as
+        // "./". Mirror that here — "//" looked like a broken path.
+        const path = folder.path === "/" ? "." : folder.path;
+        text += `${path}/${collapsed}\n`;
         if (folder.keywords && folder.keywords.length > 0) {
           text += `  keywords: ${folder.keywords.join(", ")}\n`;
         }
