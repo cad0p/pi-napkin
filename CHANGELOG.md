@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🧪 Testing
+
+- Fix flaky CI — routing ENOTEMPTY race + page-size contract pin ([#49](https://github.com/cad0p/pi-napkin/pull/49)) ([#51](https://github.com/cad0p/pi-napkin/pull/51))
+
+### ⚙️ Miscellaneous Tasks
+
+- Give validate workflows distinct job names ([#50](https://github.com/cad0p/pi-napkin/pull/50))
+
+
 ## [0.6.0] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
