@@ -329,10 +329,12 @@ describe("vault overview (session context)", () => {
   test("renders homogeneous sibling subfolders as a collapsed row with count", async () => {
     const files: Record<string, string> = {};
     // >=5 lexically homogeneous subfolders trigger the SDK's sibling collapse
-    // (COLLAPSE_MIN_CHILDREN = 5, mean pairwise cosine >= 0.15).
+    // (COLLAPSE_MIN_CHILDREN = 5, mean pairwise cosine >= 0.15). The parent
+    // sits at depth 2 — the default collapseDepth is 2, so it qualifies as a
+    // collapse target (depth-1 taxonomy rows never collapse).
     for (let i = 1; i <= 5; i++) {
       const n = String(i).padStart(2, "0");
-      files[`docs/part-${n}/note.md`] =
+      files[`imports/docs/part-${n}/note.md`] =
         `# Part ${n}\n\nimported widget manual revision ${n}: ` +
         "installation, configuration, troubleshooting and maintenance.";
     }
@@ -343,7 +345,7 @@ describe("vault overview (session context)", () => {
 
     expect(calls).toBe(1);
     expect(injected[0]).toContain("## Napkin vault context");
-    expect(injected[0]).toContain("docs/ (+5 similar subfolders)");
+    expect(injected[0]).toContain("imports/docs/ (+5 similar subfolders)");
     // collapsed children no longer render as their own rows
     expect(injected[0]).not.toContain("part-0");
     // non-collapsed siblings stay visible
@@ -353,7 +355,8 @@ describe("vault overview (session context)", () => {
   test("renders vault-root row as ./ instead of //", async () => {
     const files: Record<string, string> = {};
     // A note directly at the vault root (not NAPKIN.md, which is skipped)
-    files["stray.md"] = "# Stray\n\nroot-level leftover note with unique terms\n";
+    files["stray.md"] =
+      "# Stray\n\nroot-level leftover note with unique terms\n";
     const vault = makeVault(files);
 
     const { injected, calls } = await runSessionStart(vault);
@@ -374,7 +377,9 @@ describe("vault overview (session context)", () => {
       ["crypto", "wallets hashes signatures"],
     ];
     for (const [name, body] of topics) {
-      files[`notes2/${name}/note.md`] = `# ${name}\n\n${body}\n`;
+      // parent sits at depth 2 so the collapseDepth guard lets the similarity
+      // threshold actually decide (a depth-1 parent would be skipped outright)
+      files[`notes2/topics/${name}/note.md`] = `# ${name}\n\n${body}\n`;
     }
     const vault = makeVault(files);
 
@@ -383,8 +388,49 @@ describe("vault overview (session context)", () => {
     // distinct vocabularies sit below the similarity threshold — every
     // sibling renders as its own row
     for (const [name] of topics) {
-      expect(injected[0]).toContain(`notes2/${name}/`);
+      expect(injected[0]).toContain(`notes2/topics/${name}/`);
     }
     expect(injected[0]).not.toContain("similar subfolders");
+  });
+
+  test("caps the listing at maxRows with a truncation footer and sorts by note count", async () => {
+    const files: Record<string, string> = {};
+    // 105 heterogeneous single-note folders (each with a disjoint synthetic
+    // keyword, so nothing collapses) + one 5-note folder, all under a depth-2
+    // parent. SEARCH_CONFIG sets no overview keys, so the SDK defaults apply:
+    // maxRows 100, collapseDepth 2.
+    for (let i = 0; i < 105; i++) {
+      const n = String(i).padStart(3, "0");
+      const kw = `zz${String.fromCharCode(97 + Math.floor(i / 26))}${String.fromCharCode(97 + (i % 26))}`;
+      files[`big/topic-${n}/note.md`] =
+        `# Topic ${n}\n\n${kw} ${kw} ${kw} ${kw}.\n`;
+    }
+    for (let i = 1; i <= 5; i++) {
+      files[`big/important/note-${i}.md`] =
+        `# Important ${i}\n\ncritical infrastructure planning note ${i}: ` +
+        "uptime, capacity, failover, budget.\n";
+    }
+    const vault = makeVault(files);
+
+    const { injected, calls } = await runSessionStart(vault);
+
+    expect(calls).toBe(1);
+    // 106 rows total (important + 105 topics), sorted by (depth, notes desc,
+    // path) — the 100-row cap drops the 6 path-last single-note topics
+    // (topic-099..topic-104), 1 note each.
+    expect(injected[0]).toContain(
+      "… 6 more folders (6 notes) — use kb_search to find specific content",
+    );
+    expect(injected[0]).toMatch(
+      /… \d+ more folders \(\d+ notes\) — use kb_search to find specific content/,
+    );
+    // exactly 100 folder rows survive the cap
+    expect(injected[0].match(/^ {2}notes: /gm)).toHaveLength(100);
+    expect(injected[0]).toContain("big/topic-098/");
+    expect(injected[0]).not.toContain("big/topic-099/");
+    // priority sort: the 5-note folder outranks the single-note topics
+    expect(injected[0].indexOf("big/important/")).toBeLessThan(
+      injected[0].indexOf("big/topic-000/"),
+    );
   });
 });
