@@ -228,9 +228,20 @@ describe("kb_read", () => {
     const t2 = textOf(p2);
 
     expect(t1).toContain("[Page 1 of 2. Use --page 2 to continue.]");
-    expect(t1.length).toBeLessThan(50_100);
     expect(t2).not.toContain("continue");
-    expect(t2.length).toBeLessThan(50_000);
+    // SDK contract (@cad0p/napkin src/core/crud.ts): a paginated page
+    // NEVER exceeds the page size — the always-appended page hint +
+    // outline nudge are budgeted INTO the chunk
+    // (chunkBudget = pageSize − maxHint − nudge, so content+suffix ≤
+    // pageSize by construction). The pre-0.12.0 SDK sliced a full
+    // pageSize chunk and appended the suffix on top
+    // (50_000 + 42 + 62 = 50_104 chars), which blew past the old
+    // hardcoded 50_100 bound by exactly 4 chars on every run — flake B,
+    // issue #49. Assert the contract (≤ 50_000) instead of magic slack
+    // numbers so the pin survives SDK text tweaks and fails loudly if
+    // the SDK ever regresses.
+    expect(t1.length).toBeLessThanOrEqual(50_000);
+    expect(t2.length).toBeLessThanOrEqual(50_000);
     // page 1 + page 2 reassemble the file (minus the page hint + the
     // always-on outline nudge the SDK appends to every paginated page)
     const NUDGE =
