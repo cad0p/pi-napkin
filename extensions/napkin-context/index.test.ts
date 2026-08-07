@@ -63,17 +63,27 @@ interface RegisteredTool {
   }>;
 }
 
-function loadTools(): Map<string, RegisteredTool> {
+function loadExtension(): {
+  tools: Map<string, RegisteredTool>;
+  handlers: Map<string, (event: unknown, ctx: never) => void>;
+} {
   const tools = new Map<string, RegisteredTool>();
+  const handlers = new Map<string, (event: unknown, ctx: never) => void>();
   const pi = {
     registerTool: (t: RegisteredTool) => {
       tools.set(t.name, t);
     },
     registerMessageRenderer: () => {},
-    on: () => {},
+    on: (event: string, handler: (event: unknown, ctx: never) => void) => {
+      handlers.set(event, handler);
+    },
   };
   napkinContext(pi as never);
-  return tools;
+  return { tools, handlers };
+}
+
+function loadTools(): Map<string, RegisteredTool> {
+  return loadExtension().tools;
 }
 
 function getTool(
@@ -287,5 +297,80 @@ describe("kb_outline", () => {
     );
     expect(textOf(res)).toMatch(/not found/i);
     expect((res.details as { headings: unknown[] }).headings).toEqual([]);
+  });
+});
+
+describe("vault overview (session context)", () => {
+  // Runs the session_start handler against a fixture vault and captures the
+  // injected custom message, mirroring the other suites' real-SDK pattern.
+  async function runSessionStart(
+    vault: string,
+  ): Promise<{ injected: string[]; calls: number }> {
+    const { handlers } = loadExtension();
+    const injected: string[] = [];
+    let calls = 0;
+    const ctx = {
+      cwd: vault,
+      sessionManager: {
+        getEntries: () => [],
+        appendCustomMessageEntry: (_type: string, text: string) => {
+          calls++;
+          injected.push(text);
+        },
+      },
+      hasUI: false,
+    };
+    const handler = handlers.get("session_start");
+    if (!handler) throw new Error("session_start handler not registered");
+    await handler(undefined, ctx as never);
+    return { injected, calls };
+  }
+
+  test("renders homogeneous sibling subfolders as a collapsed row with count", async () => {
+    const files: Record<string, string> = {};
+    // >=5 lexically homogeneous subfolders trigger the SDK's sibling collapse
+    // (COLLAPSE_MIN_CHILDREN = 5, mean pairwise cosine >= 0.15).
+    for (let i = 1; i <= 5; i++) {
+      const n = String(i).padStart(2, "0");
+      files[`docs/part-${n}/note.md`] =
+        `# Part ${n}\n\nimported widget manual revision ${n}: ` +
+        "installation, configuration, troubleshooting and maintenance.";
+    }
+    files["other/note.md"] = "# Other\n\nunrelated note about gardening\n";
+    const vault = makeVault(files);
+
+    const { injected, calls } = await runSessionStart(vault);
+
+    expect(calls).toBe(1);
+    expect(injected[0]).toContain("## Napkin vault context");
+    expect(injected[0]).toContain("docs/ (+5 similar subfolders)");
+    // collapsed children no longer render as their own rows
+    expect(injected[0]).not.toContain("part-0");
+    // non-collapsed siblings stay visible
+    expect(injected[0]).toContain("other/");
+  });
+
+  test("does not collapse heterogeneous sibling subfolders", async () => {
+    const files: Record<string, string> = {};
+    const topics = [
+      ["gardening", "tulips compost watering"],
+      ["quantum", "qubits entanglement decoherence"],
+      ["baking", "sourdough proofing kneading"],
+      ["cycling", "cassette derailleur cadence"],
+      ["crypto", "wallets hashes signatures"],
+    ];
+    for (const [name, body] of topics) {
+      files[`notes2/${name}/note.md`] = `# ${name}\n\n${body}\n`;
+    }
+    const vault = makeVault(files);
+
+    const { injected } = await runSessionStart(vault);
+
+    // distinct vocabularies sit below the similarity threshold — every
+    // sibling renders as its own row
+    for (const [name] of topics) {
+      expect(injected[0]).toContain(`notes2/${name}/`);
+    }
+    expect(injected[0]).not.toContain("similar subfolders");
   });
 });
