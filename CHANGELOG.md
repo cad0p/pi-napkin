@@ -2,10 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.6.1] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+CI flake fixes (issue #49): the routing-test teardown race (wrapper EXIT
+trap holds the vault as cwd after removing the worktree, ENOTEMPTY on
+macOS) is fixed with a two-phase wait-for-wrapper-exit + bounded
+`retryRmSync`; the kb_read page-size test now pins the SDK contract
+(<= pageSize) instead of magic slack. Dep bump @cad0p/napkin ^0.12.0 ->
+^0.12.1 (exact worst-case page-hint reserve for >6-digit page counts).
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🧪 Testing
