@@ -2,6 +2,26 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.1] - 2026-08-07
+
+<!-- USER-EDITABLE SECTION START -->
+CI flake fixes (issue #49): the routing-test teardown race (wrapper EXIT
+trap holds the vault as cwd after removing the worktree, ENOTEMPTY on
+macOS) is fixed with a two-phase wait-for-wrapper-exit + bounded
+`retryRmSync`; the kb_read page-size test now pins the SDK contract
+(<= pageSize) instead of magic slack. Dep bump @cad0p/napkin ^0.12.0 ->
+^0.12.1 (exact worst-case page-hint reserve for >6-digit page counts).
+<!-- USER-EDITABLE SECTION END -->
+
+### 🧪 Testing
+
+- Fix flaky CI — routing ENOTEMPTY race + page-size contract pin ([#49](https://github.com/cad0p/pi-napkin/pull/49)) ([#51](https://github.com/cad0p/pi-napkin/pull/51))
+
+### ⚙️ Miscellaneous Tasks
+
+- Give validate workflows distinct job names ([#50](https://github.com/cad0p/pi-napkin/pull/50))
+
+
 ## [0.6.0] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
