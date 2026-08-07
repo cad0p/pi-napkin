@@ -8,6 +8,7 @@ import {
   cleanupDistillWorktrees,
   makeFakeUI,
   makeMockExtensionAPI,
+  retryRmSync,
   TIMEOUT_BIN_DIR,
   withNapkinOnPath,
 } from "./_test-helpers";
@@ -191,9 +192,9 @@ function createSeededSession(dir: string): SessionManager {
 
 // POST-R6-CACHE / R7-CI-2: the detached wrapper is observable only by
 // its filesystem effects — the JS test side has no handle to wait on it.
-// `waitForWrapperDone` waits until the worktree directory disappears
-// (cleanup trap fired — wrapper exited) or a hard timeout. Without this,
-// the routing tests pass on a CI runner that has napkin globally
+// `waitForWrapperDone` waits until the wrapper has FULLY EXITED (worktree
+// dir gone AND wrapper pid dead — see below) or a hard timeout. Without
+// this, the routing tests pass on a CI runner that has napkin globally
 // installed even when the wrapper is broken; with this, a wrapper-side
 // failure surfaces in the test output via `assertNoWrapperFailures`.
 //
@@ -203,18 +204,94 @@ function createSeededSession(dir: string): SessionManager {
 // tier, slow filesystems) while still catching genuine hangs. The
 // production timeout (`getMaxDistillDurationMs`) defaults to 10
 // minutes, so 30s is comfortably below.
+//
+// Two-phase completion signal (Flake A root cause, issue #49):
+//   Phase 1 — the worktree dir disappears: the wrapper's EXIT trap's
+//     `git worktree remove --force` / `safe_rm_worktree` ran. This is
+//     NOT the end of the wrapper: the trap first `cd`s into the vault
+//     and then still runs `git -C <vault> worktree prune` and
+//     `git -C <vault> branch -D` — both holding <vault> as cwd — before
+//     exiting. `fs.rmSync(vault)` in afterEach would race those steps;
+//     on macOS a directory that is a live process's cwd cannot be
+//     removed, surfacing as ENOTEMPTY.
+//   Phase 2 — the wrapper pid exits: the pid is read from the worktree's
+//     meta.json the moment the worktree is first visible. The wrapper
+//     rewrites meta.json's `pid` to its own pid ($$) at startup; the
+//     pre-spawn placeholder (`process.pid` of this test process, written
+//     by createDistillWorkspace) is skipped. meta.json lives INSIDE the
+//     worktree, so first-visibility is the only chance to capture the
+//     pid — the trap deletes it along with the worktree.
+//
+// If the pid was never captured (worktree vanished between polls — not
+// expected, the wrapper's minimum lifetime is hundreds of ms), Phase 2
+// is skipped and the afterEach `retryRmSync` net covers the race.
 async function waitForWrapperDone(
   worktreePath: string,
   timeoutMs = 30_000,
 ): Promise<void> {
   const start = Date.now();
+  let wrapperPid: number | null = null;
+
+  // Phase 1: worktree dir disappears + capture the wrapper pid while the
+  // worktree (and its meta.json) still exists.
   while (fs.existsSync(worktreePath)) {
+    if (wrapperPid === null) {
+      try {
+        const metaPath = path.join(
+          worktreePath,
+          ".napkin",
+          "distill",
+          "meta.json",
+        );
+        if (fs.existsSync(metaPath)) {
+          const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8")) as {
+            pid?: number;
+          };
+          // Skip the pre-spawn placeholder; accept only the wrapper's
+          // own pid.
+          if (
+            typeof meta.pid === "number" &&
+            meta.pid > 0 &&
+            meta.pid !== process.pid
+          ) {
+            wrapperPid = meta.pid;
+          }
+        }
+      } catch {
+        // meta.json mid-rewrite or mid-teardown — retry next tick.
+      }
+    }
     if (Date.now() - start > timeoutMs) {
       throw new Error(
         `Wrapper did not finish within ${timeoutMs}ms: ${worktreePath}`,
       );
     }
     await new Promise((r) => setTimeout(r, 50));
+  }
+
+  // Phase 2: wait for the wrapper process itself to exit — this releases
+  // the vault as its cwd, which afterEach's rmSync requires.
+  if (wrapperPid !== null) {
+    while (true) {
+      try {
+        process.kill(wrapperPid, 0);
+      } catch {
+        break; // ESRCH — the wrapper has exited.
+      }
+      if (Date.now() - start > timeoutMs) {
+        // Last resort: SIGTERM the wrapper's process group, then fail
+        // loudly — a genuine hang must surface, not silently pass.
+        try {
+          process.kill(-wrapperPid, "SIGTERM");
+        } catch {
+          // pid already dead — nothing to signal.
+        }
+        throw new Error(
+          `Wrapper pid ${wrapperPid} did not exit within ${timeoutMs}ms: ${worktreePath}`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, 50));
+    }
   }
 }
 
@@ -316,11 +393,19 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     // Best-effort cleanup of any dangling worktrees + branches the detached
     // wrapper may have left during the test window. Worktrees live under
     // the per-test XDG cache dir set in beforeEach. Kill the wrapper pid
-    // first so its file handles release before rmSync (see
+    // first so its file handles release before the vault rmSync (see
     // cleanupDistillWorktrees in _test-helpers.ts).
+    //
+    // Flake A (issue #49): `cleanupDistillWorktrees` can only kill
+    // wrappers whose worktree (and meta.json) still exists. When the test
+    // already waited for the worktree to disappear, the wrapper is mid-
+    // EXIT-trap: it has removed the worktree but still holds the vault as
+    // cwd (`cd "$VAULT"` + `git -C <vault> prune` + `branch -D`) until it
+    // exits. A bare `fs.rmSync` then races that window and fails with
+    // ENOTEMPTY on macOS. `retryRmSync` covers it with a bounded retry.
     cleanupDistillWorktrees(vault);
-    fs.rmSync(vault, { recursive: true, force: true });
-    if (xdgCacheDir) fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+    retryRmSync(vault);
+    if (xdgCacheDir) retryRmSync(xdgCacheDir);
     if (_savedXdgCache === undefined) delete process.env.XDG_CACHE_HOME;
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
     if (tmpdirScratch)
@@ -380,7 +465,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     const wt = path.join(worktreesDir, entries[0]);
     await waitForWrapperDone(wt);
     assertNoWrapperFailures(vault);
-  });
+  }, 20_000); // per-test timeout: waitForWrapperDone now waits for the wrapper pid to EXIT (phase 2, Flake A root cause) — the default 5s budget is too tight under CI/loaded-runner conditions; 20s matches the R8-SC-7 / POST-CONV-5 precedent
 
   test("/distill on a git-backed vault creates a worktree (matches auto-distill)", async () => {
     const { api, captured } = makeMockExtensionAPI();
@@ -413,7 +498,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     const wt = path.join(worktreesDir, entries[0]);
     await waitForWrapperDone(wt);
     assertNoWrapperFailures(vault);
-  });
+  }, 20_000); // per-test timeout: see the interval-callback test above (Flake A phase-2 wait)
 
   test("/distill on a non-git vault falls back to tmp dir (legacy path)", async () => {
     const { api, captured } = makeMockExtensionAPI();
@@ -449,11 +534,12 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     const worktreesDir = resolveCacheRoot(nonGitVault);
     expect(fs.existsSync(worktreesDir)).toBe(false);
 
-    // Cleanup
+    // Cleanup — the detached legacy child holds the vault as cwd until it
+    // exits; bounded retry covers the ENOTEMPTY race (Flake A, #49).
     for (const d of newTmpDirs) {
-      fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
+      retryRmSync(path.join(os.tmpdir(), d));
     }
-    fs.rmSync(nonGitVault, { recursive: true, force: true });
+    retryRmSync(nonGitVault);
   });
 
   test("/distill on a git vault with distill.enabled=false falls back to tmp dir (no git side effects)", async () => {
@@ -503,11 +589,12 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
       : null;
     expect(gaAfter).toBe(gaBefore);
 
-    // Cleanup
+    // Cleanup — detached legacy child may still hold the vault as cwd
+    // (Flake A, #49): bounded retry instead of a bare rmSync.
     for (const d of newTmpDirs) {
-      fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
+      retryRmSync(path.join(os.tmpdir(), d));
     }
-    fs.rmSync(disabledVault, { recursive: true, force: true });
+    retryRmSync(disabledVault);
   });
 
   test("/distill on a legacy-embedded git vault falls back to tmp dir (SEC-R4-1)", async () => {
@@ -577,11 +664,12 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
       : null;
     expect(gaAfter).toBe(gaBefore);
 
-    // Cleanup
+    // Cleanup — detached legacy child may still hold the vault as cwd
+    // (Flake A, #49): bounded retry instead of a bare rmSync.
     for (const d of newTmpDirs) {
-      fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
+      retryRmSync(path.join(os.tmpdir(), d));
     }
-    fs.rmSync(legacyVault, { recursive: true, force: true });
+    retryRmSync(legacyVault);
   });
 });
 

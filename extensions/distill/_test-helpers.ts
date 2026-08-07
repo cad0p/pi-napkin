@@ -21,11 +21,21 @@ import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
  * `meta.json` on startup; read those, SIGTERM the pids, and wait briefly
  * for exit. This must run BEFORE `git worktree remove` / `fs.rmSync` in
  * test teardown — otherwise the wrapper's cleanup trap races the test's
- * `afterEach` and `fs.rmSync(vault)` fails with ENOTEMPTY on Linux
- * (file handles still held by the not-yet-exited wrapper).
+ * `afterEach` and `fs.rmSync(vault)` fails with ENOTEMPTY (file handles
+ * still held by the not-yet-exited wrapper).
  *
  * No-op when no worktrees exist or no meta.json is readable. Pids that
  * are already dead (ESRCH on kill) are silently skipped.
+ *
+ * LIMITATION (Flake A, issue #49): the wrapper's pid record lives in
+ * meta.json INSIDE the worktree, which the wrapper's EXIT trap deletes
+ * before the wrapper exits. So once a worktree has disappeared this
+ * helper has nothing to kill — the wrapper may still be alive mid-trap
+ * (it `cd`s into the vault and runs `git -C <vault> prune` + `branch -D`
+ * after removing the worktree, holding the vault as cwd). Teardown must
+ * pair this with `retryRmSync` (bounded ENOTEMPTY retry) and/or an
+ * explicit wait for the wrapper pid to exit (see `waitForWrapperDone`
+ * in routing.test.ts).
  */
 export function killDistillWrappers(vault: string): void {
   const cacheRoot = resolveCacheRoot(vault);
@@ -57,9 +67,15 @@ export function killDistillWrappers(vault: string): void {
       const code = (e as NodeJS.ErrnoException).code;
       if (code !== "ESRCH") continue;
     }
-    // Wait up to ~300ms for the wrapper to exit so its file handles
-    // release before the caller removes the worktree / vault dir.
-    for (let i = 0; i < 30; i++) {
+    // Wait up to ~1s for the wrapper to exit so its file handles release
+    // before the caller removes the worktree / vault dir. (Was ~300ms;
+    // too tight for loaded CI runners — Flake A, issue #49.) Note the
+    // pid is only readable while the worktree still exists: meta.json
+    // lives inside the worktree, which the wrapper's EXIT trap deletes
+    // BEFORE the wrapper exits. If the worktree is already gone there is
+    // nothing to kill here — the caller must use `retryRmSync` (bounded
+    // ENOTEMPTY retry) and/or wait for the wrapper pid to exit instead.
+    for (let i = 0; i < 100; i++) {
       try {
         process.kill(pid, 0);
         // Still alive — wait 10ms and retry.
@@ -69,6 +85,62 @@ export function killDistillWrappers(vault: string): void {
       }
     }
   }
+}
+
+/**
+ * Bounded retry for teardown `rmSync` of directories that spawned
+ * detached subprocesses may still hold (Flake A root-cause net,
+ * issue #49).
+ *
+ * `fs.rmSync(target, { recursive: true, force: true })` fails with
+ * ENOTEMPTY when a just-killed or exiting subprocess still holds handles
+ * inside `target` (on macOS a directory that is a live process's cwd
+ * cannot be removed — the wrapper's EXIT trap `cd`s into the vault and
+ * runs `git -C <vault> prune`/`branch -D` AFTER removing the worktree,
+ * so the worktree-dir-gone signal does NOT mean the vault is free).
+ * `force: true` only ignores ENOENT, never retries ENOTEMPTY/EBUSY.
+ *
+ * Retries ENOTEMPTY/EBUSY a bounded number of times (default 20 × 50ms
+ * = 1s total) so teardown is deterministic without risking a CI hang;
+ * any other error rethrows immediately (genuine failures must surface,
+ * not be masked by retries), and the last error is rethrown after the
+ * bound is exhausted.
+ *
+ * `opts.fs` / `opts.attempts` / `opts.delayMs` exist for unit tests
+ * (fake fs that fails N times, zero delay) — see _test-helpers.test.ts.
+ */
+export function retryRmSync(
+  target: string,
+  opts: {
+    fs?: typeof import("node:fs");
+    attempts?: number;
+    delayMs?: number;
+  } = {},
+): void {
+  const fsImpl = opts.fs ?? fs;
+  const attempts = opts.attempts ?? 20;
+  const delayMs = opts.delayMs ?? 50;
+  let lastErr: unknown = null;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      fsImpl.rmSync(target, { recursive: true, force: true });
+      return;
+    } catch (err) {
+      lastErr = err;
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === "ENOTEMPTY" || code === "EBUSY") {
+        // Another process still holds handles inside `target` — give it
+        // a brief moment to release them, then retry.
+        if (delayMs > 0) {
+          spawnSync("sleep", [String(delayMs / 1000)], { shell: false });
+        }
+        continue;
+      }
+      // Genuine error (EACCES, EPERM, ...): surface immediately.
+      throw err;
+    }
+  }
+  throw lastErr;
 }
 
 /**
