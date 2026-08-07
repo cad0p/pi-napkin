@@ -228,7 +228,10 @@ describe("kb_read", () => {
     const strip = (s: string) =>
       s
         // nudge is appended last, so strip it first, then the page hint
-        .replace(new RegExp(`${NUDGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`), "")
+        .replace(
+          new RegExp(`${NUDGE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`),
+          "",
+        )
         .replace(/\n\n\[Page 1 of 2. Use --page 2 to continue.]$/, "");
     expect(strip(t1) + strip(t2)).toBe(big);
   });
