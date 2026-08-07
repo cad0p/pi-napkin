@@ -70,6 +70,11 @@ function getOverview(n: Napkin): string | null {
         }
         text += `  notes: ${folder.notes}\n`;
       }
+      if (overview.truncated) {
+        // maxRows cap in the SDK dropped the tail of the sorted listing;
+        // tell the agent the vault is bigger than what's shown.
+        text += `\n… ${overview.truncated.rows} more folders (${overview.truncated.notes} notes) — use kb_search to find specific content\n`;
+      }
     }
     return text.trim() || null;
   } catch {
