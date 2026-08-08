@@ -16,7 +16,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { describe, expect, test } from "vitest";
+import type { Text } from "@earendil-works/pi-tui";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import napkinContext from "./index";
 
 const SEARCH_CONFIG = {
@@ -49,6 +50,15 @@ function makeVault(
   return dir;
 }
 
+interface RenderContext {
+  state: { startedAt?: number; endedAt?: number; interval?: unknown };
+  executionStarted: boolean;
+  isPartial: boolean;
+  isError: boolean;
+  invalidate: () => void;
+  lastComponent?: unknown;
+}
+
 interface RegisteredTool {
   name: string;
   execute: (
@@ -61,6 +71,17 @@ interface RegisteredTool {
     content: { type: string; text: string }[];
     details?: unknown;
   }>;
+  renderCall?: (
+    args: Record<string, unknown>,
+    _theme: unknown,
+    context: RenderContext,
+  ) => Text;
+  renderResult?: (
+    result: { content: { type: string; text: string }[]; details?: unknown },
+    options: { expanded: boolean; isPartial: boolean },
+    _theme: unknown,
+    context: RenderContext,
+  ) => Text;
 }
 
 function loadExtension(): {
@@ -99,6 +120,48 @@ function getTool(
 
 function textOf(result: { content: { type: string; text: string }[] }): string {
   return result.content.map((c) => (c.type === "text" ? c.text : "")).join("");
+}
+
+// Identity theme: renders ANSI-free so tests can assert on plain text.
+const identityTheme = {
+  fg: (_name: string, text: string) => text,
+  bold: (text: string) => text,
+};
+
+function renderCall(
+  tool: RegisteredTool,
+  args: Record<string, unknown>,
+  context: RenderContext,
+): string[] {
+  const render = tool.renderCall;
+  if (!render) throw new Error(`tool ${tool.name} has no renderCall`);
+  return render(args, identityTheme, context)
+    .render(200)
+    .map((line) => line.trimEnd());
+}
+
+function renderResult(
+  tool: RegisteredTool,
+  result: { content: { type: string; text: string }[]; details?: unknown },
+  options: { expanded: boolean; isPartial: boolean },
+  context: RenderContext,
+): string[] {
+  const render = tool.renderResult;
+  if (!render) throw new Error(`tool ${tool.name} has no renderResult`);
+  return render(result, options, identityTheme, context)
+    .render(200)
+    .map((line) => line.trimEnd());
+}
+
+function makeContext(overrides: Partial<RenderContext> = {}): RenderContext {
+  return {
+    state: {},
+    executionStarted: true,
+    isPartial: false,
+    isError: false,
+    invalidate: () => {},
+    ...overrides,
+  };
 }
 
 describe("kb_search", () => {
@@ -443,5 +506,138 @@ describe("vault overview (session context)", () => {
     expect(injected[0].indexOf("big/important/")).toBeLessThan(
       injected[0].indexOf("big/topic-000/"),
     );
+  });
+});
+
+describe("kb tool TUI rendering (call line + timing)", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  test("renderCall shows the tool name + arg and starts the timer only once execution begins", () => {
+    const tool = getTool(loadTools(), "kb_read");
+    const state: RenderContext["state"] = {};
+    const invalidate = vi.fn();
+
+    // args arrive before execution: name + arg shown, no timer yet
+    const pre = renderCall(
+      tool,
+      { file: "note" },
+      makeContext({ state, executionStarted: false, invalidate }),
+    );
+    expect(pre).toEqual(["kb_read note"]);
+    expect(state.startedAt).toBeUndefined();
+
+    // execution begins: timer records startedAt, call line unchanged
+    const started = renderCall(
+      tool,
+      { file: "note" },
+      makeContext({ state, invalidate }),
+    );
+    expect(started).toEqual(["kb_read note"]);
+    expect(state.startedAt).toBeDefined();
+    expect(state.endedAt).toBeUndefined();
+  });
+
+  test("kb_search and kb_outline render their args in the call line", () => {
+    const tools = loadTools();
+    const search = renderCall(
+      getTool(tools, "kb_search"),
+      { query: "needle" },
+      makeContext(),
+    );
+    expect(search).toEqual(["kb_search needle"]);
+
+    const outline = renderCall(
+      getTool(tools, "kb_outline"),
+      { file: "note" },
+      makeContext(),
+    );
+    expect(outline).toEqual(["kb_outline note"]);
+  });
+
+  test("kb_read renderResult shows the resolved File: header and no timing (trivial lookup)", () => {
+    const tool = getTool(loadTools(), "kb_read");
+    // startedAt is set by renderCall, but kb_read is a trivial lookup —
+    // timing is kb_search-only
+    const state = { startedAt: Date.now() - 1234 };
+    const lines = renderResult(
+      tool,
+      {
+        content: [{ type: "text", text: "body\n" }],
+        details: { path: "/vault/sub/deep/note.md" },
+      },
+      { expanded: false, isPartial: false },
+      makeContext({ state }),
+    );
+
+    expect(lines[0]).toBe("File: /vault/sub/deep/note.md");
+    expect(lines.join("\n")).toContain("body");
+    expect(lines.join("\n")).not.toMatch(/Took|Elapsed/);
+  });
+
+  test("kb_outline renderResult never renders timing either", () => {
+    const tool = getTool(loadTools(), "kb_outline");
+    const state = { startedAt: Date.now() - 1234 };
+    const lines = renderResult(
+      tool,
+      { content: [{ type: "text", text: "# Top\n## A\n" }] },
+      { expanded: false, isPartial: false },
+      makeContext({ state }),
+    );
+    expect(lines.join("\n")).toContain("# Top");
+    expect(lines.join("\n")).not.toMatch(/Took|Elapsed/);
+  });
+
+  test("renderResult without a started timer adds no timing line", () => {
+    const tool = getTool(loadTools(), "kb_search");
+    const lines = renderResult(
+      tool,
+      { content: [{ type: "text", text: "No results found." }] },
+      { expanded: false, isPartial: false },
+      makeContext(),
+    );
+    expect(lines.join("\n")).toContain("No results found.");
+    expect(lines.join("\n")).not.toMatch(/Took|Elapsed/);
+  });
+
+  test("partial results show a live Elapsed counter (1s invalidate) that lands on Took", () => {
+    vi.useFakeTimers();
+    const tool = getTool(loadTools(), "kb_search");
+    const invalidate = vi.fn();
+    const state = { startedAt: Date.now() - 500 };
+    const ctx = makeContext({ state, isPartial: true, invalidate });
+
+    const partial = renderResult(
+      tool,
+      { content: [{ type: "text", text: "partial body" }] },
+      { expanded: false, isPartial: true },
+      ctx,
+    );
+    expect(partial.at(-1)).toBe("Elapsed 0.5s");
+    expect(state.interval).toBeDefined();
+
+    // the 1s tick re-invalidates the component so the counter redraws
+    vi.advanceTimersByTime(1000);
+    expect(invalidate).toHaveBeenCalledTimes(1);
+
+    const final = renderResult(
+      tool,
+      { content: [{ type: "text", text: "final body" }] },
+      { expanded: false, isPartial: false },
+      makeContext({ state, isPartial: false, invalidate }),
+    );
+    expect(final.at(-1)).toMatch(/^Took /);
+    expect(state.interval).toBeUndefined();
+  });
+
+  test("timing is TUI-only: never leaked into the model-visible content", async () => {
+    // kb_search is the only tool that renders timing — its model-visible
+    // content must never contain it
+    const tool = getTool(loadTools(), "kb_search");
+    const res = await tool.execute("t", { query: "needle" }, null, null, {
+      cwd: makeVault({ "doc.md": "# Doc\n\nneedle body\n" }),
+    });
+    expect(textOf(res)).not.toMatch(/Took|Elapsed/);
   });
 });
