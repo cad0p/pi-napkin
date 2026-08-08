@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(extension)* Kb tools TUI parity — renderCall call lines + kb_search timing ([#53](https://github.com/cad0p/pi-napkin/pull/53))
+
+
 ## [0.6.1] - 2026-08-07
 
 <!-- USER-EDITABLE SECTION START -->
