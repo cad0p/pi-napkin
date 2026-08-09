@@ -51,7 +51,26 @@ function getNapkin(cwd: string): Napkin {
 
 function getOverview(n: Napkin): string | null {
   try {
-    const overview = n.overview();
+    // napkin >= 0.12.2 keeps upstream-identical defaults (maxRows 0 =
+    // unlimited, collapseDepth 1) so its equivalence oracle holds. The fork's
+    // historical context-protection defaults are restored here, still
+    // overridable via the vault config's `overview` section.
+    const configPath = path.join(n.vault.configPath, "config.json");
+    let overviewCfg: Record<string, unknown> = {};
+    try {
+      if (fs.existsSync(configPath)) {
+        overviewCfg = (JSON.parse(fs.readFileSync(configPath, "utf-8"))
+          .overview ?? {}) as Record<string, unknown>;
+      }
+    } catch {
+      // Corrupt/unreadable config — fall back to the defaults below.
+    }
+    const num = (v: unknown, fallback: number) =>
+      typeof v === "number" ? v : fallback;
+    const overview = n.overview({
+      maxRows: num(overviewCfg.maxRows, 100),
+      collapseDepth: num(overviewCfg.collapseDepth, 2),
+    });
     if (!overview) return null;
 
     let text = overview.context || "";
