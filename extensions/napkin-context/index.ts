@@ -45,6 +45,126 @@ function formatKbResult(
   return text;
 }
 
+// ── TUI render helpers (call line + timing) ───────────────────────
+//
+// renderCall mirrors the built-in read/grep tools (bold tool name +
+// accent arg), so the user sees which note was queried/read. The
+// timing line mirrors the built-in bash tool's TUI timing
+// (pi dist/core/tools/bash.js): renderCall records a start timestamp
+// when execution begins, and renderResult renders a live "Elapsed X"
+// counter while the result streams and a final "Took X" once it
+// lands. Like bash's, the timing line is TUI-only — never included in
+// the model-visible content or details, so the agent doesn't see it.
+// It is wired up only for kb_search (potentially heavy); the read /
+// outline tools are trivial lookups and don't need it.
+
+interface KbRenderState {
+  startedAt?: number;
+  endedAt?: number;
+  interval?: ReturnType<typeof setInterval>;
+}
+
+interface KbRenderContext {
+  state: KbRenderState;
+  executionStarted: boolean;
+  isPartial: boolean;
+  isError: boolean;
+  invalidate: () => void;
+  lastComponent?: unknown;
+}
+
+function kbFormatDuration(ms: number): string {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+function kbRecordStart(state: KbRenderState, executionStarted: boolean): void {
+  if (executionStarted && state.startedAt === undefined) {
+    state.startedAt = Date.now();
+    state.endedAt = undefined;
+  }
+}
+
+/** Renders the tool call line (`kb_read <file>`), like native read's `read <path>`. */
+function kbRenderCall(
+  context: Pick<
+    KbRenderContext,
+    "state" | "executionStarted" | "lastComponent"
+  >,
+  label: string,
+  arg: string | undefined,
+  theme: Theme,
+): Text {
+  kbRecordStart(context.state, context.executionStarted);
+  const text =
+    (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
+  const argDisplay = arg
+    ? theme.fg("accent", arg)
+    : theme.fg("toolOutput", "...");
+  text.setText(`${theme.fg("toolTitle", theme.bold(label))} ${argDisplay}`);
+  return text;
+}
+
+/**
+ * The trailing TUI-only timing line. While the result is still
+ * streaming it re-invalidates once a second so the counter ticks.
+ */
+function kbTimingLine(
+  context: Pick<
+    KbRenderContext,
+    "state" | "isPartial" | "isError" | "invalidate"
+  >,
+  theme: Theme,
+): string {
+  const state = context.state;
+  if (state.startedAt === undefined) return "";
+  if (context.isPartial && !state.interval) {
+    state.interval = setInterval(() => context.invalidate(), 1000);
+  }
+  if (!context.isPartial || context.isError) {
+    state.endedAt ??= Date.now();
+    if (state.interval) {
+      clearInterval(state.interval);
+      state.interval = undefined;
+    }
+  }
+  const label = context.isPartial ? "Elapsed" : "Took";
+  const endTime = state.endedAt ?? Date.now();
+  return `\n${theme.fg("muted", `${label} ${kbFormatDuration(endTime - state.startedAt)}`)}`;
+}
+
+/**
+ * Composes the result body (collapsed/expanded) with an optional
+ * header line (e.g. kb_read's resolved path). No timing — used by
+ * the trivial read/outline tools.
+ */
+function kbRenderResult(
+  result: AgentToolResult<unknown>,
+  options: ToolRenderResultOptions,
+  theme: Theme,
+  maxCollapsedLines: number,
+  header?: string,
+): string {
+  const body = formatKbResult(result, options, theme, maxCollapsedLines);
+  let text = header ?? "";
+  if (body) text = text ? `${text}${body}` : body;
+  return text;
+}
+
+/** kbRenderResult + the TUI-only timing line (kb_search only). */
+function kbRenderTimedResult(
+  result: AgentToolResult<unknown>,
+  options: ToolRenderResultOptions,
+  theme: Theme,
+  maxCollapsedLines: number,
+  context: KbRenderContext,
+  header?: string,
+): string {
+  let text = kbRenderResult(result, options, theme, maxCollapsedLines, header);
+  const timing = kbTimingLine(context, theme);
+  if (timing) text = text ? `${text}${timing}` : timing.replace(/^\n/, "");
+  return text;
+}
+
 function getNapkin(cwd: string): Napkin {
   return new Napkin(cwd);
 }
@@ -287,10 +407,13 @@ export default function (pi: ExtensionAPI) {
         details: { results: res.results, page, totalPages: res.totalPages },
       };
     },
+    renderCall(args, theme, context) {
+      return kbRenderCall(context, "kb_search", args.query, theme);
+    },
     renderResult(result, options, theme, context) {
       const t =
         (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      t.setText(formatKbResult(result, options, theme, 15));
+      t.setText(kbRenderTimedResult(result, options, theme, 15, context));
       return t;
     },
   });
@@ -323,10 +446,20 @@ export default function (pi: ExtensionAPI) {
         details: { path: result.path },
       };
     },
+    renderCall(args, theme, context) {
+      return kbRenderCall(context, "kb_read", args.file, theme);
+    },
     renderResult(result, options, theme, context) {
       const t =
         (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      t.setText(formatKbResult(result, options, theme, 10));
+      // Napkin resolves bare note names into subfolders, so surface the
+      // resolved path in the TUI (agent already sees it via details) —
+      // mirrors kb_outline's `File: <path>` line.
+      const path = (result.details as { path?: string } | undefined)?.path;
+      const header = path
+        ? `${theme.fg("muted", `File: ${path}`)}\n`
+        : undefined;
+      t.setText(kbRenderResult(result, options, theme, 10, header));
       return t;
     },
   });
@@ -372,10 +505,13 @@ export default function (pi: ExtensionAPI) {
         details: { path: absPath, headings },
       };
     },
+    renderCall(args, theme, context) {
+      return kbRenderCall(context, "kb_outline", args.file, theme);
+    },
     renderResult(result, options, theme, context) {
       const t =
         (context.lastComponent as Text | undefined) ?? new Text("", 0, 0);
-      t.setText(formatKbResult(result, options, theme, 15));
+      t.setText(kbRenderResult(result, options, theme, 15));
       return t;
     },
   });
