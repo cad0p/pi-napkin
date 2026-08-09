@@ -2,7 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.6.2] - 2026-08-09
+
+<!-- USER-EDITABLE SECTION START -->
+- **Kb tools TUI parity** — renderCall call lines + kb_search timing (#53)
+- **Align with @cad0p/napkin 0.12.2** (patch) — dep bumped ^0.12.1 → ^0.12.2,
+  pulling in the upstream-v0.9.2 sync fixes (overview cache, gray-matter
+  safeMatter fix, `file outline` subcommand, agent skills) while keeping the
+  fork's Approach G search (bench-verified; see cad0p/napkin#43).
+<!-- USER-EDITABLE SECTION END -->
 
 <!-- USER-EDITABLE SECTION START -->
 <!-- Add your curated release notes here. -->

@@ -1,6 +1,6 @@
 {
   "name": "@cad0p/pi-napkin",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "\ud83d\udcdc Napkin integration for pi \u2014 vault context, knowledge tools, and automatic distillation with git-worktree concurrency safety",
   "type": "module",
   "publishConfig": {
@@ -64,7 +64,7 @@
     "vitest": "^2.1.0"
   },
   "dependencies": {
-    "@cad0p/napkin": "^0.12.1"
+    "@cad0p/napkin": "^0.12.2"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0",
