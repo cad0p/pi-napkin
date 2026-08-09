@@ -16,6 +16,10 @@ All notable changes to this project will be documented in this file.
 
 - *(extension)* Kb tools TUI parity — renderCall call lines + kb_search timing ([#53](https://github.com/cad0p/pi-napkin/pull/53))
 
+### 🐛 Bug Fixes
+
+- *(extension)* Napkin 0.12.2 compat — restore overview cap defaults + fix minimumReleaseAgeExclude ([#55](https://github.com/cad0p/pi-napkin/pull/55))
+
 
 ## [0.6.1] - 2026-08-07
 
