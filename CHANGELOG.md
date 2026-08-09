@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### ◀️ Revert
+
+- *(extension)* Drop overview fallback defaults — napkin 0.12.3 restores fork defaults ([#56](https://github.com/cad0p/pi-napkin/pull/56))
+
+
 ## [0.6.2] - 2026-08-09
 
 <!-- USER-EDITABLE SECTION START -->
