@@ -12,10 +12,6 @@ All notable changes to this project will be documented in this file.
   fork's Approach G search (bench-verified; see cad0p/napkin#43).
 <!-- USER-EDITABLE SECTION END -->
 
-<!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
-<!-- USER-EDITABLE SECTION END -->
-
 ### 🚀 Features
 
 - *(extension)* Kb tools TUI parity — renderCall call lines + kb_search timing ([#53](https://github.com/cad0p/pi-napkin/pull/53))
