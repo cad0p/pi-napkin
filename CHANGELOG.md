@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.3] - 2026-08-09
+
+<!-- USER-EDITABLE SECTION START -->
+- Drop the extension's overview fallback defaults (0.6.2 workaround): napkin
+  0.12.3 restored the fork's DEFAULT_CONFIG (`collapseDepth: 2, maxRows: 100`)
+  after the upstream sync had temporarily shipped 1/0 — pi-napkin relies on
+  napkin's defaults again (no divergent behavior), vault-config authority
+  preserved. Dep `@cad0p/napkin ^0.12.2 → ^0.12.3` (guarantees the restored
+  defaults).
+<!-- USER-EDITABLE SECTION END -->
+
+### ◀️ Revert
+
+- *(extension)* Drop overview fallback defaults — napkin 0.12.3 restores fork defaults ([#56](https://github.com/cad0p/pi-napkin/pull/56))
+
+
 ## [0.6.2] - 2026-08-09
 
 <!-- USER-EDITABLE SECTION START -->
