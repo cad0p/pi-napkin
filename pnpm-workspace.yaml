@@ -3,7 +3,5 @@ allowBuilds:
   "@google/genai": true
   protobufjs: false
   glimpseui: false
-# own package: the || chain form only matched the first named version (0.10.0),
-# so fresh releases kept tripping the 24h age check; bare name excludes all
 minimumReleaseAgeExclude:
-  - '@cad0p/napkin'
+  - '@cad0p/napkin@0.10.0 || 0.11.0 || 0.11.1 || 0.12.0 || 0.12.1'
