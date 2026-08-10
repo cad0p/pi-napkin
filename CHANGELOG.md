@@ -134,6 +134,18 @@ row rendering as "//" (now "./") in the session context.
 - *(changelog)* Changes from v0.4.0 to v0.4.0-20260806.0 ([#36](https://github.com/cad0p/pi-napkin/pull/36))
 
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(extension)* Progressive disclosure for kb tools — paginated kb_search, kb_read section/page, kb_outline ([#34](https://github.com/cad0p/pi-napkin/pull/34))
+- *(extension)* Nudge agents toward kb_outline from session context and search results ([#35](https://github.com/cad0p/pi-napkin/pull/35))
+
+
 ## [0.4.0] - 2026-08-03
 
 <!-- USER-EDITABLE SECTION START -->
