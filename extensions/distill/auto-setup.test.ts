@@ -267,6 +267,7 @@ describe("ensureVaultReadyForDistill", () => {
     expect(gi).toContain(BLOCK_MARKER_END);
     expect(gi).toContain(".napkin/distill/");
     expect(gi).toContain("search-cache.json");
+    expect(gi).toContain("overview-cache.json");
     expect(r.scaffolded).toContain(".gitignore");
     expect(r.findings).toEqual([
       {

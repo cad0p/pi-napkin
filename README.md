@@ -372,6 +372,8 @@ pi-napkin owns a single contiguous block in the vault's `.gitignore`, delimited 
 # Local tmp/cache + common secrets (belt-and-braces; auto-init's
 # `git add .` would otherwise capture them in the initial commit
 # even on vaults that happen to contain dev work).
+search-cache.json
+overview-cache.json
 # (full canonical body in extensions/distill/auto-setup.ts:BLOCK_CONTENT)
 # END NAPKIN-DISTILL MANAGED
 ```
