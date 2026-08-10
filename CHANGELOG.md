@@ -5,7 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [calver-released]
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+- **Managed gitignore block** — new bare `overview-cache.json` pattern
+  alongside `search-cache.json`: the napkin SDK writes the overview cache next
+  to the vault config dir, so without it auto-init commits and distill worktree
+  squashes churned the cache into vault history.
+- **kb_search polish** — the per-result "+N more matches" hint no longer
+  repeats "use kb_read" on every entry (the HINT footer already covers it),
+  and the TUI timing line (`Took`/`Elapsed`) now renders
+  blank-line-separated from the output, matching the native bash tool.
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🐛 Bug Fixes
