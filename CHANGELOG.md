@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [calver-released]
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+- **Dep bump `@cad0p/napkin ^0.12.3 → ^0.13.0`** — consumes napkin 0.13.0 ignore support (`.napkinignore` + `.gitignore` + dotfiles rule, fork-first, upstream [#20](https://github.com/Michaelliv/napkin/issues/20)). SDK-driven — no extension changes needed; kb tools inherit the semantics automatically: ignored files disappear from `kb_search`/`kb_outline`/overview while `kb_read <exact-path>` still works.
 <!-- USER-EDITABLE SECTION END -->
 
 ### 💼 Other
