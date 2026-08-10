@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@cad0p/napkin':
-        specifier: ^0.12.3
-        version: 0.12.3
+        specifier: ^0.13.0
+        version: 0.13.0
       '@earendil-works/pi-coding-agent':
         specifier: '>=0.74.0'
         version: 0.80.10(ws@8.21.1)(zod@4.4.3)
@@ -206,8 +206,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@cad0p/napkin@0.12.3':
-    resolution: {integrity: sha512-DUkEh/vQG2nuBHPXW7BsgBlPNjz4PTCEOFvqONYX/xdI7yMb7dXECCz/ZIVr6pkHl2u3VrktxXJ4nfPDIEpqxA==}
+  '@cad0p/napkin@0.13.0':
+    resolution: {integrity: sha512-SKqttf34SkjjaYCllKJeMx9a+1I+obakwdY0VArzMrEYMcDl9Gf8mJiBpL2woSYdGiPIWgyk2fsr2CdNnPcrsg==}
     hasBin: true
 
   '@earendil-works/pi-agent-core@0.80.10':
@@ -1050,6 +1050,10 @@ packages:
     resolution: {integrity: sha512-Hs59xBNfUIunMFgWAbGX5cq6893IbWg4KnrjbYwX3tx0ztorVgTDA6B2sxf8ejHJ4wz8BqGUMYlnzNBer5NvGg==}
     engines: {node: '>= 4'}
 
+  ignore@7.0.6:
+    resolution: {integrity: sha512-BAg6QkE8W+TuQLrrw0Ugr7HegXduRuuj8/ti2kSOc+jz1dmx8/WNcjr6XGnq5YpDWxFwwaavqD0+jIUOKelTsw==}
+    engines: {node: '>= 4'}
+
   is-extendable@0.1.1:
     resolution: {integrity: sha512-5BMULNob1vgFX6EjQw5izWDxrecWK9AM72rugNr0TFldMOi0fj6Jk+zeKIt0xGj4cEfQIJth4w3OKWOJ4f+AFw==}
     engines: {node: '>=0.10.0'}
@@ -1645,11 +1649,12 @@ snapshots:
   '@biomejs/cli-win32-x64@2.5.4':
     optional: true
 
-  '@cad0p/napkin@0.12.3':
+  '@cad0p/napkin@0.13.0':
     dependencies:
       chalk: 5.6.2
       commander: 14.0.3
       gray-matter: 4.0.3
+      ignore: 7.0.6
       jexl: 2.3.0
       jiti: 2.7.0
       js-yaml: 4.3.0
@@ -2361,6 +2366,8 @@ snapshots:
       - supports-color
 
   ignore@7.0.5: {}
+
+  ignore@7.0.6: {}
 
   is-extendable@0.1.1: {}
 
