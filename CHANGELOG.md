@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.5] - 2026-08-10
+
+<!-- USER-EDITABLE SECTION START -->
+- **Dep bump `@cad0p/napkin ^0.12.3 → ^0.13.0`** — consumes napkin 0.13.0 ignore support (`.napkinignore` + `.gitignore` + dotfiles rule, fork-first, upstream [#20](https://github.com/Michaelliv/napkin/issues/20)). SDK-driven — no extension changes needed; kb tools inherit the semantics automatically: ignored files disappear from `kb_search`/`kb_outline`/overview while `kb_read <exact-path>` still works.
+<!-- USER-EDITABLE SECTION END -->
+
+### 💼 Other
+
+- Bump @cad0p/napkin ^0.12.3 → ^0.13.0 ([#61](https://github.com/cad0p/pi-napkin/pull/61))
+
+
 ## [0.6.4] - 2026-08-10
 
 <!-- USER-EDITABLE SECTION START -->
