@@ -129,7 +129,7 @@ function kbTimingLine(
   }
   const label = context.isPartial ? "Elapsed" : "Took";
   const endTime = state.endedAt ?? Date.now();
-  return `\n${theme.fg("muted", `${label} ${kbFormatDuration(endTime - state.startedAt)}`)}`;
+  return `\n\n${theme.fg("muted", `${label} ${kbFormatDuration(endTime - state.startedAt)}`)}`;
 }
 
 /**
@@ -371,7 +371,7 @@ export default function (pi: ExtensionAPI) {
               })
               .join("\n")}`;
             if (snips.length > MAX_SNIPPETS_PER_FILE) {
-              entry += `\n  … (+${snips.length - MAX_SNIPPETS_PER_FILE} more matches — use kb_read for full context)`;
+              entry += `\n  … (+${snips.length - MAX_SNIPPETS_PER_FILE} more matches)`;
             }
           }
           return entry;
