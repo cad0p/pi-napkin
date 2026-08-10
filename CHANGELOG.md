@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### 🐛 Bug Fixes
 
 - *(extension)* Exclude napkin overview cache from managed gitignore block ([#58](https://github.com/cad0p/pi-napkin/pull/58))
+- *(extension)* Kb_search copy and Took timing parity ([#60](https://github.com/cad0p/pi-napkin/pull/60))
 
 
 ## [0.6.3] - 2026-08-09
