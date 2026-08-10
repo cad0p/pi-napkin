@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(extension)* Exclude napkin overview cache from managed gitignore block ([#58](https://github.com/cad0p/pi-napkin/pull/58))
+
+
 ## [0.6.3] - 2026-08-09
 
 <!-- USER-EDITABLE SECTION START -->
