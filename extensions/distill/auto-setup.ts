@@ -152,6 +152,7 @@ export const BLOCK_CONTENT: readonly string[] = [
   "",
   "# Local tmp/cache",
   "search-cache.json",
+  "overview-cache.json",
   ".DS_Store",
   "",
   "# Common secrets — belt-and-braces for vaults that end up alongside dev",
