@@ -227,7 +227,7 @@ describe("kb_search", () => {
     const text = textOf(res);
 
     expect(text.match(/\s{2}needle line number \d+/g)).toHaveLength(5);
-    expect(text).toContain("(+7 more matches — use kb_read for full context)");
+    expect(text).toContain("(+7 more matches)");
   });
 
   test("truncates snippet lines longer than 200 chars", async () => {
@@ -628,6 +628,7 @@ describe("kb tool TUI rendering (call line + timing)", () => {
       makeContext({ state, isPartial: false, invalidate }),
     );
     expect(final.at(-1)).toMatch(/^Took /);
+    expect(final.at(-2)).toBe(""); // blank line before Took, matching the native bash tool
     expect(state.interval).toBeUndefined();
   });
 
