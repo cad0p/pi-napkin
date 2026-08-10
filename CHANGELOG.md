@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.6.4] - 2026-08-10
+
+<!-- USER-EDITABLE SECTION START -->
+- **Managed gitignore block** — new bare `overview-cache.json` pattern
+  alongside `search-cache.json`: the napkin SDK writes the overview cache next
+  to the vault config dir, so without it auto-init commits and distill worktree
+  squashes churned the cache into vault history.
+- **kb_search polish** — the per-result "+N more matches" hint no longer
+  repeats "use kb_read" on every entry (the HINT footer already covers it),
+  and the TUI timing line (`Took`/`Elapsed`) now renders
+  blank-line-separated from the output, matching the native bash tool.
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(extension)* Exclude napkin overview cache from managed gitignore block ([#58](https://github.com/cad0p/pi-napkin/pull/58))
+- *(extension)* Kb_search copy and Took timing parity ([#60](https://github.com/cad0p/pi-napkin/pull/60))
+
+
 ## [0.6.3] - 2026-08-09
 
 <!-- USER-EDITABLE SECTION START -->
