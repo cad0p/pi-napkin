@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.6.4] - 2026-08-10
 
 <!-- USER-EDITABLE SECTION START -->
 - **Managed gitignore block** — new bare `overview-cache.json` pattern
