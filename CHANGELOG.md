@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(extension)* Vault usage mandate moves to system prompt via before_agent_start ([#68](https://github.com/cad0p/pi-napkin/pull/68))
+
+### ⚙️ Miscellaneous Tasks
+
+- *(changelog)* Drop stale duplicate [calver-released] block + temp validator disable ([#66](https://github.com/cad0p/pi-napkin/pull/66))
+- Re-enable validate-package-version ([#67](https://github.com/cad0p/pi-napkin/pull/67))
+
+
 ## [0.6.6] - 2026-08-11
 
 <!-- USER-EDITABLE SECTION START -->
