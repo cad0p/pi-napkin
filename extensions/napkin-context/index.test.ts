@@ -441,6 +441,32 @@ describe("vault overview (session context)", () => {
     expect(injected[0]).toContain("notes: 1");
   });
 
+  test("prepends the vault root line with the discovery command hint", async () => {
+    const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+
+    const { injected, calls } = await runSessionStart(vault);
+
+    expect(calls).toBe(1);
+    // The content root is the vault dir itself: fixture vault.root ".." is
+    // resolved relative to the .napkin/ dir, whose parent is the vault.
+    expect(injected[0]).toContain(
+      `Vault root: ${vault} (napkin vault --json | jq -r .path)`,
+    );
+    // the root line leads the overview body, before the folder rows
+    expect(injected[0].indexOf("Vault root:")).toBeLessThan(
+      injected[0].indexOf("./"),
+    );
+  });
+
+  test("injects nothing for an empty vault (no root-only message)", async () => {
+    const vault = makeVault({});
+
+    const { injected, calls } = await runSessionStart(vault);
+
+    expect(calls).toBe(0);
+    expect(injected).toEqual([]);
+  });
+
   test("does not collapse heterogeneous sibling subfolders", async () => {
     const files: Record<string, string> = {};
     const topics = [
