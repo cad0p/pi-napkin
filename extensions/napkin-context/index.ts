@@ -169,7 +169,7 @@ function getNapkin(cwd: string): Napkin {
   return new Napkin(cwd);
 }
 
-function getOverview(n: Napkin): string | null {
+function getOverview(n: Napkin): { text: string; root: string } | null {
   try {
     // napkin >= 0.12.3 ships the fork's defaults (collapseDepth 2, maxRows
     // 100) in DEFAULT_CONFIG, so the extension must not diverge from napkin —
@@ -201,7 +201,7 @@ function getOverview(n: Napkin): string | null {
     }
     const body = text.trim();
     if (!body) return null;
-    return `Vault root: ${overview.root} (napkin vault --json | jq -r .path)\n\n${body}`;
+    return { text: body, root: overview.root };
   } catch {
     return null;
   }
@@ -209,6 +209,7 @@ function getOverview(n: Napkin): string | null {
 
 export default function (pi: ExtensionAPI) {
   let hasVault = false;
+  let vaultRoot: string | null = null;
 
   pi.registerMessageRenderer(
     "napkin-context",
@@ -266,6 +267,7 @@ export default function (pi: ExtensionAPI) {
 
     const overview = getOverview(n);
     hasVault = !!overview;
+    vaultRoot = overview?.root ?? null;
 
     if (overview) {
       // Check if we already injected context in this session
@@ -288,15 +290,7 @@ export default function (pi: ExtensionAPI) {
         const sm = ctx.sessionManager as Partial<SessionManager>;
         if (typeof sm.appendCustomMessageEntry === "function") {
           try {
-            sm.appendCustomMessageEntry(
-              "napkin-context",
-              "## Napkin vault context\n" +
-                "You have access to a napkin vault (Obsidian-compatible knowledge base). " +
-                "Here is the vault overview. Use the kb_search tool to find specific content, " +
-                "kb_read to read files, and kb_outline to see file structure.\n\n" +
-                overview,
-              true,
-            );
+            sm.appendCustomMessageEntry("napkin-context", overview.text, true);
           } catch (err) {
             // Graceful degradation: pi may have tightened the readonly
             // contract at runtime. Surface once, then proceed without
@@ -322,6 +316,15 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus("napkin", theme.fg("dim", "napkin: no NAPKIN.md"));
       }
     }
+  });
+
+  pi.on("before_agent_start", async (event) => {
+    if (!hasVault || !vaultRoot) return {};
+    return {
+      systemPrompt:
+        event.systemPrompt +
+        `\n\nA napkin obsidian vault with the user context is available at ${vaultRoot}. Before answering, you must consult it via kb_search.`,
+    };
   });
 
   // ── Tools ───────────────────────────────────────────────────────
