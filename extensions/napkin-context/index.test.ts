@@ -86,10 +86,10 @@ interface RegisteredTool {
 
 function loadExtension(): {
   tools: Map<string, RegisteredTool>;
-  handlers: Map<string, (event: unknown, ctx: never) => void>;
+  handlers: Map<string, (event: unknown, ctx: never) => unknown>;
 } {
   const tools = new Map<string, RegisteredTool>();
-  const handlers = new Map<string, (event: unknown, ctx: never) => void>();
+  const handlers = new Map<string, (event: unknown, ctx: never) => unknown>();
   const pi = {
     registerTool: (t: RegisteredTool) => {
       tools.set(t.name, t);
@@ -418,7 +418,8 @@ describe("vault overview (session context)", () => {
     const { injected, calls } = await runSessionStart(vault);
 
     expect(calls).toBe(1);
-    expect(injected[0]).toContain("## Napkin vault context");
+    // the injected message is data-only now: no preamble, no vault root line
+    expect(injected[0]).not.toContain("## Napkin vault context");
     expect(injected[0]).toContain("imports/docs/ (+5 similar subfolders)");
     // collapsed children no longer render as their own rows
     expect(injected[0]).not.toContain("part-0");
@@ -441,21 +442,23 @@ describe("vault overview (session context)", () => {
     expect(injected[0]).toContain("notes: 1");
   });
 
-  test("prepends the vault root line with the discovery command hint", async () => {
-    const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+  test("injects the NAPKIN.md content directly with no preamble or vault root line", async () => {
+    const vault = makeVault({
+      "NAPKIN.md": "# My vault\n\n## What is this?\nfixture context",
+    });
 
     const { injected, calls } = await runSessionStart(vault);
 
     expect(calls).toBe(1);
-    // The content root is the vault dir itself: fixture vault.root ".." is
-    // resolved relative to the .napkin/ dir, whose parent is the vault.
-    expect(injected[0]).toContain(
-      `Vault root: ${vault} (napkin vault --json | jq -r .path)`,
-    );
-    // the root line leads the overview body, before the folder rows
-    expect(injected[0].indexOf("Vault root:")).toBeLessThan(
-      injected[0].indexOf("./"),
-    );
+    // the message starts directly with the NAPKIN.md CONTENT — the
+    // preamble sentence and the "Vault root:" line are gone (the root now
+    // lives in the before_agent_start system prompt mandate)
+    expect(injected[0]).not.toContain("Vault root:");
+    expect(injected[0]).not.toContain("## Napkin vault context");
+    expect(injected[0]).toContain("fixture context");
+    expect(
+      injected[0].startsWith("# My vault\n\n## What is this?\nfixture context"),
+    ).toBe(true);
   });
 
   test("injects nothing for an empty vault (no root-only message)", async () => {
@@ -532,6 +535,68 @@ describe("vault overview (session context)", () => {
     expect(injected[0].indexOf("big/important/")).toBeLessThan(
       injected[0].indexOf("big/topic-000/"),
     );
+  });
+});
+
+describe("before_agent_start (system prompt mandate)", () => {
+  // session_start and before_agent_start must come from the SAME
+  // loadExtension() call — hasVault/vaultRoot live in the extension
+  // closure and only session_start sets them. Run session_start first,
+  // then invoke before_agent_start against the same closure state.
+  async function runMandate(vault: string): Promise<{
+    injected: string[];
+    calls: number;
+    res: unknown;
+  }> {
+    const { handlers } = loadExtension();
+    const injected: string[] = [];
+    let calls = 0;
+    const ctx = {
+      cwd: vault,
+      sessionManager: {
+        getEntries: () => [],
+        appendCustomMessageEntry: (_type: string, text: string) => {
+          calls++;
+          injected.push(text);
+        },
+      },
+      hasUI: false,
+    };
+    const sessionStart = handlers.get("session_start");
+    const beforeAgentStart = handlers.get("before_agent_start");
+    if (!sessionStart || !beforeAgentStart) {
+      throw new Error("session_start/before_agent_start not registered");
+    }
+    await sessionStart(undefined, ctx as never);
+    const res = await beforeAgentStart(
+      { systemPrompt: "base prompt", systemPromptOptions: {} },
+      undefined as never,
+    );
+    return { injected, calls, res };
+  }
+
+  test("appends the vault mandate to the system prompt when a vault is present", async () => {
+    const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+
+    const { calls, res } = await runMandate(vault);
+
+    expect(calls).toBe(1);
+    // overview.root === the fixture dir (proven here via the mandate string)
+    expect(res).toEqual({
+      systemPrompt:
+        "base prompt\n\nA napkin obsidian vault with the user context is available at " +
+        `${vault}. Before answering, you must consult it via kb_search.`,
+    });
+  });
+
+  test("no vault: session_start injects nothing and the mandate is empty", async () => {
+    const vault = makeVault({});
+
+    const { injected, calls, res } = await runMandate(vault);
+
+    expect(calls).toBe(0);
+    expect(injected).toEqual([]);
+    expect(res).toEqual({});
   });
 });
 
