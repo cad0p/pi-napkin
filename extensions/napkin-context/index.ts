@@ -201,8 +201,7 @@ function getOverview(n: Napkin): string | null {
     }
     const body = text.trim();
     if (!body) return null;
-    const root = (overview as { root?: string }).root ?? n.vault.contentPath; // TODO: drop cast + fallback once dep >= 0.13.1
-    return `Vault root: ${root} (napkin vault --json | jq -r .path)\n\n${body}`;
+    return `Vault root: ${overview.root} (napkin vault --json | jq -r .path)\n\n${body}`;
   } catch {
     return null;
   }
