@@ -313,8 +313,10 @@ describe("per-completion overlap notice (integration, R7-PERF-2)", () => {
     expect(out.newCursor).toBe(sm.getEntries().length);
 
     // 5. Apply the wiring step ourselves (mirrors what
-    //    `postOverlapNoticeOnCompletion` does internally) and assert
-    //    the SessionManager has a custom message of the right type.
+    //    `postOverlapNoticeOnCompletion` does internally — it posts via
+    //    pi.sendMessage, which appends through appendCustomMessageEntry)
+    //    and assert the SessionManager has a custom message of the right
+    //    type.
     const entriesBefore = sm.getEntries().length;
     sm.appendCustomMessageEntry("napkin-distill-overlap", "test-content", true);
     const entries = sm.getEntries();

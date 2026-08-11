@@ -280,28 +280,38 @@ export default function (pi: ExtensionAPI) {
         );
 
       if (!alreadyInjected) {
-        // pi's ExtensionContext narrows sessionManager to
-        // ReadonlySessionManager, which omits mutation methods. At runtime
-        // it's always the full SessionManager, but if pi ever wraps the
-        // instance in a genuine readonly proxy the mutation method will
-        // either be absent or throw. Guard both the duck-type and the
-        // call so the worst-case is a degraded (no context injection)
-        // session, not a fatal extension error. (R2-2)
-        const sm = ctx.sessionManager as Partial<SessionManager>;
-        if (typeof sm.appendCustomMessageEntry === "function") {
-          try {
-            sm.appendCustomMessageEntry("napkin-context", overview.text, true);
-          } catch (err) {
-            // Graceful degradation: pi may have tightened the readonly
-            // contract at runtime. Surface once, then proceed without
-            // context injection.
-            if (ctx.hasUI) {
-              ctx.ui.notify(
-                `napkin-context: could not inject vault overview (${
-                  err instanceof Error ? err.message : String(err)
-                })`,
-                "warning",
-              );
+        // Send via the public message event path (message_start) so the TUI
+        // renders the custom message live. A direct sessionManager append is
+        // only picked up by the next full chat rebuild — on /new the chat is
+        // rebuilt BEFORE session_start handlers run, so a direct append would
+        // leave the vault overview invisible in the new session's chat (the
+        // stale line survives as terminal pixels until the next repaint).
+        // pi.sendMessage is fire-and-forget (void); it appends the entry to
+        // the session manager synchronously, so the LLM context is unaffected
+        // even where the TUI event is not subscribed yet (startup path).
+        try {
+          pi.sendMessage({
+            customType: "napkin-context",
+            content: overview.text,
+            display: true,
+          });
+        } catch (err) {
+          // Graceful degradation: if the event path is unavailable, fall back
+          // to a direct session manager append (visible to the model, but not
+          // re-rendered in the TUI on session replacement).
+          const sm = ctx.sessionManager as Partial<SessionManager>;
+          if (typeof sm.appendCustomMessageEntry === "function") {
+            try {
+              sm.appendCustomMessageEntry("napkin-context", overview.text, true);
+            } catch (err2) {
+              if (ctx.hasUI) {
+                ctx.ui.notify(
+                  `napkin-context: could not inject vault overview (${
+                    err2 instanceof Error ? err2.message : String(err2)
+                  })`,
+                  "warning",
+                );
+              }
             }
           }
         }
