@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(extension)* Prepend vault root to injected napkin context ([#63](https://github.com/cad0p/pi-napkin/pull/63))
+
+
 ## [0.6.5] - 2026-08-10
 
 <!-- USER-EDITABLE SECTION START -->
