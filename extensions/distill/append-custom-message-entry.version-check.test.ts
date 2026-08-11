@@ -90,15 +90,13 @@ describe("pi sendMessage + appendCustomMessageEntry version pin (R7-PERF-2 / R8-
     // `): void` return pin catches a change to Promise<void> — the
     // extension relies on fire-and-forget semantics (no await/.catch).
     expect(src).toMatch(
-      /interface ExtensionAPI[\s\S]*?sendMessage<T = unknown>[\(\s\S]*?\): void;/,
+      /interface ExtensionAPI[\s\S]*?sendMessage<T = unknown>[\s\S]*?\): void;/,
     );
   });
 
   test("SendMessageHandler is fire-and-forget (void) and accepts customType/content/display/details", () => {
     const src = readFileSync(PI_EXTENSION_TYPES_DTS, "utf-8");
-    expect(src).toMatch(
-      /export type SendMessageHandler = [\s\S]*?=> void;/,
-    );
+    expect(src).toMatch(/export type SendMessageHandler = [\s\S]*?=> void;/);
     // Field-name pin, order-independent: a cosmetic reorder of the Pick
     // type-argument list must not trip the tripwire.
     const alias = src.match(
@@ -107,7 +105,7 @@ describe("pi sendMessage + appendCustomMessageEntry version pin (R7-PERF-2 / R8-
     expect(alias).not.toBeNull();
     if (alias) {
       for (const field of ["customType", "content", "display", "details"]) {
-        expect(alias[1]).toContain(`\"${field}\"`);
+        expect(alias[1]).toContain(`"${field}"`);
       }
     }
   });

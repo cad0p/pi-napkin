@@ -286,9 +286,11 @@ export default function (pi: ExtensionAPI) {
         // rebuilt BEFORE session_start handlers run, so a direct append would
         // leave the vault overview invisible in the new session's chat (the
         // stale line survives as terminal pixels until the next repaint).
-        // pi.sendMessage is fire-and-forget (void); it appends the entry to
-        // the session manager synchronously, so the LLM context is unaffected
-        // even where the TUI event is not subscribed yet (startup path).
+        // pi.sendMessage is fire-and-forget (void). In the idle path it
+        // appends the entry to the session manager synchronously AND pushes
+        // the message into agent state — the overview participates in LLM
+        // context by design, even where the TUI event is not subscribed yet
+        // (startup path).
         try {
           pi.sendMessage({
             customType: "napkin-context",
@@ -302,7 +304,11 @@ export default function (pi: ExtensionAPI) {
           const sm = ctx.sessionManager as Partial<SessionManager>;
           if (typeof sm.appendCustomMessageEntry === "function") {
             try {
-              sm.appendCustomMessageEntry("napkin-context", overview.text, true);
+              sm.appendCustomMessageEntry(
+                "napkin-context",
+                overview.text,
+                true,
+              );
             } catch (err2) {
               if (ctx.hasUI) {
                 ctx.ui.notify(

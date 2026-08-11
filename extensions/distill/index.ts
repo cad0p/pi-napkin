@@ -1020,8 +1020,8 @@ export default function (pi: ExtensionAPI) {
 
     if (overlap.length === 0) return;
 
-    // Post the notice via the public sendMessage API (fire-and-forget, void).
-    // In the idle case sendCustomMessage appends the entry to the session
+    // Post the notice via the public sendMessage API (fire-and-forget, void):
+    // in the idle case sendCustomMessage appends the entry to the session
     // manager AND emits message_start, so the TUI renders the notice live. A
     // direct sessionManager.appendCustomMessageEntry is only picked up by the
     // next full chat rebuild (e.g. /reload) — mid-session appends never
@@ -1038,29 +1038,15 @@ export default function (pi: ExtensionAPI) {
     //   without the notice (harmless). No extension-visible `isStreaming`
     //   exists to avoid this; best-effort by design.
     // - If the spawning session was replaced (e.g. /new) while the distill
-    //   ran, the extension runtime is invalidated and sendMessage throws;
-    //   fall back to a direct append on the captured session manager, which
-    //   keeps working (surfaces on the next rebuild, e.g. resume).
-    try {
-      pi.sendMessage({
-        customType: "napkin-distill-overlap",
-        content: formatOverlapNotice(overlap),
-        display: true, // display: surface in TUI so the user sees what happened
-      });
-    } catch {
-      const sm = ctx.sessionManager as Partial<SessionManager>;
-      if (typeof sm.appendCustomMessageEntry === "function") {
-        try {
-          sm.appendCustomMessageEntry(
-            "napkin-distill-overlap",
-            formatOverlapNotice(overlap),
-            true, // display: surface in TUI so the user sees what happened
-          );
-        } catch {
-          // best-effort; cursor was already advanced above
-        }
-      }
-    }
+    //   ran, the extension runtime is invalidated and sendMessage throws
+    //   synchronously; `postOverlapNoticeViaSendMessage` falls back to a
+    //   direct append on the captured session manager (surfaces on the next
+    //   rebuild, e.g. resume).
+    postOverlapNoticeViaSendMessage(
+      pi,
+      ctx.sessionManager as Partial<SessionManager>,
+      formatOverlapNotice(overlap),
+    );
   }
 
   /**
@@ -1834,6 +1820,51 @@ export function formatOverlapNotice(overlapFiles: string[]): string {
     "merged automatically at distill completion; consider re-reading before " +
     "further edits."
   );
+}
+
+/**
+ * Post the distill overlap notice via pi's public `sendMessage` API
+ * (fire-and-forget, void) so the TUI renders it live, falling back to a
+ * direct session-manager append when `sendMessage` throws — e.g. when the
+ * spawning session's runtime was invalidated by a session switch (/
+ * new) while the distill ran: `assertActive()` throws synchronously, the
+ * fallback appends on the captured session manager, which keeps working and
+ * surfaces on the next chat rebuild (e.g. resume).
+ *
+ * Best-effort by design: never throws, never blocks distill bookkeeping.
+ * Exported for unit tests; production wiring lives in
+ * `postOverlapNoticeOnCompletion` inside the extension factory.
+ */
+export function postOverlapNoticeViaSendMessage(
+  poster: {
+    sendMessage(message: {
+      customType: string;
+      content: string;
+      display: boolean;
+    }): void;
+  },
+  sm: Partial<SessionManager> | undefined,
+  notice: string,
+): void {
+  try {
+    poster.sendMessage({
+      customType: "napkin-distill-overlap",
+      content: notice,
+      display: true, // display: surface in TUI so the user sees what happened
+    });
+  } catch {
+    if (sm && typeof sm.appendCustomMessageEntry === "function") {
+      try {
+        sm.appendCustomMessageEntry(
+          "napkin-distill-overlap",
+          notice,
+          true, // display: surface in TUI so the user sees what happened
+        );
+      } catch {
+        // best-effort; never throws
+      }
+    }
+  }
 }
 
 /**

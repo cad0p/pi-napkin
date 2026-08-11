@@ -25,10 +25,13 @@ import {
   type SessionEntry,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import { killDistillWrappers } from "./_test-helpers";
 import { getDistillTouchedFilesPostSquash } from "./distill-workspace";
-import { computeOverlapForCompletion } from "./index";
+import {
+  computeOverlapForCompletion,
+  postOverlapNoticeViaSendMessage,
+} from "./index";
 
 // ---------------------------------------------------------------------------
 // Test fixtures.
@@ -403,5 +406,62 @@ describe("per-completion overlap notice (integration, R7-PERF-2)", () => {
     });
     expect(out.overlap).toEqual([]);
     expect(out.newCursor).toBe(initialCursor);
+  });
+});
+
+describe("postOverlapNoticeViaSendMessage", () => {
+  test("posts the notice via sendMessage with the overlap payload", () => {
+    const sendMessage = vi.fn();
+    postOverlapNoticeViaSendMessage({ sendMessage }, undefined, "notice-text");
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith({
+      customType: "napkin-distill-overlap",
+      content: "notice-text",
+      display: true,
+    });
+  });
+
+  test("falls back to a direct session-manager append when sendMessage throws", () => {
+    const sendMessage = vi.fn(() => {
+      throw new Error("stale runtime");
+    });
+    const appendCustomMessageEntry = vi.fn();
+    const sm = { appendCustomMessageEntry };
+    postOverlapNoticeViaSendMessage(
+      { sendMessage },
+      sm as unknown as Parameters<typeof postOverlapNoticeViaSendMessage>[1],
+      "notice-text",
+    );
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(appendCustomMessageEntry).toHaveBeenCalledWith(
+      "napkin-distill-overlap",
+      "notice-text",
+      true,
+    );
+  });
+
+  test("silently no-ops when sendMessage throws and the append method is absent", () => {
+    const sendMessage = vi.fn(() => {
+      throw new Error("stale runtime");
+    });
+    expect(() =>
+      postOverlapNoticeViaSendMessage({ sendMessage }, {}, "notice-text"),
+    ).not.toThrow();
+  });
+
+  test("swallows direct-append failures too (best-effort)", () => {
+    const sendMessage = vi.fn(() => {
+      throw new Error("stale runtime");
+    });
+    const appendCustomMessageEntry = vi.fn(() => {
+      throw new Error("readonly manager");
+    });
+    expect(() =>
+      postOverlapNoticeViaSendMessage(
+        { sendMessage },
+        { appendCustomMessageEntry },
+        "notice-text",
+      ),
+    ).not.toThrow();
   });
 });
