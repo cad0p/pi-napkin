@@ -426,10 +426,9 @@ describe("postOverlapNoticeViaSendMessage", () => {
       throw new Error("stale runtime");
     });
     const appendCustomMessageEntry = vi.fn();
-    const sm = { appendCustomMessageEntry };
     postOverlapNoticeViaSendMessage(
       { sendMessage },
-      sm as unknown as Parameters<typeof postOverlapNoticeViaSendMessage>[1],
+      { appendCustomMessageEntry },
       "notice-text",
     );
     expect(sendMessage).toHaveBeenCalledTimes(1);

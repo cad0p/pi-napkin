@@ -1826,8 +1826,8 @@ export function formatOverlapNotice(overlapFiles: string[]): string {
  * Post the distill overlap notice via pi's public `sendMessage` API
  * (fire-and-forget, void) so the TUI renders it live, falling back to a
  * direct session-manager append when `sendMessage` throws — e.g. when the
- * spawning session's runtime was invalidated by a session switch (/
- * new) while the distill ran: `assertActive()` throws synchronously, the
+ * spawning session's runtime was invalidated by a session switch
+ * (e.g. /new) while the distill ran: `assertActive()` throws synchronously, the
  * fallback appends on the captured session manager, which keeps working and
  * surfaces on the next chat rebuild (e.g. resume).
  *
