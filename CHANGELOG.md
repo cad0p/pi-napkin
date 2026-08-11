@@ -2,10 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.6.6] - 2026-08-11
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+- **Injected agent context now always knows the vault root** — the napkin overview starts with `Vault root: <path> (napkin vault --json | jq -r .path)`, sourced from the SDK's new `overview.root` field (napkin 0.13.2, attached fresh at the SDK layer — never cached, so a moved vault can never serve a stale path). Sessions no longer burn time discovering where the vault lives, and the parenthetical doubles as a hint for the CLI discovery command.
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🚀 Features
