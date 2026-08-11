@@ -1021,18 +1021,46 @@ export default function (pi: ExtensionAPI) {
     if (overlap.length === 0) return;
 
     // Post the notice via the public sendMessage API (fire-and-forget, void).
-    // sendCustomMessage appends the entry to the session manager AND emits
-    // message_start, so the TUI renders the notice live. A direct
-    // sessionManager.appendCustomMessageEntry is only picked up by the next
-    // full chat rebuild (e.g. /reload) — mid-session appends never re-render
-    // the chat, so overlap notices were effectively invisible until then.
-    // (Verified empirically 2026-08-11: direct mid-session append invisible
-    // in TUI, sendMessage renders immediately.)
-    pi.sendMessage({
-      customType: "napkin-distill-overlap",
-      content: formatOverlapNotice(overlap),
-      display: true, // display: surface in TUI so the user sees what happened
-    });
+    // In the idle case sendCustomMessage appends the entry to the session
+    // manager AND emits message_start, so the TUI renders the notice live. A
+    // direct sessionManager.appendCustomMessageEntry is only picked up by the
+    // next full chat rebuild (e.g. /reload) — mid-session appends never
+    // re-render the chat, so overlap notices were effectively invisible until
+    // then. (Verified empirically 2026-08-11: direct mid-session append
+    // invisible in TUI, sendMessage renders immediately.)
+    //
+    // Divergences to be aware of:
+    // - While the parent agent is streaming, sendMessage routes to
+    //   `agent.steer()`: the notice is drained into the running turn, the
+    //   agent runs an extra assistant response, and the TUI render + session
+    //   append are deferred until drain — which lands after the cursor was
+    //   advanced above, so a distill spawned in between forks a session
+    //   without the notice (harmless). No extension-visible `isStreaming`
+    //   exists to avoid this; best-effort by design.
+    // - If the spawning session was replaced (e.g. /new) while the distill
+    //   ran, the extension runtime is invalidated and sendMessage throws;
+    //   fall back to a direct append on the captured session manager, which
+    //   keeps working (surfaces on the next rebuild, e.g. resume).
+    try {
+      pi.sendMessage({
+        customType: "napkin-distill-overlap",
+        content: formatOverlapNotice(overlap),
+        display: true, // display: surface in TUI so the user sees what happened
+      });
+    } catch {
+      const sm = ctx.sessionManager as Partial<SessionManager>;
+      if (typeof sm.appendCustomMessageEntry === "function") {
+        try {
+          sm.appendCustomMessageEntry(
+            "napkin-distill-overlap",
+            formatOverlapNotice(overlap),
+            true, // display: surface in TUI so the user sees what happened
+          );
+        } catch {
+          // best-effort; cursor was already advanced above
+        }
+      }
+    }
   }
 
   /**

@@ -82,22 +82,34 @@ describe("pi sendMessage + appendCustomMessageEntry version pin (R7-PERF-2 / R8-
     expect(existsSync(PI_EXTENSION_TYPES_DTS)).toBe(true);
   });
 
-  test("types.d.ts still declares `sendMessage` on the extension API", () => {
+  test("ExtensionAPI still declares `sendMessage` with a void return", () => {
     const src = readFileSync(PI_EXTENSION_TYPES_DTS, "utf-8");
-    expect(src).toContain("sendMessage");
+    // Pin the member inside the ExtensionAPI interface itself: a bare
+    // toContain("sendMessage") would also match ReplacedSessionContext and
+    // ExtensionActions, so it wouldn't trip on an ExtensionAPI rename. The
+    // `): void` return pin catches a change to Promise<void> — the
+    // extension relies on fire-and-forget semantics (no await/.catch).
+    expect(src).toMatch(
+      /interface ExtensionAPI[\s\S]*?sendMessage<T = unknown>[\(\s\S]*?\): void;/,
+    );
   });
 
-  test("SendMessageHandler is fire-and-forget (void) and accepts customType/content/display", () => {
+  test("SendMessageHandler is fire-and-forget (void) and accepts customType/content/display/details", () => {
     const src = readFileSync(PI_EXTENSION_TYPES_DTS, "utf-8");
     expect(src).toMatch(
-      /SendMessageHandler[\s\S]*?=> void;/,
+      /export type SendMessageHandler = [\s\S]*?=> void;/,
     );
-    // The message shape is `Pick<CustomMessage<T>, "customType" | "content" |
-    // "display" | "details">` — the field names appear as string literals
-    // in the Pick type-argument list.
-    expect(src).toMatch(
-      /Pick<CustomMessage<T>, \"customType\" \| \"content\" \| \"display\" \| \"details\">/,
+    // Field-name pin, order-independent: a cosmetic reorder of the Pick
+    // type-argument list must not trip the tripwire.
+    const alias = src.match(
+      /export type SendMessageHandler = ([\s\S]*?)=> void;/,
     );
+    expect(alias).not.toBeNull();
+    if (alias) {
+      for (const field of ["customType", "content", "display", "details"]) {
+        expect(alias[1]).toContain(`\"${field}\"`);
+      }
+    }
   });
   test("pi-coding-agent still exposes session-manager.d.ts at the expected path", () => {
     expect(existsSync(PI_SESSION_MANAGER_DTS)).toBe(true);
