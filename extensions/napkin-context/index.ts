@@ -199,7 +199,9 @@ function getOverview(n: Napkin): string | null {
         text += `\n… ${overview.truncated.rows} more folders (${overview.truncated.notes} notes) — use kb_search to find specific content\n`;
       }
     }
-    return text.trim() || null;
+    const body = text.trim();
+    if (!body) return null;
+    return `Vault root: ${overview.root} (napkin vault --json | jq -r .path)\n\n${body}`;
   } catch {
     return null;
   }
