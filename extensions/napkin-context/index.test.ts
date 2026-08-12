@@ -16,6 +16,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { Napkin } from "@cad0p/napkin";
 import type { Text } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import napkinContext from "./index";
@@ -49,6 +50,31 @@ function makeVault(
   }
   return dir;
 }
+
+// napkin < 0.14 auto-creates a bare vault instead of throwing, so the
+// no-vault guidance path only exists once the installed SDK throws
+// VaultNotFoundError. Probe at module load with an isolated
+// XDG_CONFIG_HOME (the real user's global vault must not leak into the
+// probe) and skip the test on older SDKs.
+const napkinThrowsWithoutVault = (() => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-context-probe-"));
+  const configHome = fs.mkdtempSync(
+    path.join(os.tmpdir(), "napkin-context-config-"),
+  );
+  const prev = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = configHome;
+  try {
+    new Napkin(dir);
+    return false;
+  } catch (e) {
+    return e instanceof Error && e.name === "VaultNotFoundError";
+  } finally {
+    if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = prev;
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(configHome, { recursive: true, force: true });
+  }
+})();
 
 interface RenderContext {
   state: { startedAt?: number; endedAt?: number; interval?: unknown };
@@ -377,27 +403,47 @@ describe("kb_outline", () => {
 describe("vault overview (session context)", () => {
   // Runs the session_start handler against a fixture vault and captures the
   // injected custom message, mirroring the other suites' real-SDK pattern.
+  // With hasUI the fake UI captures setStatus calls (identity theme, so
+  // content is ANSI-free).
   async function runSessionStart(
     vault: string,
-  ): Promise<{ injected: string[]; calls: number }> {
+    opts: { hasUI?: boolean } = {},
+  ): Promise<{
+    injected: string[];
+    types: string[];
+    calls: number;
+    setStatusCalls: { id: string; content: string }[];
+  }> {
     const { handlers } = loadExtension();
     const injected: string[] = [];
+    const types: string[] = [];
+    const setStatusCalls: { id: string; content: string }[] = [];
     let calls = 0;
     const ctx = {
       cwd: vault,
       sessionManager: {
         getEntries: () => [],
-        appendCustomMessageEntry: (_type: string, text: string) => {
+        appendCustomMessageEntry: (type: string, text: string) => {
           calls++;
+          types.push(type);
           injected.push(text);
         },
       },
-      hasUI: false,
+      hasUI: opts.hasUI ?? false,
+      ui: opts.hasUI
+        ? {
+            theme: identityTheme,
+            notify: () => {},
+            setStatus: (id: string, content: string) => {
+              setStatusCalls.push({ id, content });
+            },
+          }
+        : undefined,
     };
     const handler = handlers.get("session_start");
     if (!handler) throw new Error("session_start handler not registered");
     await handler(undefined, ctx as never);
-    return { injected, calls };
+    return { injected, types, calls, setStatusCalls };
   }
 
   test("renders homogeneous sibling subfolders as a collapsed row with count", async () => {
@@ -469,6 +515,41 @@ describe("vault overview (session context)", () => {
     expect(calls).toBe(0);
     expect(injected).toEqual([]);
   });
+
+  test.skipIf(!napkinThrowsWithoutVault)(
+    "no vault: session_start surfaces napkin's VaultNotFoundError guidance and sets the no-vault status",
+    async () => {
+      // Bare temp dir: no .napkin here or in any ancestor. An empty
+      // XDG_CONFIG_HOME keeps the real user's global vault out of the
+      // resolution, so the SDK must throw VaultNotFoundError.
+      const bareDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "napkin-context-novault-"),
+      );
+      const configHome = fs.mkdtempSync(
+        path.join(os.tmpdir(), "napkin-context-config-"),
+      );
+      const prev = process.env.XDG_CONFIG_HOME;
+      process.env.XDG_CONFIG_HOME = configHome;
+      try {
+        const { injected, types, calls, setStatusCalls } =
+          await runSessionStart(bareDir, { hasUI: true });
+
+        expect(calls).toBe(1);
+        expect(types[0]).toBe("napkin-context");
+        // napkin's VaultNotFoundError message points at the setup paths
+        expect(injected[0]).toContain("napkin init");
+        expect(setStatusCalls).toContainEqual({
+          id: "napkin",
+          content: "napkin: no vault",
+        });
+      } finally {
+        if (prev === undefined) delete process.env.XDG_CONFIG_HOME;
+        else process.env.XDG_CONFIG_HOME = prev;
+        fs.rmSync(bareDir, { recursive: true, force: true });
+        fs.rmSync(configHome, { recursive: true, force: true });
+      }
+    },
+  );
 
   test("does not collapse heterogeneous sibling subfolders", async () => {
     const files: Record<string, string> = {};
@@ -589,7 +670,7 @@ describe("before_agent_start (system prompt mandate)", () => {
     });
   });
 
-  test("no vault: session_start injects nothing and the mandate is empty", async () => {
+  test("empty vault: no overview injected and the mandate is empty", async () => {
     const vault = makeVault({});
 
     const { injected, calls, res } = await runMandate(vault);

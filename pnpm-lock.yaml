@@ -9,7 +9,7 @@ importers:
   .:
     dependencies:
       '@cad0p/napkin':
-        specifier: ^0.13.2
+        specifier: ^0.13.2 || ^0.14.0
         version: 0.13.2
       '@earendil-works/pi-coding-agent':
         specifier: '>=0.74.0'
