@@ -5,7 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [calver-released]
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+**Onboarding + agent guidance overhaul:**
+
+- **No-vault sessions are now self-documenting**: when napkin can't resolve a vault (napkin ≥ 0.14), session start surfaces napkin's actionable message in the TUI and into agent context from turn 1 — `napkin init`, `--vault <path>`, or the global config in `~/.config/napkin/config.json` — and the status line shows `napkin: no vault`. The kb tools keep working the same once a vault exists.
+- **Vault usage mandate moved to the system prompt** (`before_agent_start`): agents are told to consult the vault via kb_search before answering, only when a vault resolves.
+- The napkin SKILL and README document the new resolution semantics (no auto-create, `napkin init` registers the machine default).
+- Requires napkin ≥ 0.14 for the no-vault guidance path (the dependency range `^0.13.2 || ^0.14.0` picks it up automatically); everything else works on 0.13.x.
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🚀 Features
