@@ -154,6 +154,26 @@ describe("napkin steering plugin — engine wiring", () => {
     expect(result?.block).toBe(true);
   });
 
+  test("dynamic cd with a vault as ambient cwd still blocks (no fallback-to-ambient regression)", async () => {
+    // Pins the fail-closed property against a hypothetical walker
+    // regression that falls back to the ambient session cwd on
+    // dynamic `cd`: with a real vault as ambient cwd, such a
+    // fallback would exempt the commit and fail OPEN. The walker
+    // today resolves `cd "$TARGET"` to the "unknown" sentinel, so
+    // the exemption does not match and the guard fires.
+    const vault = makeTmpDir();
+    fs.mkdirSync(path.join(vault, ".napkin"));
+    const harness = buildHarness("main");
+
+    const result = await harness.evaluate(
+      bashEvent('cd "$TARGET" && git commit -m x'),
+      makeCtx(vault),
+      0,
+    );
+    expect(result).toBeDefined();
+    expect(result?.block).toBe(true);
+  });
+
   test("no exemption-orphan or error-class diagnostics (targets exist)", () => {
     const harness = buildHarness("main");
     const problems = harness.diagnostics.filter(
