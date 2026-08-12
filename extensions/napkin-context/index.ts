@@ -170,6 +170,16 @@ function getNapkin(cwd: string): Napkin {
   return new Napkin(cwd);
 }
 
+function hasInjectedContext(sm: Pick<SessionManager, "getEntries">): boolean {
+  return sm
+    .getEntries()
+    .some(
+      (e) =>
+        e.type === "custom_message" &&
+        (e as { customType?: string }).customType === "napkin-context",
+    );
+}
+
 function getOverview(n: Napkin): { text: string; root: string } | null {
   try {
     // napkin >= 0.12.3 ships the fork's defaults (collapseDepth 2, maxRows
@@ -270,23 +280,30 @@ export default function (pi: ExtensionAPI) {
       // that never calls them never learns a vault is expected or how to
       // create/configure one.
       if (e instanceof Error && e.name === "VaultNotFoundError") {
-        sendCustomMessageWithFallback({
-          poster: pi,
-          sm: ctx.sessionManager as Partial<SessionManager>,
-          customType: "napkin-context",
-          content: e.message,
-          onFallbackFailure: (err) => {
-            if (ctx.hasUI) {
-              ctx.ui.notify(
-                `napkin-context: could not surface no-vault guidance (${
-                  err instanceof Error ? err.message : String(err)
-                })`,
-                "warning",
-              );
-            }
-          },
-        });
+        if (!hasInjectedContext(ctx.sessionManager)) {
+          sendCustomMessageWithFallback({
+            poster: pi,
+            sm: ctx.sessionManager as Partial<SessionManager>,
+            customType: "napkin-context",
+            content: e.message,
+            onFallbackFailure: (err) => {
+              if (ctx.hasUI) {
+                ctx.ui.notify(
+                  `napkin-context: could not surface no-vault guidance (${
+                    err instanceof Error ? err.message : String(err)
+                  })`,
+                  "warning",
+                );
+              }
+            },
+          });
+        }
         if (ctx.hasUI) {
+          // Unconditional on purpose — unlike the success path it cannot
+          // consult loadShowStatus(): no vault exists, so there is no vault
+          // config.json to read. The hint must render even when the user
+          // never configured showStatus, or nothing explains why no vault
+          // context was injected.
           ctx.ui.setStatus(
             "napkin",
             ctx.ui.theme.fg("dim", "napkin: no vault"),
@@ -302,13 +319,7 @@ export default function (pi: ExtensionAPI) {
 
     if (overview) {
       // Check if we already injected context in this session
-      const alreadyInjected = ctx.sessionManager
-        .getEntries()
-        .some(
-          (e) =>
-            e.type === "custom_message" &&
-            (e as { customType?: string }).customType === "napkin-context",
-        );
+      const alreadyInjected = hasInjectedContext(ctx.sessionManager);
 
       if (!alreadyInjected) {
         // Send via the public message event path (message_start) so the TUI

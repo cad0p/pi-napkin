@@ -151,7 +151,7 @@ Both extensions use napkin's built-in vault resolution. The resolution order is:
 
 1. **Local project vault** — walk up from cwd looking for `.napkin/` (or `.obsidian/.napkin/`)
 2. **Global fallback** — read `$XDG_CONFIG_HOME/napkin/config.json` (defaults to `~/.config/napkin/config.json`)
-3. **Error** — if neither exists, napkin fails with `VaultNotFoundError` (exit code 4) and an actionable message. It **never** creates a vault implicitly.
+3. **Error** — if neither exists, napkin >= 0.14 fails with `VaultNotFoundError` (exit code 4) and an actionable message; it **never** creates a vault implicitly (older versions still auto-create a bare vault at cwd).
 
 ```json
 // ~/.config/napkin/config.json
@@ -160,7 +160,7 @@ Both extensions use napkin's built-in vault resolution. The resolution order is:
 }
 ```
 
-Local project vaults take priority when present. No vault yet? Run `napkin init` in the directory you want as the vault root (see `napkin init --list` for templates) — the napkin-context extension surfaces a no-vault guidance message on session start when the global fallback is unset, so a fresh setup is self-documenting.
+Local project vaults take priority when present. No vault yet? Run `napkin init` in the directory you want as the vault root (see `napkin init --list` for templates) — the napkin-context extension surfaces a no-vault guidance message on session start when no vault resolves (no local project vault and no global fallback), so a fresh setup is self-documenting.
 
 ### Migrating from `~/.pi/agent/napkin.json`
 

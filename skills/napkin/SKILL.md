@@ -18,7 +18,7 @@ Before any command runs, napkin picks a vault in this order:
 1. **`--vault <path>`** flag, if supplied.
 2. **Nearest ancestor with `.napkin/`** (or `.obsidian/.napkin/`) walking up from cwd.
 3. **Global fallback** — `vault` field in `$XDG_CONFIG_HOME/napkin/config.json` (defaults to `~/.config/napkin/config.json`).
-4. **Error** — if none of the above exists, commands fail with `VaultNotFoundError` (exit code 4) and an actionable message. napkin **never** creates a vault implicitly.
+4. **Error** — if none of the above exists, napkin >= 0.14 commands fail with `VaultNotFoundError` (exit code 4) and an actionable message: napkin **never** creates a vault implicitly (older versions still auto-create a bare vault as a last resort).
 
 ### First-time setup
 
