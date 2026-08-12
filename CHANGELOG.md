@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.7.0] - 2026-08-12
 
 <!-- USER-EDITABLE SECTION START -->
 **Onboarding + agent guidance overhaul:**
