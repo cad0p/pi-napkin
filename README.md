@@ -162,6 +162,44 @@ Both extensions use napkin's built-in vault resolution. The resolution order is:
 
 Local project vaults take priority when present. No vault yet? Run `napkin init` in the directory you want as the vault root (see `napkin init --list` for templates) — the napkin-context extension surfaces a no-vault guidance message on session start when no vault resolves (no local project vault and no global fallback), so a fresh setup is self-documenting.
 
+## Steering integration
+
+[pi-steering](https://github.com/cad0p/pi-steering) blocks direct commits to protected branches by default (`no-main-commit` / `no-main-commit-github` from the git plugin). The napkin workflow legitimately commits + pushes to `main` inside vaults — note edits and the distill pipeline's scratch worktrees — so pi-napkin ships a **steering plugin** that carves those guards out for napkin vaults:
+
+```bash
+pi install npm:@cad0p/pi-napkin
+```
+
+Then make `@cad0p/pi-napkin` resolvable from your steering config. For the global config (`~/.pi/agent/steering/`, or wherever `<agentDir>/steering/` lives):
+
+```bash
+cd ~/.pi/agent/steering
+pnpm add -D @cad0p/pi-napkin   # or: npm i -D @cad0p/pi-napkin
+```
+
+And declare the plugin next to the git plugin:
+
+```ts
+// <agentDir>/steering/index.ts (global layer)
+import { defineConfig } from "@cad0p/pi-steering";
+import gitPlugin from "@cad0p/pi-steering/plugins/git";
+import napkinSteeringPlugin from "@cad0p/pi-napkin/steering";
+
+export default defineConfig({
+  plugins: [gitPlugin, napkinSteeringPlugin],
+});
+```
+
+Requirements and semantics:
+
+- **pi-steering ≥ 0.2.0-20260812.0** — the exemption registry landed in the 20260812 prerelease; stable 0.2.0 predates it.
+- **`gitPlugin` MUST stay listed** — the exemptions target the git plugin's rule names; a missing target produces `exemption-orphan` warnings with no carve-out.
+- **Zero path config** — a read-only walk-up from the command's effective cwd detects the vault by its `.napkin/` (or `.obsidian/.napkin/`) marker, mirroring napkin's own vault resolution. Goldmine, distill scratch worktrees under `~/.cache/napkin-distill/`, and future vaults are all covered automatically — no `VAULT_DIRS` to maintain.
+- **Read-only** — the predicate never creates anything (no bare-vault fallback, no global-config fallback), and unknown walker cwd never exempts: the guard still fires (strict fail-closed).
+- **Accumulates** — exemptions union across plugins and config layers, so other tools can carve the same guards for other repo types without touching this config.
+
+If you previously hand-rolled the carve-out (spread-and-extend rule copies with `not: { cwd: VAULT_DIRS }`, or config-layer `exemptions` with path patterns), delete those and keep only `plugins: [gitPlugin, napkinSteeringPlugin]`.
+
 ### Migrating from `~/.pi/agent/napkin.json`
 
 If you previously configured your vault in `~/.pi/agent/napkin.json`, move it to the new location:

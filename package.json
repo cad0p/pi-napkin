@@ -3,6 +3,12 @@
   "version": "0.7.0",
   "description": "\ud83d\udcdc Napkin integration for pi \u2014 vault context, knowledge tools, and automatic distillation with git-worktree concurrency safety",
   "type": "module",
+  "exports": {
+    "./steering": {
+      "types": "./extensions/steering/index.ts",
+      "import": "./extensions/steering/index.ts"
+    }
+  },
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org"
@@ -58,6 +64,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.3.14",
+    "@cad0p/pi-steering": "0.2.0-20260812.0",
     "@types/node": "^22.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.8.0",
