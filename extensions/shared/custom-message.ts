@@ -1,4 +1,7 @@
-import type { ExtensionAPI, SessionManager } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  SessionManager,
+} from "@earendil-works/pi-coding-agent";
 
 export interface SendCustomMessageWithFallbackOptions {
   /** The extension API whose `sendMessage` is fire-and-forget (void). */

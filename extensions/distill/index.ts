@@ -1812,7 +1812,6 @@ export function formatOverlapNotice(overlapFiles: string[]): string {
   );
 }
 
-
 /**
  * Pure helper for the POST-CONV-5 outcome-sidecar dispatch. Maps the
  * wrapper's exit-0 outcome class (or its absence) to the UI severity +
