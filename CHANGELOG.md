@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.0] - 2026-08-12
+
+<!-- USER-EDITABLE SECTION START -->
+**Onboarding + agent guidance overhaul:**
+
+- **No-vault sessions are now self-documenting**: when napkin can't resolve a vault (napkin ≥ 0.14), session start surfaces napkin's actionable message in the TUI and into agent context from turn 1 — `napkin init`, `--vault <path>`, or the global config in `~/.config/napkin/config.json` — and the status line shows `napkin: no vault`. The kb tools keep working the same once a vault exists.
+- **Vault usage mandate moved to the system prompt** (`before_agent_start`): agents are told to consult the vault via kb_search before answering, only when a vault resolves.
+- The napkin SKILL and README document the new resolution semantics (no auto-create, `napkin init` registers the machine default).
+- Requires napkin ≥ 0.14 for the no-vault guidance path (the dependency range `^0.13.2 || ^0.14.0` picks it up automatically); everything else works on 0.13.x.
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(extension)* Vault usage mandate moves to system prompt via before_agent_start ([#68](https://github.com/cad0p/pi-napkin/pull/68))
+- *(extension)* Surface no-vault guidance on session start ([#74](https://github.com/cad0p/pi-napkin/pull/74))
+
+### 🐛 Bug Fixes
+
+- *(extension)* Deliver custom messages via pi.sendMessage so they render live in the TUI ([#71](https://github.com/cad0p/pi-napkin/pull/71))
+
+### ⚙️ Miscellaneous Tasks
+
+- *(changelog)* Drop stale duplicate [calver-released] block + temp validator disable ([#66](https://github.com/cad0p/pi-napkin/pull/66))
+- Re-enable validate-package-version ([#67](https://github.com/cad0p/pi-napkin/pull/67))
+
+
 ## [0.6.6] - 2026-08-11
 
 <!-- USER-EDITABLE SECTION START -->
