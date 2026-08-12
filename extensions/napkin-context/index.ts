@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { sendCustomMessageWithFallback } from "../shared/custom-message";
 
 function loadShowStatus(vaultPath: string): boolean {
   const configPath = path.join(vaultPath, "config.json");
@@ -291,36 +292,22 @@ export default function (pi: ExtensionAPI) {
         // the message into agent state — the overview participates in LLM
         // context by design, even where the TUI event is not subscribed yet
         // (startup path).
-        try {
-          pi.sendMessage({
-            customType: "napkin-context",
-            content: overview.text,
-            display: true,
-          });
-        } catch (err) {
-          // Graceful degradation: if the event path is unavailable, fall back
-          // to a direct session manager append (visible to the model, but not
-          // re-rendered in the TUI on session replacement).
-          const sm = ctx.sessionManager as Partial<SessionManager>;
-          if (typeof sm.appendCustomMessageEntry === "function") {
-            try {
-              sm.appendCustomMessageEntry(
-                "napkin-context",
-                overview.text,
-                true,
+        sendCustomMessageWithFallback({
+          poster: pi,
+          sm: ctx.sessionManager as Partial<SessionManager>,
+          customType: "napkin-context",
+          content: overview.text,
+          onFallbackFailure: (err) => {
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                `napkin-context: could not inject vault overview (${
+                  err instanceof Error ? err.message : String(err)
+                })`,
+                "warning",
               );
-            } catch (err2) {
-              if (ctx.hasUI) {
-                ctx.ui.notify(
-                  `napkin-context: could not inject vault overview (${
-                    err2 instanceof Error ? err2.message : String(err2)
-                  })`,
-                  "warning",
-                );
-              }
             }
-          }
-        }
+          },
+        });
       }
     }
 

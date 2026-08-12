@@ -12,6 +12,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { sendCustomMessageWithFallback } from "../shared/custom-message";
 import {
   countTrackedFiles,
   ensureVaultReadyForDistill,
@@ -966,8 +967,10 @@ export default function (pi: ExtensionAPI) {
    *      `lastDistillCompletionMessageCursor` to current end and extract
    *      write-class file ops (reuses `extractFileOpsFromMessage` via a
    *      slice-bounded `SessionEntriesSource` adapter).
-   *   3. Intersect. If non-empty, post via `pi.sendMessage` a custom
-   *      message with `customType: "napkin-distill-overlap"`.
+   *   3. Intersect. If non-empty, post a custom message with
+   *      `customType: "napkin-distill-overlap"` via the shared
+   *      `sendCustomMessageWithFallback` helper (see
+   *      extensions/shared/custom-message.ts).
    *   4. Update `lastDistillCompletionMessageCursor` to the current end
    *      of the entries array — even when overlap is empty — so the
    *      next completion only walks new entries.
@@ -1020,33 +1023,20 @@ export default function (pi: ExtensionAPI) {
 
     if (overlap.length === 0) return;
 
-    // Post the notice via the public sendMessage API (fire-and-forget, void):
-    // in the idle case sendCustomMessage appends the entry to the session
-    // manager AND emits message_start, so the TUI renders the notice live. A
-    // direct sessionManager.appendCustomMessageEntry is only picked up by the
-    // next full chat rebuild (e.g. /reload) — mid-session appends never
-    // re-render the chat, so overlap notices were effectively invisible until
-    // then. (Verified empirically 2026-08-11: direct mid-session append
-    // invisible in TUI, sendMessage renders immediately.)
-    //
-    // Divergences to be aware of:
-    // - While the parent agent is streaming, sendMessage routes to
-    //   `agent.steer()`: the notice is drained into the running turn, the
-    //   agent runs an extra assistant response, and the TUI render + session
-    //   append are deferred until drain — which lands after the cursor was
-    //   advanced above, so a distill spawned in between forks a session
-    //   without the notice (harmless). No extension-visible `isStreaming`
-    //   exists to avoid this; best-effort by design.
-    // - If the spawning session was replaced (e.g. /new) while the distill
-    //   ran, the extension runtime is invalidated and sendMessage throws
-    //   synchronously; `postOverlapNoticeViaSendMessage` falls back to a
-    //   direct append on the captured session manager (surfaces on the next
-    //   rebuild, e.g. resume).
-    postOverlapNoticeViaSendMessage(
-      pi,
-      ctx.sessionManager as Partial<SessionManager>,
-      formatOverlapNotice(overlap),
-    );
+    // Post the notice via the shared sendCustomMessageWithFallback helper
+    // (pi.sendMessage primary, direct-append fallback) so the TUI renders it
+    // live. See extensions/shared/custom-message.ts for the streaming
+    // steer divergence (deferred render/append after the cursor advanced)
+    // and the invalidated-runtime fallback (e.g. /new mid-distill).
+    // (Verified empirically 2026-08-11: direct mid-session append invisible
+    // in TUI, sendMessage renders immediately.)
+    sendCustomMessageWithFallback({
+      poster: pi,
+      sm: ctx.sessionManager as Partial<SessionManager>,
+      customType: "napkin-distill-overlap",
+      content: formatOverlapNotice(overlap),
+      display: true, // display: surface in TUI so the user sees what happened
+    });
   }
 
   /**
@@ -1822,50 +1812,6 @@ export function formatOverlapNotice(overlapFiles: string[]): string {
   );
 }
 
-/**
- * Post the distill overlap notice via pi's public `sendMessage` API
- * (fire-and-forget, void) so the TUI renders it live, falling back to a
- * direct session-manager append when `sendMessage` throws — e.g. when the
- * spawning session's runtime was invalidated by a session switch
- * (e.g. /new) while the distill ran: `assertActive()` throws synchronously, the
- * fallback appends on the captured session manager, which keeps working and
- * surfaces on the next chat rebuild (e.g. resume).
- *
- * Best-effort by design: never throws, never blocks distill bookkeeping.
- * Exported for unit tests; production wiring lives in
- * `postOverlapNoticeOnCompletion` inside the extension factory.
- */
-export function postOverlapNoticeViaSendMessage(
-  poster: {
-    sendMessage(message: {
-      customType: string;
-      content: string;
-      display: boolean;
-    }): void;
-  },
-  sm: Partial<SessionManager> | undefined,
-  notice: string,
-): void {
-  try {
-    poster.sendMessage({
-      customType: "napkin-distill-overlap",
-      content: notice,
-      display: true, // display: surface in TUI so the user sees what happened
-    });
-  } catch {
-    if (sm && typeof sm.appendCustomMessageEntry === "function") {
-      try {
-        sm.appendCustomMessageEntry(
-          "napkin-distill-overlap",
-          notice,
-          true, // display: surface in TUI so the user sees what happened
-        );
-      } catch {
-        // best-effort; never throws
-      }
-    }
-  }
-}
 
 /**
  * Pure helper for the POST-CONV-5 outcome-sidecar dispatch. Maps the

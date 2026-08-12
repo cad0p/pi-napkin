@@ -14,11 +14,11 @@
  * `sendMessage` is fire-and-forget (void). It emits `message_start` so
  * the TUI renders the notice live, and it appends the entry via
  * `SessionManager.appendCustomMessageEntry` internally — so that method
- * is still load-bearing here (and remains napkin-context's fallback
- * path). A direct `sm.appendCustomMessageEntry` from the extension
- * would leave the notice invisible in the chat until the next full
- * rebuild (e.g. /reload), which is why the notice posts via
- * `sendMessage` instead.
+ * is still load-bearing here (it is also the shared fallback path in
+ * `extensions/shared/custom-message.ts`). A direct
+ * `sm.appendCustomMessageEntry` from the extension would leave the
+ * notice invisible in the chat until the next full rebuild (e.g.
+ * /reload), which is why the notice posts via `sendMessage` instead.
  *
  * This test pins the upstream surface so a pi version bump that
  * renames / removes / re-shapes either API fires a clean "review and
