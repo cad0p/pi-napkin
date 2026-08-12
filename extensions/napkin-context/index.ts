@@ -11,6 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
+import { sendCustomMessageWithFallback } from "../shared/custom-message";
 
 function loadShowStatus(vaultPath: string): boolean {
   const configPath = path.join(vaultPath, "config.json");
@@ -169,6 +170,16 @@ function getNapkin(cwd: string): Napkin {
   return new Napkin(cwd);
 }
 
+function hasInjectedContext(sm: Pick<SessionManager, "getEntries">): boolean {
+  return sm
+    .getEntries()
+    .some(
+      (e) =>
+        e.type === "custom_message" &&
+        (e as { customType?: string }).customType === "napkin-context",
+    );
+}
+
 function getOverview(n: Napkin): { text: string; root: string } | null {
   try {
     // napkin >= 0.12.3 ships the fork's defaults (collapseDepth 2, maxRows
@@ -261,7 +272,44 @@ export default function (pi: ExtensionAPI) {
     let n: Napkin;
     try {
       n = getNapkin(ctx.cwd);
-    } catch {
+    } catch (e) {
+      // No usable vault (none found, or a refused legacy-layout vault).
+      // Surface napkin's own actionable error to BOTH the user (TUI) and the
+      // agent (context), so the first session is self-documenting: without
+      // this, the kb_* tools are the only discovery path, and a session
+      // that never calls them never learns a vault is expected or how to
+      // create/configure one.
+      if (e instanceof Error && e.name === "VaultNotFoundError") {
+        if (!hasInjectedContext(ctx.sessionManager)) {
+          sendCustomMessageWithFallback({
+            poster: pi,
+            sm: ctx.sessionManager as Partial<SessionManager>,
+            customType: "napkin-context",
+            content: e.message,
+            onFallbackFailure: (err) => {
+              if (ctx.hasUI) {
+                ctx.ui.notify(
+                  `napkin-context: could not surface no-vault guidance (${
+                    err instanceof Error ? err.message : String(err)
+                  })`,
+                  "warning",
+                );
+              }
+            },
+          });
+        }
+        if (ctx.hasUI) {
+          // Unconditional on purpose — unlike the success path it cannot
+          // consult loadShowStatus(): no vault exists, so there is no vault
+          // config.json to read. The hint must render even when the user
+          // never configured showStatus, or nothing explains why no vault
+          // context was injected.
+          ctx.ui.setStatus(
+            "napkin",
+            ctx.ui.theme.fg("dim", "napkin: no vault"),
+          );
+        }
+      }
       return;
     }
 
@@ -271,30 +319,26 @@ export default function (pi: ExtensionAPI) {
 
     if (overview) {
       // Check if we already injected context in this session
-      const alreadyInjected = ctx.sessionManager
-        .getEntries()
-        .some(
-          (e) =>
-            e.type === "custom_message" &&
-            (e as { customType?: string }).customType === "napkin-context",
-        );
+      const alreadyInjected = hasInjectedContext(ctx.sessionManager);
 
       if (!alreadyInjected) {
-        // pi's ExtensionContext narrows sessionManager to
-        // ReadonlySessionManager, which omits mutation methods. At runtime
-        // it's always the full SessionManager, but if pi ever wraps the
-        // instance in a genuine readonly proxy the mutation method will
-        // either be absent or throw. Guard both the duck-type and the
-        // call so the worst-case is a degraded (no context injection)
-        // session, not a fatal extension error. (R2-2)
-        const sm = ctx.sessionManager as Partial<SessionManager>;
-        if (typeof sm.appendCustomMessageEntry === "function") {
-          try {
-            sm.appendCustomMessageEntry("napkin-context", overview.text, true);
-          } catch (err) {
-            // Graceful degradation: pi may have tightened the readonly
-            // contract at runtime. Surface once, then proceed without
-            // context injection.
+        // Send via the public message event path (message_start) so the TUI
+        // renders the custom message live. A direct sessionManager append is
+        // only picked up by the next full chat rebuild — on /new the chat is
+        // rebuilt BEFORE session_start handlers run, so a direct append would
+        // leave the vault overview invisible in the new session's chat (the
+        // stale line survives as terminal pixels until the next repaint).
+        // pi.sendMessage is fire-and-forget (void). In the idle path it
+        // appends the entry to the session manager synchronously AND pushes
+        // the message into agent state — the overview participates in LLM
+        // context by design, even where the TUI event is not subscribed yet
+        // (startup path).
+        sendCustomMessageWithFallback({
+          poster: pi,
+          sm: ctx.sessionManager as Partial<SessionManager>,
+          customType: "napkin-context",
+          content: overview.text,
+          onFallbackFailure: (err) => {
             if (ctx.hasUI) {
               ctx.ui.notify(
                 `napkin-context: could not inject vault overview (${
@@ -303,8 +347,8 @@ export default function (pi: ExtensionAPI) {
                 "warning",
               );
             }
-          }
-        }
+          },
+        });
       }
     }
 

@@ -12,6 +12,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
+import { sendCustomMessageWithFallback } from "../shared/custom-message";
 import {
   countTrackedFiles,
   ensureVaultReadyForDistill,
@@ -966,8 +967,10 @@ export default function (pi: ExtensionAPI) {
    *      `lastDistillCompletionMessageCursor` to current end and extract
    *      write-class file ops (reuses `extractFileOpsFromMessage` via a
    *      slice-bounded `SessionEntriesSource` adapter).
-   *   3. Intersect. If non-empty, post an `appendCustomMessageEntry`
-   *      with `customType: "napkin-distill-overlap"`.
+   *   3. Intersect. If non-empty, post a custom message with
+   *      `customType: "napkin-distill-overlap"` via the shared
+   *      `sendCustomMessageWithFallback` helper (see
+   *      extensions/shared/custom-message.ts).
    *   4. Update `lastDistillCompletionMessageCursor` to the current end
    *      of the entries array — even when overlap is empty — so the
    *      next completion only walks new entries.
@@ -980,7 +983,7 @@ export default function (pi: ExtensionAPI) {
    * `appendSystemPrompt` mechanism.
    *
    * Failure modes are all silent (best-effort): vault resolution fail,
-   * git fail, missing startSha, missing SessionManager mutation method.
+   * git fail, missing startSha, sendMessage API unavailable.
    * Completion bookkeeping must never block the next distill.
    */
   function postOverlapNoticeOnCompletion(
@@ -1020,23 +1023,20 @@ export default function (pi: ExtensionAPI) {
 
     if (overlap.length === 0) return;
 
-    // Post the notice. SessionManager's mutation methods are not on the
-    // public ReadonlySessionManager type that pi exposes via
-    // ExtensionContext, so we cast through Partial<SessionManager> the
-    // same way `napkin-context` does — graceful degradation if pi ever
-    // tightens the readonly contract at runtime.
-    const sm = ctx.sessionManager as Partial<SessionManager>;
-    if (typeof sm.appendCustomMessageEntry === "function") {
-      try {
-        sm.appendCustomMessageEntry(
-          "napkin-distill-overlap",
-          formatOverlapNotice(overlap),
-          true, // display: surface in TUI so the user sees what happened
-        );
-      } catch {
-        // best-effort; cursor was already advanced above
-      }
-    }
+    // Post the notice via the shared sendCustomMessageWithFallback helper
+    // (pi.sendMessage primary, direct-append fallback) so the TUI renders it
+    // live. See extensions/shared/custom-message.ts for the streaming
+    // steer divergence (deferred render/append after the cursor advanced)
+    // and the invalidated-runtime fallback (e.g. /new mid-distill).
+    // (Verified empirically 2026-08-11: direct mid-session append invisible
+    // in TUI, sendMessage renders immediately.)
+    sendCustomMessageWithFallback({
+      poster: pi,
+      sm: ctx.sessionManager as Partial<SessionManager>,
+      customType: "napkin-distill-overlap",
+      content: formatOverlapNotice(overlap),
+      display: true, // display: surface in TUI so the user sees what happened
+    });
   }
 
   /**
@@ -1936,7 +1936,7 @@ export function formatOutcomeNotification(args: {
  *   1. Persist the new cursor (`newCursor`) into closure state, even
  *      when overlap is empty — otherwise the next completion re-walks
  *      the same window.
- *   2. If overlap is non-empty, post it via `appendCustomMessageEntry`
+ *   2. If overlap is non-empty, post it via `pi.sendMessage`
  *      (or otherwise notify the agent).
  *
  * The session walk is bounded to `entries.slice(cursor)` so each

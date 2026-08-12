@@ -1,34 +1,34 @@
 /**
- * Meta-test: pin pi's `SessionManager.appendCustomMessageEntry` method.
+ * Meta-test: pin pi's `sendMessage` extension API and its underlying
+ * `SessionManager.appendCustomMessageEntry` method.
  *
  * The per-distill-completion overlap notice mechanism (R7-PERF-2)
- * posts to the parent session via:
+ * posts to the parent session via the public extension API:
  *
- *   sm.appendCustomMessageEntry(
- *     "napkin-distill-overlap",
- *     formatOverlapNotice(overlap),
- *     true, // display
- *   );
+ *   pi.sendMessage({
+ *     customType: "napkin-distill-overlap",
+ *     content: formatOverlapNotice(overlap),
+ *     display: true,
+ *   });
  *
- * `appendCustomMessageEntry` is on `SessionManager` but NOT on the
- * `ReadonlySessionManager` type that pi exposes via `ExtensionContext`.
- * We cast through `Partial<SessionManager>` and gate the call on
- * `typeof sm.appendCustomMessageEntry === "function"` (matching the
- * `napkin-context` extension's pattern). That runtime guard means an
- * upstream rename or removal of this method would disable the overlap
- * notice mechanism entirely with ZERO production signal — the agent
- * just stops getting overlap warnings.
+ * `sendMessage` is fire-and-forget (void). It emits `message_start` so
+ * the TUI renders the notice live, and it appends the entry via
+ * `SessionManager.appendCustomMessageEntry` internally — so that method
+ * is still load-bearing here (it is also the shared fallback path in
+ * `extensions/shared/custom-message.ts`). A direct
+ * `sm.appendCustomMessageEntry` from the extension would leave the
+ * notice invisible in the chat until the next full rebuild (e.g.
+ * /reload), which is why the notice posts via `sendMessage` instead.
  *
  * This test pins the upstream surface so a pi version bump that
- * renames / removes / re-shapes the method fires a clean "review and
+ * renames / removes / re-shapes either API fires a clean "review and
  * resync" failure rather than silently disabling overlap detection.
  *
- * Mirrors `session-touched-files.version-check.test.ts` for pi's
- * `extractFileOpsFromMessage` internal.
- *
  * If this test fails after a pi version bump:
- *   1. Find the new method name / signature in
- *      node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.d.ts.
+ *   1. Find the new API surface in
+ *      node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts
+ *      (sendMessage) and dist/core/session-manager.d.ts
+ *      (appendCustomMessageEntry).
  *   2. Update `postOverlapNoticeOnCompletion` in extensions/distill/index.ts
  *      to match.
  *   3. Update this test's assertions.
@@ -64,7 +64,51 @@ const PI_SESSION_MANAGER_JS = join(
   "session-manager.js",
 );
 
-describe("pi appendCustomMessageEntry version pin (R7-PERF-2 / R8-CC-2)", () => {
+const PI_EXTENSION_TYPES_DTS = join(
+  __dirname,
+  "..",
+  "..",
+  "node_modules",
+  "@earendil-works",
+  "pi-coding-agent",
+  "dist",
+  "core",
+  "extensions",
+  "types.d.ts",
+);
+
+describe("pi sendMessage + appendCustomMessageEntry version pin (R7-PERF-2 / R8-CC-2)", () => {
+  test("pi-coding-agent still exposes extensions/types.d.ts at the expected path", () => {
+    expect(existsSync(PI_EXTENSION_TYPES_DTS)).toBe(true);
+  });
+
+  test("ExtensionAPI still declares `sendMessage` with a void return", () => {
+    const src = readFileSync(PI_EXTENSION_TYPES_DTS, "utf-8");
+    // Pin the member inside the ExtensionAPI interface itself: a bare
+    // toContain("sendMessage") would also match ReplacedSessionContext and
+    // ExtensionActions, so it wouldn't trip on an ExtensionAPI rename. The
+    // `): void` return pin catches a change to Promise<void> — the
+    // extension relies on fire-and-forget semantics (no await/.catch).
+    expect(src).toMatch(
+      /interface ExtensionAPI[\s\S]*?sendMessage<T = unknown>[\s\S]*?\): void;/,
+    );
+  });
+
+  test("SendMessageHandler is fire-and-forget (void) and accepts customType/content/display/details", () => {
+    const src = readFileSync(PI_EXTENSION_TYPES_DTS, "utf-8");
+    expect(src).toMatch(/export type SendMessageHandler = [\s\S]*?=> void;/);
+    // Field-name pin, order-independent: a cosmetic reorder of the Pick
+    // type-argument list must not trip the tripwire.
+    const alias = src.match(
+      /export type SendMessageHandler = ([\s\S]*?)=> void;/,
+    );
+    expect(alias).not.toBeNull();
+    if (alias) {
+      for (const field of ["customType", "content", "display", "details"]) {
+        expect(alias[1]).toContain(`"${field}"`);
+      }
+    }
+  });
   test("pi-coding-agent still exposes session-manager.d.ts at the expected path", () => {
     expect(existsSync(PI_SESSION_MANAGER_DTS)).toBe(true);
   });
