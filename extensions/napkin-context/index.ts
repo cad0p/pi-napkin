@@ -262,7 +262,37 @@ export default function (pi: ExtensionAPI) {
     let n: Napkin;
     try {
       n = getNapkin(ctx.cwd);
-    } catch {
+    } catch (e) {
+      // No usable vault (none found, or a refused legacy-layout vault).
+      // Surface napkin's own actionable error to BOTH the user (TUI) and the
+      // agent (context), so the first session is self-documenting: without
+      // this, the kb_* tools are the only discovery path, and a session
+      // that never calls them never learns a vault is expected or how to
+      // create/configure one.
+      if (e instanceof Error && e.name === "VaultNotFoundError") {
+        sendCustomMessageWithFallback({
+          poster: pi,
+          sm: ctx.sessionManager as Partial<SessionManager>,
+          customType: "napkin-context",
+          content: e.message,
+          onFallbackFailure: (err) => {
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                `napkin-context: could not surface no-vault guidance (${
+                  err instanceof Error ? err.message : String(err)
+                })`,
+                "warning",
+              );
+            }
+          },
+        });
+        if (ctx.hasUI) {
+          ctx.ui.setStatus(
+            "napkin",
+            ctx.ui.theme.fg("dim", "napkin: no vault"),
+          );
+        }
+      }
       return;
     }
 
