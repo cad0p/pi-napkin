@@ -24,6 +24,9 @@ importers:
       '@biomejs/biome':
         specifier: ^2.3.14
         version: 2.5.4
+      '@cad0p/pi-steering':
+        specifier: 0.2.0-20260812.0
+        version: 0.2.0-20260812.0(@earendil-works/pi-coding-agent@0.80.10(ws@8.21.1)(zod@4.4.3))
       '@types/node':
         specifier: ^22.0.0
         version: 22.20.1
@@ -209,6 +212,17 @@ packages:
   '@cad0p/napkin@0.13.2':
     resolution: {integrity: sha512-NVpXZ0fdRk9P0T3ZMipe29b1rpjlqfqOHqwILO2gfUDSOxS6h4wUp5425W7qxq4R5ku0MW/f1jXg/JzHLm9Ftw==}
     hasBin: true
+
+  '@cad0p/pi-steering@0.2.0-20260812.0':
+    resolution: {integrity: sha512-eYJurIqVhOxKj6U8tywqnFjB2pD4spoMyGx8FFRwcdwedyssMGSccUOSzS/VgZrkX33tw9IJLYmLjKbBj+zKwQ==}
+    engines: {node: '>=22'}
+    hasBin: true
+    peerDependencies:
+      '@earendil-works/pi-coding-agent': '*'
+
+  '@cad0p/unbash-walker@0.1.0':
+    resolution: {integrity: sha512-DVtmALxhJDd2PegCgQ8tPzd8kpb8WuILRhi5a1bTwJyrqb9GQTs6V3t3/SVogcNeoNY+AVdR4RPM+qv0bwTmbg==}
+    engines: {node: '>=22'}
 
   '@earendil-works/pi-agent-core@0.80.10':
     resolution: {integrity: sha512-nwnOR3SuLYGRFfyQm8ri4Nj5VGVAvAM9GuqQd3u7BUQj0d6hmD2F8w7OHAAjThE3CuySIdM+v8E22QJG6/RfCg==}
@@ -1283,6 +1297,10 @@ packages:
     engines: {node: '>=14.17'}
     hasBin: true
 
+  unbash@3.0.0:
+    resolution: {integrity: sha512-FeFPZ/WFT0mbRCuydiZzpPFlrYN8ZUpphQKoq4EeElVIYjYyGzPMxQR/simUwCOJIyVhpFk4RbtyO7RuMpMnHA==}
+    engines: {node: '>=14'}
+
   undici-types@6.21.0:
     resolution: {integrity: sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ==}
 
@@ -1662,6 +1680,16 @@ snapshots:
       sql.js: 1.14.1
     optionalDependencies:
       glimpseui: 0.3.7
+
+  '@cad0p/pi-steering@0.2.0-20260812.0(@earendil-works/pi-coding-agent@0.80.10(ws@8.21.1)(zod@4.4.3))':
+    dependencies:
+      '@cad0p/unbash-walker': 0.1.0
+      '@earendil-works/pi-coding-agent': 0.80.10(ws@8.21.1)(zod@4.4.3)
+      unbash: 3.0.0
+
+  '@cad0p/unbash-walker@0.1.0':
+    dependencies:
+      unbash: 3.0.0
 
   '@earendil-works/pi-agent-core@0.80.10(ws@8.21.1)(zod@4.4.3)':
     dependencies:
@@ -2582,6 +2610,8 @@ snapshots:
   typebox@1.1.38: {}
 
   typescript@5.9.3: {}
+
+  unbash@3.0.0: {}
 
   undici-types@6.21.0: {}
 
