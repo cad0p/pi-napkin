@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### 🚀 Features
 
 - *(extension)* Vault usage mandate moves to system prompt via before_agent_start ([#68](https://github.com/cad0p/pi-napkin/pull/68))
+- *(extension)* Surface no-vault guidance on session start ([#74](https://github.com/cad0p/pi-napkin/pull/74))
 
 ### 🐛 Bug Fixes
 
