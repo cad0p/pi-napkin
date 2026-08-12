@@ -12,6 +12,10 @@ All notable changes to this project will be documented in this file.
 
 - *(extension)* Vault usage mandate moves to system prompt via before_agent_start ([#68](https://github.com/cad0p/pi-napkin/pull/68))
 
+### 🐛 Bug Fixes
+
+- *(extension)* Deliver custom messages via pi.sendMessage so they render live in the TUI ([#71](https://github.com/cad0p/pi-napkin/pull/71))
+
 ### ⚙️ Miscellaneous Tasks
 
 - *(changelog)* Drop stale duplicate [calver-released] block + temp validator disable ([#66](https://github.com/cad0p/pi-napkin/pull/66))
