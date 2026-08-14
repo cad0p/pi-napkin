@@ -196,7 +196,8 @@ Requirements and semantics:
 
 - **pi-steering ≥ 0.2.0-20260812.0** — the exemption registry landed in the 20260812 prerelease; stable 0.2.0 predates it.
 - **`gitPlugin` MUST stay listed** — the exemptions target the git plugin's rule names; a missing target produces `exemption-orphan` warnings with no carve-out.
-- **Zero path config** — a read-only walk-up from the command's effective cwd detects the vault by its `.napkin/` (or `.obsidian/.napkin/`) marker, mirroring napkin's own vault resolution. Goldmine, distill scratch worktrees under `~/.cache/napkin-distill/`, and future vaults are all covered automatically — no `VAULT_DIRS` to maintain.
+- **Zero path config** — a read-only walk-up from the command's effective cwd detects the vault by its `.napkin/` (or `.obsidian/.napkin/`) marker, delegating to napkin's canonical `findAncestorVault`. Goldmine, distill scratch worktrees under `~/.cache/napkin-distill/`, and future vaults are all covered automatically — no `VAULT_DIRS` to maintain.
+- **napkin ≥ 0.14.0-20260814.0** — the compiled subpath imports `findAncestorVault` from `@cad0p/napkin` at runtime (stable 0.14.0 predates the export; `@cad0p/pi-napkin` declares the range, and the global steering config must resolve it).
 - **Read-only** — the predicate never creates anything (no bare-vault fallback, no global-config fallback), and unknown walker cwd never exempts: the guard still fires (strict fail-closed).
 - **Accumulates** — exemptions union across plugins and config layers, so other tools can carve the same guards for other repo types without touching this config.
 
