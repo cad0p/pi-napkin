@@ -190,6 +190,8 @@ export default defineConfig({
 });
 ```
 
+The `@cad0p/pi-napkin/steering` subpath ships compiled JS (`dist/steering`), so plain-node consumers (native type stripping, `node --test --experimental-strip-types`) need no jiti or loader. pi's own extension loader still resolves raw `.ts` paths via jiti, so the napkin extensions are unaffected.
+
 Requirements and semantics:
 
 - **pi-steering ≥ 0.2.0-20260812.0** — the exemption registry landed in the 20260812 prerelease; stable 0.2.0 predates it.

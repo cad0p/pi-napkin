@@ -1,4 +1,5 @@
 node_modules/
+dist/
 
 # pnpm is the package manager for local dev and CI. pnpm-lock.yaml is
 # committed for reproducibility (replaces the former bun.lock).

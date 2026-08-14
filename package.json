@@ -5,8 +5,8 @@
   "type": "module",
   "exports": {
     "./steering": {
-      "types": "./extensions/steering/index.ts",
-      "import": "./extensions/steering/index.ts"
+      "types": "./dist/steering/index.d.ts",
+      "import": "./dist/steering/index.js"
     }
   },
   "publishConfig": {
@@ -41,6 +41,7 @@
     "extensions/distill/distill-prompt.md",
     "extensions/**/README.md",
     "!extensions/**/test-fixtures/**",
+    "dist/steering",
     "skills",
     "README.md",
     "LICENSE"
@@ -55,6 +56,8 @@
     ]
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "pnpm build",
     "lint": "biome check extensions/",
     "lint:fix": "biome check --write extensions/",
     "typecheck": "tsc --noEmit",
