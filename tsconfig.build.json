@@ -1,0 +1,17 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "extensions/steering",
+    "outDir": "dist/steering",
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["extensions/steering/**/*.ts"],
+  "exclude": [
+    "extensions/steering/**/*.test.ts",
+    "extensions/steering/_test-helpers.ts"
+  ]
+}

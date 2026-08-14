@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 // Self-reference import: resolves through the package's own
-// `exports` map (`./steering` → `./extensions/steering/index.ts`),
+// `exports` map (`./steering` → `./dist/steering/index.js`),
 // exercising the real resolvability contract consumers get — the
 // same resolution the steering global config's node_modules uses.
 import napkinSteeringPlugin from "@cad0p/pi-napkin/steering";
