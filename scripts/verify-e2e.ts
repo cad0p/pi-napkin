@@ -958,8 +958,8 @@ function assertAutoInitPostConditions(
   const results: PostConditionResult[] = [];
 
   // .git/ presence — the bare-minimum invariant: auto-init refused to
-  // run, ran but failed silently, or skipped the path on a vault it
-  // misclassified as legacy-embedded.
+  // run, ran but failed silently, or skipped the path on a vault napkin
+  // refused to resolve (no vault handle).
   const gitDirExists = fs.existsSync(path.join(vaultPath, ".git"));
   results.push({
     name: "auto-init created <vault>/.git/",
@@ -1005,8 +1005,8 @@ function assertAutoInitPostConditions(
   // closes Issue #14 also has a fast-level shadow here: auto-init's
   // initial `git add .` pass should have staged config.json into the
   // first commit. If it didn't, the next `worktree add HEAD` won't
-  // copy config.json into the worktree and napkin will fall back to
-  // legacy-embedded layout.
+  // copy config.json into the worktree and napkin inside the worktree
+  // resolves the real vault instead.
   const lsConfig = spawnSync(
     "git",
     ["-C", vaultPath, "ls-files", "--error-unmatch", ".napkin/config.json"],

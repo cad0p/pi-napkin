@@ -970,8 +970,7 @@ export function spawnDistillInWorktree(
 
   // Error dir lives on the MAIN vault (not in the worktree — worktrees are
   // removed on cleanup, which would lose the logs). Resolve via Napkin's
-  // configPath so legacy (~/.napkin) and new (<content>/.napkin) layouts
-  // both work.
+  // configPath (wherever it lives).
   const errorDir = resolveDistillErrorDir(vault);
   fs.mkdirSync(errorDir, { recursive: true });
 

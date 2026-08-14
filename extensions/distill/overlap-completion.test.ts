@@ -188,7 +188,7 @@ describe("getDistillTouchedFilesPostSquash (R7-PERF-2)", () => {
     fs.rmSync(vault, { recursive: true, force: true });
   });
 
-  test("undefined startSha: returns empty (legacy meta fallback)", () => {
+  test("undefined startSha: returns empty (startSha-less meta fallback)", () => {
     const out = getDistillTouchedFilesPostSquash(vault, undefined);
     expect(out).toEqual([]);
   });

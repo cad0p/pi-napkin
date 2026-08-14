@@ -254,8 +254,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     expect(call.args[5]).not.toContain("{{branchName}}");
     expect(call.args[5]).not.toContain("{{defaultBranch}}");
     // errorDir lives under Napkin's configPath — may be either `<vault>/.napkin`
-    // (content layout) or `~/.napkin` (legacy). Just assert it ends with
-    // `distill/errors`.
+    // or `~/.napkin`. Just assert it ends with `distill/errors`.
     expect(call.args[6].endsWith(path.join("distill", "errors"))).toBe(true);
     // Empty model string when model is omitted.
     expect(call.args[7]).toBe("");
@@ -836,9 +835,9 @@ describe("distill-wrapper.sh (integration)", () => {
   });
 
   // R12-CC-3 + R12-SC-5: meta.json missing startSha must hard-fail
-  // rather than silently degrading to the legacy --cached path that
-  // dropped pi-self-committed content (POST-CONV-1; real failure:
-  // dropped commit a13e8b1).
+  // rather than silently degrading to the --cached path that dropped
+  // pi-self-committed content (POST-CONV-1; real failure: dropped
+  // commit a13e8b1).
   test("meta.json without startSha hard-fails with diagnostic (R12-CC-3, R12-SC-5)", () => {
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,

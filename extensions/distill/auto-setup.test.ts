@@ -13,7 +13,6 @@ import {
   GITIGNORE_LINES,
   type HealthLevel,
   isLineInsideBlock,
-  LEGACY_EMBEDDED_LAYOUT_ERROR,
   parseCheckIgnoreVerbose,
   parseLiveWorktreeBranches,
   parseManagedBlockRange,
@@ -87,8 +86,7 @@ describe("ensureVaultReadyForDistill", () => {
     process.env.GIT_CONFIG_VALUE_0 = "false";
     try {
       // Subdir layout: configPath is a distinct path from contentPath.
-      // The legacy-embedded-layout check compares string equality only;
-      // the path doesn't need to exist on disk for the happy-path tests.
+      // The path doesn't need to exist on disk for the happy-path tests.
       return ensureVaultReadyForDistill(
         {
           contentPath: vault,
@@ -424,67 +422,6 @@ describe("ensureVaultReadyForDistill", () => {
     // top of it.
     expect(log.length).toBe(1);
     expect(log[0]).toContain("napkin: scaffold auto-distill git config");
-  });
-
-  // --- legacy-embedded-layout refusal --------------------------------------
-  //
-  // Worktree-based concurrency relies on napkin's `findVault` resolving
-  // cwd=worktree to the worktree itself. That only works for subdir-
-  // layout vaults (where `configPath !== contentPath` because the branch
-  // tracks a `.napkin/config.json`). Legacy embedded vaults have
-  // `configPath === contentPath` and no `.napkin/` subdir in the branch;
-  // distill writes would bypass the worktree silently. Auto-setup refuses
-  // here so the session_start handler can surface a migration notify.
-
-  test("legacy-embedded layout (configPath === contentPath) \u2192 refuses, returns legacyLayout", () => {
-    // Legacy vault: config.json lives alongside notes at the vault root,
-    // no `.napkin/` subdir. napkin resolves contentPath = configPath.
-    const r = ensureVaultReadyForDistill(
-      {
-        contentPath: vault,
-        configPath: vault,
-      },
-      "fast",
-    );
-    expect(r.error).toBe(LEGACY_EMBEDDED_LAYOUT_ERROR);
-    expect(r.legacyLayout).toEqual({ configPath: vault });
-    expect(r.initialized).toBe(false);
-    expect(r.scaffolded).toEqual([]);
-    expect(r.findings).toEqual([
-      {
-        kind: "error",
-        invariant: "subdir-layout",
-        message: expect.stringContaining("legacy embedded layout"),
-      },
-    ]);
-    // Must not have attempted git init — no `.git` dir in the vault.
-    expect(fs.existsSync(path.join(vault, ".git"))).toBe(false);
-  });
-
-  test("legacy-embedded layout refusal is atomic (does NOT write scaffolding files)", () => {
-    // Belt-and-braces: we must not write .gitignore on a legacy vault
-    // even if the caller later ignores the error. Otherwise a stale
-    // `.gitignore` would be the only artifact the user sees after a
-    // failed migration attempt.
-    const r = ensureVaultReadyForDistill(
-      {
-        contentPath: vault,
-        configPath: vault,
-      },
-      "fast",
-    );
-    expect(r.error).toBe(LEGACY_EMBEDDED_LAYOUT_ERROR);
-    expect(fs.existsSync(path.join(vault, ".gitignore"))).toBe(false);
-    expect(fs.existsSync(path.join(vault, ".gitattributes"))).toBe(false);
-  });
-
-  test("subdir layout (configPath distinct) bypasses the legacy check", () => {
-    // Sanity contrast: when configPath is distinct from contentPath,
-    // auto-setup proceeds normally (this is the normal happy path, pinned
-    // so a refactor of the detection can't flip the polarity).
-    const r = runSetup();
-    expect(r.error).toBeUndefined();
-    expect(r.legacyLayout).toBeUndefined();
   });
 
   test("on a healthy vault, both 'fast' and 'full' levels produce empty findings", () => {
@@ -972,8 +909,7 @@ describe("ensureVaultReadyForDistill", () => {
   //
   // Distill worktrees are checked out via `git worktree add HEAD`, which
   // copies only tracked files. An untracked `.napkin/config.json` never
-  // reaches the worktree, napkin's findVault falls back to legacy
-  // embedded layout, and the distill agent reports `Empty vault`. The
+  // reaches the worktree — the distill agent reports `Empty vault`. The
   // full-level check stages the file via the existing scaffolded[]
   // commit branch.
 
