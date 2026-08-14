@@ -48,9 +48,11 @@ declare global {
  * on an unresolvable cwd.
  *
  * No pi extension runtime involved: this module is a plain library
- * (only node builtins at runtime — all pi-steering imports are
- * type-only and erased by node's type stripping), so the steering
- * global config can import it without pi being involved.
+ * with a single non-builtin runtime import (`@cad0p/napkin`, itself
+ * a plain library shipping compiled dist JS — all pi-steering
+ * imports are type-only and erased by node's type stripping), so
+ * the steering global config can import it without pi being
+ * involved.
  *
  * Opt-in: nothing happens until the user lists this plugin next to
  * the git plugin:

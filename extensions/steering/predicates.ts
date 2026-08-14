@@ -1,56 +1,23 @@
 // SPDX-License-Identifier: MIT
 // Part of pi-napkin.
 
-import { existsSync, statSync } from "node:fs";
-import * as path from "node:path";
+import { findAncestorVault } from "@cad0p/napkin";
 import type { PredicateContext } from "@cad0p/pi-steering";
 
 /**
- * Directory marker that identifies a napkin vault (napkin's
- * `findAncestorVault` / `findVault` walk looks for the same name).
- */
-export const NAPKIN_MARKER = ".napkin";
-
-/**
- * Walk up from `startDir` looking for an existing vault's `.napkin/`
- * (or `.obsidian/.napkin/` for the nested layout) at any level.
- * Read-only structural mirror of napkin's `findAncestorVault`
- * (`@cad0p/napkin/src/utils/vault.ts`) — deliberately NOT imported
- * from `@cad0p/napkin`:
+ * Back-compat alias for napkin's canonical vault walk.
  *
- *   - napkin's exports map is `"." → ./src/index.ts` only, so a deep
- *     import is blocked, and `findAncestorVault` isn't re-exported
- *     from the root.
- *   - a steering predicate must NEVER touch the filesystem beyond
- *     read probes: no `createBareVault` fallback and no global-vault
- *     fallback (`$XDG_CONFIG_HOME/napkin/config.json`). A global
- *     fallback would make every cwd a "vault" and exempt the
- *     no-main-commit guards everywhere.
- *
- * Returns the directory that contains the marker, or null.
+ * The canonical implementation lives in napkin (`findAncestorVault`):
+ * a purely structural walk-up looking for the `.napkin/` marker (or
+ * `.obsidian/.napkin/` for the nested layout) at any level — no
+ * global-config fallback, no writes. Identical semantics to the
+ * mirror this package previously shipped, so the steering plugin's
+ * fail-closed posture is unchanged (a read-only probe that can
+ * never make an arbitrary cwd look like a vault). The alias
+ * preserves the public export name the global steering config
+ * imports (`isNapkinVaultDir` from `@cad0p/pi-napkin/steering`).
  */
-export function isNapkinVaultDir(startDir?: string): string | null {
-  let dir = path.resolve(startDir || process.cwd());
-  const root = path.parse(dir).root;
-
-  while (true) {
-    const napkinDir = path.join(dir, NAPKIN_MARKER);
-    if (existsSync(napkinDir) && statSync(napkinDir).isDirectory()) {
-      return dir;
-    }
-
-    const nestedNapkin = path.join(dir, ".obsidian", NAPKIN_MARKER);
-    if (existsSync(nestedNapkin) && statSync(nestedNapkin).isDirectory()) {
-      return dir;
-    }
-
-    const parent = path.dirname(dir);
-    if (parent === dir || dir === root) {
-      return null;
-    }
-    dir = parent;
-  }
-}
+export const isNapkinVaultDir = findAncestorVault;
 
 /**
  * `isNapkinVault` predicate handler — registered by the napkin
