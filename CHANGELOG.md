@@ -14,6 +14,10 @@ All notable changes to this project will be documented in this file.
 - *(steering)* Compile the steering subpath to dist/steering (closes #78) ([#79](https://github.com/cad0p/pi-napkin/pull/79))
 - *(steering)* De-dup the vault walk via napkin's findAncestorVault (fixes #80) ([#81](https://github.com/cad0p/pi-napkin/pull/81))
 
+### 🚜 Refactor
+
+- Import NAPKIN_MARKER from @cad0p/napkin, drop .napkin literals (fixes #82) ([#83](https://github.com/cad0p/pi-napkin/pull/83))
+
 
 ## [0.7.0] - 2026-08-12
 
