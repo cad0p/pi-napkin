@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
@@ -52,9 +53,9 @@ function createEnabledGitVault(intervalMinutes: number): string {
     path.join(dir, "seed.md"),
     "---\ntitle: seed\n---\n# seed\n",
   );
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       // Sibling-layout declaration so napkin resolves contentPath=<dir>
       // (where `.git` and notes live). Without it, napkin >= 0.14 refuses
@@ -80,9 +81,9 @@ function createEnabledNonGitVault(intervalMinutes: number): string {
     path.join(dir, "seed.md"),
     "---\ntitle: seed\n---\n# seed\n",
   );
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       // Sibling-layout declaration so napkin resolves contentPath=<dir>.
       vault: { root: ".." },
@@ -117,9 +118,9 @@ function createDisabledGitVault(): string {
     path.join(dir, "seed.md"),
     "---\ntitle: seed\n---\n# seed\n",
   );
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       vault: { root: ".." },
       // ENABLED=FALSE — user has explicitly opted out of auto-distill.
@@ -188,7 +189,7 @@ async function waitForWrapperDone(
       try {
         const metaPath = path.join(
           worktreePath,
-          ".napkin",
+          NAPKIN_MARKER,
           "distill",
           "meta.json",
         );

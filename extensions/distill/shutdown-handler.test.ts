@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { cleanupDistillWorktrees, withNapkinOnPath } from "./_test-helpers";
@@ -104,9 +105,9 @@ function createVault(
     git(["config", "user.name", "t"]);
     git(["config", "user.email", "t@e"]);
     fs.writeFileSync(path.join(dir, "seed.md"), "# seed\n");
-    fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(dir, ".napkin", "config.json"),
+      path.join(dir, NAPKIN_MARKER, "config.json"),
       JSON.stringify({
         // Sibling layout: notes live at <dir>/ (the vault content root),
         // config lives at <dir>/.napkin/. Without `vault.root`, napkin
@@ -122,9 +123,9 @@ function createVault(
     git(["add", "-A"]);
     git(["commit", "-q", "-m", "seed"]);
   } else {
-    fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(dir, ".napkin", "config.json"),
+      path.join(dir, NAPKIN_MARKER, "config.json"),
       JSON.stringify({
         vault: { root: ".." },
         distill: {
@@ -168,9 +169,9 @@ function createSession(dir: string): SessionManager {
  */
 function createLegacyVault(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-vault-"));
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       // NO `vault.root` key \u2014 napkin >= 0.14 refuses this layout.
       distill: { enabled: true, onShutdown: true, intervalMinutes: 60 },
@@ -704,7 +705,7 @@ describe("session_start handler — legacy-embedded vault is refused (silent ski
     // napkin >= 0.14 refuses cwd=<vault>/.napkin (config without
     // `vault.root`) with VaultNotFoundError, so `resolveDistillVault`
     // returns null and both handlers return early.
-    const cwd = path.join(vault, ".napkin");
+    const cwd = path.join(vault, NAPKIN_MARKER);
     const sm = SessionManager.create(cwd, cwd);
     sm.appendMessage({ role: "user", content: "hello" });
     sm.appendMessage({ role: "assistant", content: "hi" });

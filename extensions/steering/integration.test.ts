@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 // Self-reference import: resolves through the package's own
 // `exports` map (`./steering` → `./dist/steering/index.js`),
 // exercising the real resolvability contract consumers get — the
@@ -103,7 +104,7 @@ function buildHarness(branch: string): Harness {
 describe("napkin steering plugin — engine wiring", () => {
   test("commit inside a napkin vault is exempted (no block)", async () => {
     const vault = makeTmpDir();
-    fs.mkdirSync(path.join(vault, ".napkin"));
+    fs.mkdirSync(path.join(vault, NAPKIN_MARKER));
     const harness = buildHarness("main");
 
     const result = await harness.evaluate(
@@ -162,7 +163,7 @@ describe("napkin steering plugin — engine wiring", () => {
     // today resolves `cd "$TARGET"` to the "unknown" sentinel, so
     // the exemption does not match and the guard fires.
     const vault = makeTmpDir();
-    fs.mkdirSync(path.join(vault, ".napkin"));
+    fs.mkdirSync(path.join(vault, NAPKIN_MARKER));
     const harness = buildHarness("main");
 
     const result = await harness.evaluate(

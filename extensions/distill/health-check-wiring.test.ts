@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
@@ -57,9 +58,9 @@ function createSubdirVault(): string {
     path.join(dir, "seed.md"),
     "---\ntitle: seed\n---\n# seed\n",
   );
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       vault: { root: ".." },
       distill: { enabled: true, intervalMinutes: 60, onShutdown: true },
@@ -98,9 +99,9 @@ function createSubdirVaultWithUntrackedConfig(): string {
   git(["add", "seed.md"]);
   git(["commit", "-q", "-m", "seed"]);
   // Write config AFTER the seed commit so it stays untracked.
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       vault: { root: ".." },
       distill: { enabled: true, intervalMinutes: 60, onShutdown: true },
@@ -333,7 +334,13 @@ describe("per-spawn health-check wiring", () => {
       // (fast-level skips the tracking check).
       const lsBefore = spawnSync(
         "git",
-        ["-C", vault, "ls-files", "--error-unmatch", ".napkin/config.json"],
+        [
+          "-C",
+          vault,
+          "ls-files",
+          "--error-unmatch",
+          path.join(NAPKIN_MARKER, "config.json"),
+        ],
         { encoding: "utf-8" },
       );
       expect(lsBefore.status).not.toBe(0);
@@ -346,7 +353,13 @@ describe("per-spawn health-check wiring", () => {
       // Post-condition: config.json is now tracked.
       const lsAfter = spawnSync(
         "git",
-        ["-C", vault, "ls-files", "--error-unmatch", ".napkin/config.json"],
+        [
+          "-C",
+          vault,
+          "ls-files",
+          "--error-unmatch",
+          path.join(NAPKIN_MARKER, "config.json"),
+        ],
         { encoding: "utf-8" },
       );
       expect(lsAfter.status).toBe(0);
@@ -552,7 +565,7 @@ describe("per-spawn health-check wiring", () => {
     // user knows distill is off) and NO auto-init either.
     const vault = createSubdirVault();
     try {
-      const cfgPath = path.join(vault, ".napkin", "config.json");
+      const cfgPath = path.join(vault, NAPKIN_MARKER, "config.json");
       fs.writeFileSync(
         cfgPath,
         JSON.stringify({

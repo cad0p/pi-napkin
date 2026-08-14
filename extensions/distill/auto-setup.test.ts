@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
 import {
@@ -90,7 +91,7 @@ describe("ensureVaultReadyForDistill", () => {
       return ensureVaultReadyForDistill(
         {
           contentPath: vault,
-          configPath: path.join(vault, ".napkin"),
+          configPath: path.join(vault, NAPKIN_MARKER),
         },
         level,
         options,
@@ -305,7 +306,7 @@ describe("ensureVaultReadyForDistill", () => {
         const r = ensureVaultReadyForDistill(
           {
             contentPath: ro,
-            configPath: path.join(ro, ".napkin"),
+            configPath: path.join(ro, NAPKIN_MARKER),
           },
           "fast",
         );
@@ -923,9 +924,9 @@ describe("ensureVaultReadyForDistill", () => {
     git(vault, ["add", "seed.md"]);
     git(vault, ["commit", "-q", "-m", "seed"]);
 
-    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(vault, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(vault, ".napkin", "config.json"),
+      path.join(vault, NAPKIN_MARKER, "config.json"),
       JSON.stringify({ vault: { root: ".." } }),
     );
 
@@ -933,13 +934,13 @@ describe("ensureVaultReadyForDistill", () => {
     const beforeLs = git(vault, [
       "ls-files",
       "--error-unmatch",
-      ".napkin/config.json",
+      path.join(NAPKIN_MARKER, "config.json"),
     ]);
     expect(beforeLs.status).not.toBe(0);
 
     const r = runSetup("full");
     expect(r.error).toBeUndefined();
-    expect(r.scaffolded).toContain(".napkin/config.json");
+    expect(r.scaffolded).toContain(path.join(NAPKIN_MARKER, "config.json"));
     expect(r.findings).toContainEqual({
       kind: "auto-recovered",
       invariant: "config.json-tracked",
@@ -951,7 +952,7 @@ describe("ensureVaultReadyForDistill", () => {
     const afterLs = git(vault, [
       "ls-files",
       "--error-unmatch",
-      ".napkin/config.json",
+      path.join(NAPKIN_MARKER, "config.json"),
     ]);
     expect(afterLs.status).toBe(0);
   });
@@ -963,9 +964,9 @@ describe("ensureVaultReadyForDistill", () => {
     git(vault, ["add", "seed.md"]);
     git(vault, ["commit", "-q", "-m", "seed"]);
 
-    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(vault, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(vault, ".napkin", "config.json"),
+      path.join(vault, NAPKIN_MARKER, "config.json"),
       JSON.stringify({ vault: { root: ".." } }),
     );
 
@@ -994,15 +995,15 @@ describe("ensureVaultReadyForDistill", () => {
     git(vault, ["add", "seed.md"]);
     git(vault, ["commit", "-q", "-m", "seed"]);
 
-    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(vault, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(vault, ".napkin", "config.json"),
+      path.join(vault, NAPKIN_MARKER, "config.json"),
       JSON.stringify({ vault: { root: ".." } }),
     );
 
     const r = runSetup("fast");
     expect(r.error).toBeUndefined();
-    expect(r.scaffolded).not.toContain(".napkin/config.json");
+    expect(r.scaffolded).not.toContain(path.join(NAPKIN_MARKER, "config.json"));
     for (const f of r.findings) {
       expect(f.invariant).not.toBe("config.json-tracked");
     }
@@ -1011,7 +1012,7 @@ describe("ensureVaultReadyForDistill", () => {
     const ls = git(vault, [
       "ls-files",
       "--error-unmatch",
-      ".napkin/config.json",
+      path.join(NAPKIN_MARKER, "config.json"),
     ]);
     expect(ls.status).not.toBe(0);
   });
@@ -1036,9 +1037,9 @@ describe("ensureVaultReadyForDistill", () => {
     git(vault, ["init", "-q", "-b", "main"]);
     git(vault, ["config", "commit.gpgsign", "false"]);
     fs.writeFileSync(path.join(vault, "seed.md"), "# seed\n");
-    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(vault, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(vault, ".napkin", "config.json"),
+      path.join(vault, NAPKIN_MARKER, "config.json"),
       JSON.stringify({ vault: { root: ".." } }),
     );
     // Run setup once so the managed block is installed and config.json
@@ -1046,7 +1047,7 @@ describe("ensureVaultReadyForDistill", () => {
     runSetup("full");
     return {
       giPath: path.join(vault, ".gitignore"),
-      configRel: ".napkin/config.json",
+      configRel: path.join(NAPKIN_MARKER, "config.json"),
     };
   }
 
@@ -1134,9 +1135,9 @@ describe("ensureVaultReadyForDistill", () => {
     git(vault, ["add", "seed.md", ".gitignore"]);
     git(vault, ["commit", "-q", "-m", "seed + user gitignore rule"]);
 
-    fs.mkdirSync(path.join(vault, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(vault, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(vault, ".napkin", "config.json"),
+      path.join(vault, NAPKIN_MARKER, "config.json"),
       JSON.stringify({ vault: { root: ".." } }),
     );
 
@@ -1175,10 +1176,14 @@ describe("ensureVaultReadyForDistill", () => {
     // Synthesize a tracked entry under .napkin/distill/. The canonical
     // gitignore block excludes the directory, so we have to use
     // `git add -f` to force-stage.
-    const distillDir = path.join(vault, ".napkin", "distill");
+    const distillDir = path.join(vault, NAPKIN_MARKER, "distill");
     fs.mkdirSync(distillDir, { recursive: true });
     fs.writeFileSync(path.join(distillDir, "orphan.txt"), "old content");
-    git(vault, ["add", "-f", ".napkin/distill/orphan.txt"]);
+    git(vault, [
+      "add",
+      "-f",
+      path.join(NAPKIN_MARKER, "distill", "orphan.txt"),
+    ]);
     git(vault, ["commit", "-q", "-m", "force-stage orphan"]);
     expect(configRel).toBeDefined(); // silence unused-binding lint
 
@@ -1202,10 +1207,14 @@ describe("ensureVaultReadyForDistill", () => {
 
   test("fast-level does NOT run the napkin-distill-not-tracked check", () => {
     setupExistingRepoWithBlock();
-    const distillDir = path.join(vault, ".napkin", "distill");
+    const distillDir = path.join(vault, NAPKIN_MARKER, "distill");
     fs.mkdirSync(distillDir, { recursive: true });
     fs.writeFileSync(path.join(distillDir, "orphan.txt"), "old");
-    git(vault, ["add", "-f", ".napkin/distill/orphan.txt"]);
+    git(vault, [
+      "add",
+      "-f",
+      path.join(NAPKIN_MARKER, "distill", "orphan.txt"),
+    ]);
     git(vault, ["commit", "-q", "-m", "force"]);
 
     const r = runSetup("fast");
