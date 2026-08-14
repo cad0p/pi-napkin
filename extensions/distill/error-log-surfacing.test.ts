@@ -17,6 +17,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { killDistillWrappers } from "./_test-helpers";
 import {
@@ -227,7 +228,7 @@ describe("resolveDistillErrorDir", () => {
     // No napkin config in the dir, no global vault — `new Napkin(vault)`
     // throws. Helper should fall back to the vault-local path.
     const r = resolveDistillErrorDir(vault);
-    const expected = path.join(vault, ".napkin", "distill", "errors");
+    const expected = path.join(vault, NAPKIN_MARKER, "distill", "errors");
     expect(r).toBe(expected);
   });
 

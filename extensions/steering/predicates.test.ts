@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import type { PredicateContext } from "@cad0p/pi-steering";
 import { afterEach, describe, expect, test } from "vitest";
 import { isNapkinVault } from "./predicates.ts";
@@ -38,7 +39,7 @@ describe("isNapkinVault handler", () => {
 
   test("true + vault cwd → true", () => {
     const vault = makeTmpDir();
-    fs.mkdirSync(path.join(vault, ".napkin"));
+    fs.mkdirSync(path.join(vault, NAPKIN_MARKER));
     expect(isNapkinVault(true, ctxWith(vault))).toBe(true);
   });
 
@@ -53,7 +54,7 @@ describe("isNapkinVault handler", () => {
 
   test("non-true args → false (spread form / stray values never match)", () => {
     const vault = makeTmpDir();
-    fs.mkdirSync(path.join(vault, ".napkin"));
+    fs.mkdirSync(path.join(vault, NAPKIN_MARKER));
     expect(isNapkinVault(false, ctxWith(vault))).toBe(false);
     expect(isNapkinVault(undefined, ctxWith(vault))).toBe(false);
     expect(isNapkinVault({ value: true }, ctxWith(vault))).toBe(false);
