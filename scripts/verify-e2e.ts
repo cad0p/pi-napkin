@@ -209,13 +209,7 @@ const DISTILL_MAX_DURATION_MINUTES = 10;
  * caller's PATH being augmented with `node_modules/.bin/`.
  */
 const _here = path.dirname(fileURLToPath(import.meta.url));
-const NAPKIN_BIN = path.resolve(
-  _here,
-  "..",
-  "node_modules",
-  ".bin",
-  "napkin",
-);
+const NAPKIN_BIN = path.resolve(_here, "..", "node_modules", ".bin", "napkin");
 
 /** Slack added to maxDurationMinutes when waiting for the JS poller dispatch. */
 const POLLER_DISPATCH_SLACK_SECS = 30;
@@ -1010,7 +1004,13 @@ function assertAutoInitPostConditions(
   // resolves the real vault instead.
   const lsConfig = spawnSync(
     "git",
-    ["-C", vaultPath, "ls-files", "--error-unmatch", path.join(NAPKIN_MARKER, "config.json")],
+    [
+      "-C",
+      vaultPath,
+      "ls-files",
+      "--error-unmatch",
+      path.join(NAPKIN_MARKER, "config.json"),
+    ],
     { encoding: "utf-8", env: process.env },
   );
   results.push({
@@ -1205,7 +1205,8 @@ function assertGreenPostConditions(
   const distillWorktreesStillTracked = worktreeList.stdout
     .split("\n")
     .filter(
-      (l) => l.startsWith("worktree ") && l.includes(`${NAPKIN_MARKER}/distill`),
+      (l) =>
+        l.startsWith("worktree ") && l.includes(`${NAPKIN_MARKER}/distill`),
     ).length;
   results.push({
     name: "distill worktrees removed",
