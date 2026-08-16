@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 ## [calver-released]
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+**Vault overview no longer merges with the user's first message:**
+
+- The session-start vault overview is now wrapped in self-describing `<napkin-context>` / `<napkin-overview>` tags. Providers that merge consecutive user-role turns previously made the model believe the user had pasted the whole vault when their first real message arrived right after the injected overview; the delimiters keep the two clearly separate in the LLM view (TUI already showed them as separate bubbles).
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🐛 Bug Fixes
