@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.2] - 2026-08-16
+
+<!-- USER-EDITABLE SECTION START -->
+**Vault overview no longer merges with the user's first message:**
+
+- The session-start vault overview is now wrapped in self-describing `<napkin-context>` / `<napkin-overview>` tags. Providers that merge consecutive user-role turns previously made the model believe the user had pasted the whole vault when their first real message arrived right after the injected overview; the delimiters keep the two clearly separate in the LLM view (TUI already showed them as separate bubbles).
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(extension)* Delimit napkin-context vault overview injection with <napkin-context>/<napkin-overview> tags (closes #89) ([#90](https://github.com/cad0p/pi-napkin/pull/90))
+
+
 ## [0.7.1] - 2026-08-16
 
 <!-- USER-EDITABLE SECTION START -->
