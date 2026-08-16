@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
@@ -129,8 +130,8 @@ function createGitVault(opts: { seedMd?: string } = {}): string {
   fs.writeFileSync(path.join(dir, ".gitignore"), ".napkin/distill/\n");
   // Napkin's configPath expects `.napkin/` to exist for the content vault
   // layout; create it upfront.
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
-  fs.writeFileSync(path.join(dir, ".napkin", "config.json"), "{}");
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
+  fs.writeFileSync(path.join(dir, NAPKIN_MARKER, "config.json"), "{}");
   run(["add", "-A"]);
   run(["commit", "-q", "-m", "seed"]);
   return dir;
@@ -254,8 +255,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     expect(call.args[5]).not.toContain("{{branchName}}");
     expect(call.args[5]).not.toContain("{{defaultBranch}}");
     // errorDir lives under Napkin's configPath — may be either `<vault>/.napkin`
-    // (content layout) or `~/.napkin` (legacy). Just assert it ends with
-    // `distill/errors`.
+    // or `~/.napkin`. Just assert it ends with `distill/errors`.
     expect(call.args[6].endsWith(path.join("distill", "errors"))).toBe(true);
     // Empty model string when model is omitted.
     expect(call.args[7]).toBe("");
@@ -400,7 +400,7 @@ describe("distill-wrapper.sh (integration)", () => {
     // regression POST-R6-CACHE fixed (no observable signal). Now the
     // wrapper hard-fails so any out-of-tree caller surfaces the
     // contract violation immediately.
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
       "bash",
@@ -428,7 +428,7 @@ describe("distill-wrapper.sh (integration)", () => {
     // 10 is empty keeps the timeout(1) budget single-sourced JS-side
     // and surfaces any out-of-tree caller skipping the budget loud
     // and early.
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
       "bash",
@@ -465,7 +465,7 @@ describe("distill-wrapper.sh (integration)", () => {
     );
     const metaPath = path.join(
       workspace.worktreePath,
-      ".napkin",
+      NAPKIN_MARKER,
       "distill",
       "meta.json",
     );
@@ -477,7 +477,7 @@ describe("distill-wrapper.sh (integration)", () => {
     // Run the wrapper with HALT_AFTER_META so it updates meta.json then
     // exits 0 without touching pi, git, or the cleanup trap. The worktree
     // survives so we can inspect meta.json.
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
       "bash",
@@ -548,7 +548,7 @@ describe("distill-wrapper.sh (integration)", () => {
     const localBin = path.join(repoRoot, "node_modules", ".bin");
     const augmentedPath = `${localBin}${path.delimiter}${process.env.PATH ?? ""}`;
     const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
 
     const r = spawnSync(
@@ -582,7 +582,7 @@ describe("distill-wrapper.sh (integration)", () => {
 
     const shimPath = path.join(
       workspace.worktreePath,
-      ".napkin",
+      NAPKIN_MARKER,
       "distill",
       "bin",
       "napkin",
@@ -636,7 +636,7 @@ describe("distill-wrapper.sh (integration)", () => {
     // log records the diagnostic + the PATH the wrapper saw (R7-SC-10
     // — forensic info for the user to fix their environment).
     const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
 
     // Strip PATH to a system minimum that doesn't contain napkin.
@@ -712,7 +712,7 @@ describe("distill-wrapper.sh (integration)", () => {
       return;
     }
     const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
 
     const r = spawnSync(
@@ -774,7 +774,7 @@ describe("distill-wrapper.sh (integration)", () => {
     // pin, a future refactor that moves the shim install above the
     // SKIP_PI gate would silently break those tests' isolation.
     const workspace = createDistillWorkspace(vault, sessionFile, sessionDir);
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
 
     // HALT_AFTER_SHIM with SKIP_PI=1: the wrapper should reach the
@@ -817,7 +817,7 @@ describe("distill-wrapper.sh (integration)", () => {
     // No shim was installed.
     const shimPath = path.join(
       workspace.worktreePath,
-      ".napkin",
+      NAPKIN_MARKER,
       "distill",
       "bin",
       "napkin",
@@ -836,9 +836,9 @@ describe("distill-wrapper.sh (integration)", () => {
   });
 
   // R12-CC-3 + R12-SC-5: meta.json missing startSha must hard-fail
-  // rather than silently degrading to the legacy --cached path that
-  // dropped pi-self-committed content (POST-CONV-1; real failure:
-  // dropped commit a13e8b1).
+  // rather than silently degrading to the --cached path that dropped
+  // pi-self-committed content (POST-CONV-1; real failure: dropped
+  // commit a13e8b1).
   test("meta.json without startSha hard-fails with diagnostic (R12-CC-3, R12-SC-5)", () => {
     const workspace: DistillWorkspace = createDistillWorkspace(
       vault,
@@ -847,7 +847,7 @@ describe("distill-wrapper.sh (integration)", () => {
     );
     const metaPath = path.join(
       workspace.worktreePath,
-      ".napkin",
+      NAPKIN_MARKER,
       "distill",
       "meta.json",
     );
@@ -859,7 +859,7 @@ describe("distill-wrapper.sh (integration)", () => {
     delete meta.startSha;
     fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2));
 
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
       "bash",
@@ -936,8 +936,8 @@ describe("distill-wrapper.sh (non-main default branch)", () => {
     run(["config", "user.email", "test@example.com"]);
     fs.writeFileSync(path.join(dir, "seed.md"), "# seed\n");
     fs.writeFileSync(path.join(dir, ".gitignore"), ".napkin/distill/\n");
-    fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
-    fs.writeFileSync(path.join(dir, ".napkin", "config.json"), "{}");
+    fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
+    fs.writeFileSync(path.join(dir, NAPKIN_MARKER, "config.json"), "{}");
     run(["add", "-A"]);
     run(["commit", "-q", "-m", "seed"]);
     return dir;
@@ -1025,7 +1025,7 @@ describe("distill-wrapper.sh cleanup trap (POST-CONV-3, POST-CONV-4)", () => {
     exitCode: number;
     errorDir: string;
   } {
-    const errorDir = path.join(vault, ".napkin", "distill", "errors");
+    const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
     fs.mkdirSync(errorDir, { recursive: true });
     const r = spawnSync(
       "bash",

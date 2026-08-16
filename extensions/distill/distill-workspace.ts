@@ -30,7 +30,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { Napkin } from "@cad0p/napkin";
+import { NAPKIN_MARKER, Napkin } from "@cad0p/napkin";
 import {
   parseSessionEntries,
   SessionManager,
@@ -149,7 +149,7 @@ export function generateDistillBranchName(
 /**
  * Relative path (from worktree root) of the distill `.napkin/distill/` dir.
  */
-export const DISTILL_SUBDIR = path.join(".napkin", "distill");
+export const DISTILL_SUBDIR = path.join(NAPKIN_MARKER, "distill");
 
 export const DISTILL_PROMPT_CACHE_KEY_ENV = "NAPKIN_DISTILL_PROMPT_CACHE_KEY";
 
@@ -725,7 +725,7 @@ export function resolveDistillErrorDir(vault: string): string {
   try {
     return path.join(new Napkin(vault).vault.configPath, "distill", "errors");
   } catch {
-    return path.join(vault, ".napkin", "distill", "errors");
+    return path.join(vault, NAPKIN_MARKER, "distill", "errors");
   }
 }
 
@@ -970,8 +970,7 @@ export function spawnDistillInWorktree(
 
   // Error dir lives on the MAIN vault (not in the worktree — worktrees are
   // removed on cleanup, which would lose the logs). Resolve via Napkin's
-  // configPath so legacy (~/.napkin) and new (<content>/.napkin) layouts
-  // both work.
+  // configPath (wherever it lives).
   const errorDir = resolveDistillErrorDir(vault);
   fs.mkdirSync(errorDir, { recursive: true });
 

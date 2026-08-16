@@ -31,6 +31,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { cleanupDistillWorktrees } from "./_test-helpers";
@@ -107,7 +108,7 @@ function createVault(
   git(["config", "user.name", "t"]);
   git(["config", "user.email", "t@e"]);
   fs.writeFileSync(path.join(dir, "seed.md"), "# seed\n");
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   // biome-ignore lint/suspicious/noExplicitAny: dynamic config
   const distill: Record<string, any> = {
     enabled: true,
@@ -118,7 +119,7 @@ function createVault(
     distill.maxDurationMinutes = maxDurationMinutes;
   }
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       // Sibling-layout declaration so napkin resolves contentPath=<dir>
       // (where `.git` and notes live).

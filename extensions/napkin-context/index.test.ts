@@ -16,7 +16,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Napkin } from "@cad0p/napkin";
+import { NAPKIN_MARKER, Napkin } from "@cad0p/napkin";
 import type { Text } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import napkinContext from "./index";
@@ -38,9 +38,9 @@ function makeVault(
   config: unknown = SEARCH_CONFIG,
 ): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-context-test-"));
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify(config),
   );
   for (const [rel, content] of Object.entries(files)) {

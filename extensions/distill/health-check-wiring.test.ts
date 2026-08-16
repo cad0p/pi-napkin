@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 
@@ -27,12 +28,6 @@ import distillExtension from "./index";
  *   - error findings → `ctx.ui.notify(..., "error")` + no worktree dir
  *   - auto-recovered findings → `ctx.ui.notify(..., "info")` + worktree
  *   - healthy vault → no notify of either severity, worktree created
- *
- * Legacy-embedded routing is verified to bypass the health check
- * entirely: `/distill` on those vaults must NOT call
- * `ensureVaultReadyForDistill` (asserted via the absence of any health
- * notify on a vault whose `subdir-layout` invariant would fire if the
- * check ran).
  */
 
 const SUFFICIENTLY_LARGE_INTERVAL_MS = 10_000;
@@ -63,52 +58,13 @@ function createSubdirVault(): string {
     path.join(dir, "seed.md"),
     "---\ntitle: seed\n---\n# seed\n",
   );
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       vault: { root: ".." },
       distill: { enabled: true, intervalMinutes: 60, onShutdown: true },
     }),
-  );
-  git(["add", "-A"]);
-  git(["commit", "-q", "-m", "seed"]);
-  return dir;
-}
-
-/**
- * Build a legacy-embedded vault: `configPath === contentPath` because
- * the config has no `vault.root`. Manual `/distill` must route to the
- * legacy tmpdir spawn here, bypassing the health check.
- */
-function createLegacyEmbeddedVault(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "health-wiring-legacy-"));
-  const napkinDir = path.join(dir, ".napkin");
-  fs.mkdirSync(napkinDir, { recursive: true });
-  fs.writeFileSync(
-    path.join(napkinDir, "config.json"),
-    JSON.stringify({
-      // No `vault.root` — napkin treats this as legacy embedded layout,
-      // so `configPath === contentPath === <dir>/.napkin/`.
-      distill: { enabled: true, onShutdown: true, intervalMinutes: 60 },
-    }),
-  );
-  const env = {
-    ...process.env,
-    GIT_AUTHOR_NAME: "test",
-    GIT_AUTHOR_EMAIL: "t@e",
-    GIT_COMMITTER_NAME: "test",
-    GIT_COMMITTER_EMAIL: "t@e",
-  };
-  const git = (args: string[]) =>
-    spawnSync("git", ["-C", napkinDir, ...args], { env, encoding: "utf-8" });
-  git(["init", "-q", "-b", "main"]);
-  git(["config", "commit.gpgsign", "false"]);
-  git(["config", "user.name", "t"]);
-  git(["config", "user.email", "t@e"]);
-  fs.writeFileSync(
-    path.join(napkinDir, "seed.md"),
-    "---\ntitle: seed\n---\n# seed\n",
   );
   git(["add", "-A"]);
   git(["commit", "-q", "-m", "seed"]);
@@ -143,9 +99,9 @@ function createSubdirVaultWithUntrackedConfig(): string {
   git(["add", "seed.md"]);
   git(["commit", "-q", "-m", "seed"]);
   // Write config AFTER the seed commit so it stays untracked.
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       vault: { root: ".." },
       distill: { enabled: true, intervalMinutes: 60, onShutdown: true },
@@ -170,7 +126,7 @@ describe("per-spawn health-check wiring", () => {
   // Per-test TMPDIR redirect: `os.tmpdir()` is read live from $TMPDIR, so
   // redirecting it here isolates both the tests' `readdirSync(os.tmpdir())`
   // scans AND `spawnDistill`'s `mkdtempSync(os.tmpdir(), "napkin-distill-")`
-  // (the legacy tmpdir spawn path in index.ts) from sibling test files
+  // (the tmpdir spawn path in index.ts) from sibling test files
   // running in parallel forks. Without this, parallel execution lets other
   // files' `napkin-distill-*` entries pollute these scans (false positives).
   const _savedTmpdir = process.env.TMPDIR;
@@ -378,7 +334,13 @@ describe("per-spawn health-check wiring", () => {
       // (fast-level skips the tracking check).
       const lsBefore = spawnSync(
         "git",
-        ["-C", vault, "ls-files", "--error-unmatch", ".napkin/config.json"],
+        [
+          "-C",
+          vault,
+          "ls-files",
+          "--error-unmatch",
+          path.join(NAPKIN_MARKER, "config.json"),
+        ],
         { encoding: "utf-8" },
       );
       expect(lsBefore.status).not.toBe(0);
@@ -391,7 +353,13 @@ describe("per-spawn health-check wiring", () => {
       // Post-condition: config.json is now tracked.
       const lsAfter = spawnSync(
         "git",
-        ["-C", vault, "ls-files", "--error-unmatch", ".napkin/config.json"],
+        [
+          "-C",
+          vault,
+          "ls-files",
+          "--error-unmatch",
+          path.join(NAPKIN_MARKER, "config.json"),
+        ],
         { encoding: "utf-8" },
       );
       expect(lsAfter.status).toBe(0);
@@ -446,61 +414,6 @@ describe("per-spawn health-check wiring", () => {
       expect(worktreeCount(vault)).toBe(0);
     } finally {
       fs.rmSync(vault, { recursive: true, force: true });
-    }
-  });
-
-  test("/distill on legacy-embedded vault: NO health-check called (no notify, falls back to legacy spawn)", async () => {
-    // The legacy-embedded vault would fire a `subdir-layout` error finding
-    // if the health check ran on it. The wiring contract is that
-    // legacy-embedded routing in `runDistill` skips the health check
-    // entirely, so we must see ZERO notify activity from the helper.
-    const legacyVault = createLegacyEmbeddedVault();
-    const legacyContent = path.join(legacyVault, ".napkin");
-    try {
-      const sm = createSession(legacyContent);
-      const { ui, notifyCalls } = makeFakeUI();
-      const ctx = {
-        cwd: legacyContent,
-        sessionManager: sm,
-        hasUI: true,
-        ui,
-      };
-
-      const { api, captured } = makeMockExtensionAPI();
-      distillExtension(api as never);
-
-      const tmpBefore = new Set(
-        fs
-          .readdirSync(os.tmpdir())
-          .filter((n) => n.startsWith("napkin-distill-")),
-      );
-
-      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
-      await captured.commands.distill.handler("", ctx as any);
-
-      // No health-check notifications fired (the helper wraps every
-      // notify with `Auto-distill ...` so any presence of those strings
-      // would be a regression).
-      const healthNotifies = notifyCalls.filter((n) =>
-        n.msg.startsWith("Auto-distill"),
-      );
-      expect(healthNotifies).toEqual([]);
-
-      // Legacy spawn fired: a new tmp dir appeared.
-      const tmpAfter = fs
-        .readdirSync(os.tmpdir())
-        .filter((n) => n.startsWith("napkin-distill-"));
-      const newTmp = tmpAfter.filter((n) => !tmpBefore.has(n));
-      expect(newTmp.length).toBe(1);
-      // No worktree was created (legacy-embedded routing took the
-      // legacy tmpdir path; the worktree-spawn path was bypassed).
-      expect(worktreeCount(legacyContent)).toBe(0);
-
-      for (const d of newTmp) {
-        fs.rmSync(path.join(os.tmpdir(), d), { recursive: true, force: true });
-      }
-    } finally {
-      fs.rmSync(legacyVault, { recursive: true, force: true });
     }
   });
 
@@ -645,62 +558,14 @@ describe("per-spawn health-check wiring", () => {
     }
   });
 
-  // --- session_start with malformed config.json --------------------------
-  //
-  // `loadVaultConfig` previously masked malformed JSON as `enabled: false`
-  // and the session_start handler short-circuited before any user-visible
-  // signal could fire. After the propagation fix, `loadVaultConfig`
-  // throws `MalformedVaultConfigError`; session_start catches it, emits
-  // an actionable error notify, and skips the rest of the handler (no
-  // health check, no auto-distill arming).
-
-  test("session_start on vault with malformed config.json: error notify, no spawn, valid-config session unaffected", async () => {
-    const vault = createSubdirVault();
-    try {
-      // Pre-corrupt `.napkin/config.json` BEFORE session_start. The
-      // helper wrote a parseable JSON; we replace it with a corrupt
-      // string so the parse fails immediately.
-      const cfgPath = path.join(vault, ".napkin", "config.json");
-      fs.writeFileSync(cfgPath, "{ this is not valid JSON");
-
-      const sm = createSession(vault);
-      const { ui, notifyCalls } = makeFakeUI();
-      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
-
-      const { api, captured } = makeMockExtensionAPI();
-      distillExtension(api as never);
-      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
-      await captured.handlers.session_start({ reason: "new" }, ctx as any);
-
-      const errors = notifyCalls.filter((n) => n.severity === "error");
-      expect(errors).toHaveLength(1);
-      expect(errors[0].msg).toContain(cfgPath);
-      expect(errors[0].msg).toContain("not valid JSON");
-      // Actionable hint: the user needs to know what to do.
-      expect(errors[0].msg.toLowerCase()).toContain("fix");
-
-      // No health-check info notify (auto-recovery channel) and no
-      // worktree spawn. The handler returned before
-      // `ensureVaultReadyForDistill` could run.
-      const infos = notifyCalls.filter((n) => n.severity === "info");
-      expect(infos).toEqual([]);
-      expect(worktreeCount(vault)).toBe(0);
-      // The interval timer is also not armed when session_start aborts
-      // on malformed config — the handler returns before `setInterval`.
-      expect(capturedInterval).toBeNull();
-    } finally {
-      fs.rmSync(vault, { recursive: true, force: true });
-    }
-  });
-
   test("session_start on vault with valid config + enabled=false: no error notify, no spawn (regression check)", async () => {
-    // Counterfactual to the malformed-config test above: a parseable
-    // config with `distill.enabled = false` is the explicit-opt-out
+    // A parseable config with `distill.enabled = false` is the explicit
+    // opt-out case.
     // case. The handler short-circuits with NO error notify (the
     // user knows distill is off) and NO auto-init either.
     const vault = createSubdirVault();
     try {
-      const cfgPath = path.join(vault, ".napkin", "config.json");
+      const cfgPath = path.join(vault, NAPKIN_MARKER, "config.json");
       fs.writeFileSync(
         cfgPath,
         JSON.stringify({

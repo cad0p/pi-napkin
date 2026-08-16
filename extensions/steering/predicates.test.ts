@@ -1,23 +1,21 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import type { PredicateContext } from "@cad0p/pi-steering";
 import { afterEach, describe, expect, test } from "vitest";
-import {
-  isNapkinVault,
-  isNapkinVaultDir,
-  NAPKIN_MARKER,
-} from "./predicates.ts";
+import { isNapkinVault } from "./predicates.ts";
 
 /**
- * Unit tests for the read-only napkin-vault walk + `isNapkinVault`
- * predicate handler.
+ * Unit tests for the `isNapkinVault` predicate handler. The vault
+ * walk itself is napkin-owned: `isNapkinVaultDir` is an alias for
+ * napkin's `findAncestorVault`, so these fixtures exercise the real
+ * walk through the handler (the alias is a one-line binding — the
+ * walk's own tests live in napkin).
  *
  * All directory fixtures are real mkdtemp trees (mirroring the
- * repo's tmpdir conventions) so the walk's fs probes
- * (`existsSync` + `statSync().isDirectory()`) run against reality,
- * including the marker-is-a-FILE case that only real paths can
- * exercise.
+ * repo's tmpdir conventions) so the handler's fs probes run against
+ * reality.
  */
 
 const tmpDirs: string[] = [];
@@ -32,67 +30,6 @@ afterEach(() => {
   for (const dir of tmpDirs.splice(0)) {
     fs.rmSync(dir, { recursive: true, force: true });
   }
-});
-
-describe("isNapkinVaultDir (read-only walk-up)", () => {
-  test("resolves a .napkin/ marker at the vault root, from root and from a nested subdir", () => {
-    const vault = makeTmpDir();
-    fs.mkdirSync(path.join(vault, NAPKIN_MARKER));
-    const nested = path.join(vault, "a", "b", "c");
-    fs.mkdirSync(nested, { recursive: true });
-
-    expect(isNapkinVaultDir(vault)).toBe(vault);
-    expect(isNapkinVaultDir(nested)).toBe(vault);
-  });
-
-  test("resolves the nested .obsidian/.napkin/ layout, from root and from a subdir", () => {
-    const vault = makeTmpDir();
-    fs.mkdirSync(path.join(vault, ".obsidian", NAPKIN_MARKER), {
-      recursive: true,
-    });
-    const nested = path.join(vault, "notes", "deep");
-    fs.mkdirSync(nested, { recursive: true });
-
-    expect(isNapkinVaultDir(vault)).toBe(vault);
-    expect(isNapkinVaultDir(nested)).toBe(vault);
-  });
-
-  test("returns null for a non-vault tree (no markers anywhere)", () => {
-    const tree = makeTmpDir();
-    const nested = path.join(tree, "x", "y");
-    fs.mkdirSync(nested, { recursive: true });
-    fs.writeFileSync(path.join(nested, "notes.md"), "# hi");
-
-    expect(isNapkinVaultDir(tree)).toBeNull();
-    expect(isNapkinVaultDir(nested)).toBeNull();
-  });
-
-  test("a FILE named .napkin is not a vault (isDirectory guard, mirrors napkin)", () => {
-    const vault = makeTmpDir();
-    fs.writeFileSync(path.join(vault, NAPKIN_MARKER), "not a dir");
-    const nested = path.join(vault, "sub");
-    fs.mkdirSync(nested);
-
-    expect(isNapkinVaultDir(vault)).toBeNull();
-    expect(isNapkinVaultDir(nested)).toBeNull();
-  });
-
-  test("walking from the filesystem root terminates with null (no infinite loop)", () => {
-    expect(isNapkinVaultDir(path.parse(process.cwd()).root)).toBeNull();
-  });
-
-  test("a failed walk writes NOTHING (no .napkin/ created anywhere)", () => {
-    const parent = makeTmpDir();
-    const cwd = path.join(parent, "deep", "tree");
-    fs.mkdirSync(cwd, { recursive: true });
-
-    const before = fs.readdirSync(parent).sort();
-    expect(isNapkinVaultDir(cwd)).toBeNull();
-    const after = fs.readdirSync(parent).sort();
-
-    expect(after).toEqual(before);
-    expect(fs.existsSync(path.join(cwd, NAPKIN_MARKER))).toBe(false);
-  });
 });
 
 describe("isNapkinVault handler", () => {

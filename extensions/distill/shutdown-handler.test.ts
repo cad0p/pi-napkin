@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { cleanupDistillWorktrees, withNapkinOnPath } from "./_test-helpers";
@@ -104,14 +105,13 @@ function createVault(
     git(["config", "user.name", "t"]);
     git(["config", "user.email", "t@e"]);
     fs.writeFileSync(path.join(dir, "seed.md"), "# seed\n");
-    fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(dir, ".napkin", "config.json"),
+      path.join(dir, NAPKIN_MARKER, "config.json"),
       JSON.stringify({
         // Sibling layout: notes live at <dir>/ (the vault content root),
         // config lives at <dir>/.napkin/. Without `vault.root`, napkin
-        // would treat this as a legacy embedded vault and resolve
-        // contentPath to <dir>/.napkin — which is where git is NOT.
+        // >= 0.14 refuses the vault and the tests would silently skip.
         vault: { root: ".." },
         distill: {
           enabled: config.enabled,
@@ -123,9 +123,9 @@ function createVault(
     git(["add", "-A"]);
     git(["commit", "-q", "-m", "seed"]);
   } else {
-    fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+    fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
     fs.writeFileSync(
-      path.join(dir, ".napkin", "config.json"),
+      path.join(dir, NAPKIN_MARKER, "config.json"),
       JSON.stringify({
         vault: { root: ".." },
         distill: {
@@ -152,28 +152,28 @@ function createSession(dir: string): SessionManager {
 }
 
 /**
- * Create a legacy-embedded-layout vault. napkin's `resolveVaultLayout`
- * returns `{ contentPath = configPath = .napkin/dir }` when the config has
- * no `vault.root`, simulating vaults from pre-subdir-layout napkin
- * versions. Auto-distill's setup refuses to scaffold these, so session
- * shutdown must not spawn a worktree.
+ * Create a legacy-embedded-layout vault: a `<dir>/.napkin/` directory
+ * whose config has no `vault.root`. napkin >= 0.14 refuses these with
+ * `VaultNotFoundError` (the error message carries migration guidance),
+ * so distill treats the vault as unresolvable and skips silently.
  *
  * Layout:
  *   <dir>/.napkin/                  <- napkin's configPath == contentPath
  *   <dir>/.napkin/config.json       <- distill config, NO vault.root
  *
- * We don't git-init here because legacy-layout refusal fires BEFORE any
- * git interaction in auto-setup. If the refusal ever regresses, the test
- * would surface it by spawning a worktree on a vault with no commits
- * (which would throw from createDistillWorktree, leaving a visible error).
+ * No git repo is initialized: the refusal happens in napkin vault
+ * resolution, before auto-setup ever runs. If resolution ever regressed
+ * (resolving instead of refusing), the test would surface it by
+ * spawning a worktree on a vault with no commits (which would throw
+ * from createDistillWorktree, leaving a visible error).
  */
 function createLegacyVault(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-vault-"));
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
-      // NO `vault.root` key \u2014 napkin treats this as legacy embedded.
+      // NO `vault.root` key \u2014 napkin >= 0.14 refuses this layout.
       distill: { enabled: true, onShutdown: true, intervalMinutes: 60 },
     }),
   );
@@ -656,17 +656,13 @@ describe("session_shutdown handler — interval-fires-before-shutdown race (G5)"
 });
 
 /**
- * Legacy-embedded-layout refusal at session_start. Mirrors the
- * conflicting-.gitattributes suite: a vault-level reason to refuse
- * auto-distill must suppress the shutdown spawn, emit a migration
- * notify, and leave the user's files untouched.
- *
- * Legacy embedded = napkin resolves `contentPath === configPath ===
- * <vault>/.napkin/`. The branch for a distill worktree can't track a
- * `.napkin/config.json` the way it does for subdir-layout vaults, so
- * distill writes would bypass the worktree entirely.
+ * Legacy-embedded vaults are refused by napkin >= 0.14
+ * (`VaultNotFoundError`, whose message carries migration guidance), and
+ * distill supports exactly what napkin resolves — a refused vault is
+ * treated as no vault. session_start and session_shutdown must both be
+ * silent skips: zero notifies, zero scaffold, zero worktree.
  */
-describe("session_start handler \u2014 legacy-embedded layout blocks setup", () => {
+describe("session_start handler — legacy-embedded vault is refused (silent skip)", () => {
   let vault: string;
   let xdgCacheDir: string;
   let originalSetInterval: typeof setInterval;
@@ -704,12 +700,12 @@ describe("session_start handler \u2014 legacy-embedded layout blocks setup", () 
     else process.env.XDG_CACHE_HOME = _savedXdgCache;
   });
 
-  test("legacy vault: session_start fires migration notify, no worktree on shutdown", async () => {
+  test("legacy vault: session_start + shutdown are a silent skip (no notifies, no scaffold, no worktree)", async () => {
     vault = createLegacyVault();
-    // napkin resolves cwd=<vault>/.napkin because that's where .napkin is.
-    // For legacy, contentPath === configPath === <vault>/.napkin.
-    // We launch pi from <vault>/.napkin so findVault lands on it directly.
-    const cwd = path.join(vault, ".napkin");
+    // napkin >= 0.14 refuses cwd=<vault>/.napkin (config without
+    // `vault.root`) with VaultNotFoundError, so `resolveDistillVault`
+    // returns null and both handlers return early.
+    const cwd = path.join(vault, NAPKIN_MARKER);
     const sm = SessionManager.create(cwd, cwd);
     sm.appendMessage({ role: "user", content: "hello" });
     sm.appendMessage({ role: "assistant", content: "hi" });
@@ -727,30 +723,28 @@ describe("session_start handler \u2014 legacy-embedded layout blocks setup", () 
     await captured.handlers.session_start({ reason: "new" }, ctx);
     await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
 
-    // Migration notify should have fired with the one-line README pointer
-    // (Option C trim: we no longer reproduce mkdir/mv/edit steps in the
-    // notify itself — those live in README).
-    const migrationNotify = notifies.find((n) =>
-      n.message.includes("subdir vault layout"),
-    );
-    expect(migrationNotify).toBeDefined();
-    expect(migrationNotify?.level).toBe("error");
-    expect(migrationNotify?.message).toMatch(/See README/i);
-    expect(migrationNotify?.message).toMatch(/distill\.enabled: false/);
+    // Silent skip: zero notify calls of any severity — no error
+    // (migration) notify, no info notify. napkin's own CLI surfaces the
+    // refusal with migration guidance.
+    expect(notifies).toEqual([]);
 
-    // And no worktree spawned on shutdown. setupFailed must override the
-    // persisted (false) suppression state.
+    // No scaffold: auto-init never ran, so no `.git/` anywhere in the
+    // vault (the old migration-notify path is gone; the silent skip must
+    // not scaffold either).
+    expect(fs.existsSync(path.join(vault, ".git"))).toBe(false);
+    expect(fs.existsSync(path.join(cwd, ".git"))).toBe(false);
+
+    // And no worktree spawned on shutdown.
     expect(countWorktrees(vault)).toBe(0);
   });
 
   test("subdir-layout vault: normal path still works (regression check)", async () => {
     // Sanity contrast: a subdir-layout vault with distill.enabled=true must
-    // still complete auto-setup and spawn on shutdown. If the legacy check
-    // ever fires on subdir layouts it would silently kill auto-distill.
+    // still complete auto-setup and spawn on shutdown.
     vault = createVault({ enabled: true });
     const sm = createSession(vault);
 
-    const { ui, notifies } = makeCaptureUI();
+    const { ui } = makeCaptureUI();
     const { api, captured } = makeMockAPI();
     distillExtension(api as never);
     // biome-ignore lint/suspicious/noExplicitAny: partial ctx
@@ -762,12 +756,6 @@ describe("session_start handler \u2014 legacy-embedded layout blocks setup", () 
     };
     await captured.handlers.session_start({ reason: "new" }, ctx);
     await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
-
-    // No legacy-layout notify on a subdir vault.
-    const migrationNotify = notifies.find((n) =>
-      n.message.includes("legacy embedded layout"),
-    );
-    expect(migrationNotify).toBeUndefined();
 
     // Shutdown spawned a worktree normally.
     expect(countWorktrees(vault)).toBe(1);

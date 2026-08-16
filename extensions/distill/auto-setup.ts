@@ -40,8 +40,7 @@
  *     alive. Structured per-invariant findings live in `findings`;
  *     `error` is reserved for the fail-soft generic-failure channel
  *     that has no corresponding finding (e.g. `git init` / `git add`
- *     / `git commit` failures, EISDIR on `.gitignore` write, and the
- *     {@link LEGACY_EMBEDDED_LAYOUT_ERROR} sentinel).
+ *     / `git commit` failures, EISDIR on `.gitignore` write).
  */
 
 import { spawnSync } from "node:child_process";
@@ -192,7 +191,7 @@ export type HealthLevel = "fast" | "full";
  *   restored the expected state in place. Surface as an info notify; the
  *   caller proceeds with the distill spawn.
  * - `kind: "error"`: the invariant was violated and recovery is owned by
- *   the user (e.g. legacy layout migration, malformed JSON). Surface as
+ *   the user (e.g. malformed JSON). Surface as
  *   an error notify; the caller aborts the distill spawn.
  * - `invariant`: stable identifier for the check. One ID per check; the
  *   per-flavor recovery messaging lives in `recovery`.
@@ -215,18 +214,10 @@ export interface HealthFinding {
  * - `scaffolded`: files whose contents were created or modified. Callers use
  *   this to decide whether to surface a first-run notify to the user.
  * - `error`: populated on fail-soft paths (git init failed, filesystem
- *   errors writing the scaffolding, legacy-layout refusal). If set, other
- *   fields reflect partial progress. Consumed at all extension call sites
- *   (session_start, runDistill, runAutoDistill, session_shutdown handler)
- *   to surface a `notify("error")` and abort the spawn; the legacy-embedded
- *   path additionally compares against {@link LEGACY_EMBEDDED_LAYOUT_ERROR}.
- * - `legacyLayout`: populated when auto-setup refused to scaffold because
- *   the vault is using napkin's legacy embedded layout (`configPath ===
- *   contentPath`). The worktree-based concurrency architecture relies on
- *   napkin's findVault resolving cwd=worktree to the worktree itself —
- *   which only works for subdir-layout vaults (those that track a
- *   `.napkin/config.json`). `error` is set to `"legacy-embedded-layout"`
- *   so callers can branch on it.
+ *   errors writing the scaffolding). If set, other fields reflect partial
+ *   progress. Consumed at all extension call sites (session_start,
+ *   runDistill, runAutoDistill, session_shutdown handler) to surface a
+ *   `notify("error")` and abort the spawn.
  * - `findings`: structured per-invariant outcomes. Always present (empty
  *   array means "all invariants passed"). Callers iterate to surface
  *   notifications and decide whether to abort spawning.
@@ -235,10 +226,6 @@ export interface SetupResult {
   initialized: boolean;
   scaffolded: string[];
   error?: string;
-  legacyLayout?: {
-    /** Absolute path to the vault's `.napkin/` (= contentPath for legacy). */
-    configPath: string;
-  };
   /**
    * Set to `true` when the vault had a `.git/` but no commits (HEAD
    * unresolvable) and auto-setup synthesized an empty initial commit to
@@ -254,22 +241,13 @@ export interface SetupResult {
 }
 
 /**
- * Sentinel value set in `SetupResult.error` when auto-setup refuses to
- * scaffold because the vault is using napkin's legacy embedded layout.
- * Exported so callers (session_start handler, tests) can branch on the
- * exact sentinel instead of pattern-matching on the free-form message.
- */
-export const LEGACY_EMBEDDED_LAYOUT_ERROR = "legacy-embedded-layout";
-
-/**
  * Minimal vault handle this module accepts. Mirrors
  * `StaleCleanupVault` in `distill-workspace.ts` — keeps the callsite
  * symmetric: both setup and cleanup take the same vault shape and
  * neither forces the caller to construct a full Napkin instance.
  *
- * Both paths are required: legacy-embedded-layout detection needs to
- * compare `configPath` and `contentPath` directly (legacy vaults have
- * them equal; subdir vaults have them distinct).
+ * Both paths are required: `configPath` anchors the config-file
+ * invariants, `contentPath` anchors the git operations.
  */
 export interface SetupVault {
   contentPath: string;
@@ -345,12 +323,6 @@ function runGit(
 const INVARIANT_GITIGNORE_BLOCK = "gitignore-block-correct";
 
 /**
- * Stable invariant ID for the layout check. Loud-error finding only;
- * legacy-embedded vaults require manual migration to the subdir layout.
- */
-const INVARIANT_SUBDIR_LAYOUT = "subdir-layout";
-
-/**
  * Stable invariant ID for the git-repo presence check. Auto-recovered
  * via `git init -q -b main` when `.git/` is absent.
  */
@@ -363,7 +335,8 @@ const INVARIANT_VAULT_IS_GIT_REPO = "vault-is-git-repo";
  * pass. Untracked config.json is the root cause of Issue #14: distill
  * worktrees are checked out via `git worktree add HEAD`, which copies
  * only tracked files, so untracked config.json never reaches the
- * worktree and napkin's findVault falls back to legacy embedded layout.
+ * worktree and napkin inside the worktree resolves the real vault
+ * instead.
  */
 const INVARIANT_CONFIG_JSON_TRACKED = "config.json-tracked";
 
@@ -920,12 +893,6 @@ function mergeManagedBlock(
  * worktree-based spawn (`level: "full"`).
  *
  * Lifecycle (in execution order; per-step level scope noted):
- *   0. fast + full: refuse if the vault uses napkin's legacy embedded
- *      layout (`configPath === contentPath`). Worktree-based concurrency
- *      doesn't work on legacy layouts because the branch can't track a
- *      `.napkin/` subdir that findVault could resolve to. Returns
- *      `{ error: "legacy-embedded-layout", legacyLayout, findings:
- *      [subdir-layout error] }` without touching git.
  *   1. fast + full: if `.git/` is missing, run `git init -q -b main`
  *      (`vault-is-git-repo`, auto-recovered). Failure here aborts with
  *      `error`. (JSON validity is checked earlier by
@@ -990,38 +957,6 @@ export function ensureVaultReadyForDistill(
   const vaultPath = vault.contentPath;
   const findings: HealthFinding[] = [];
 
-  // Legacy-embedded layout is incompatible with the worktree-based
-  // concurrency architecture. In a legacy vault (`~/.napkin/`), the
-  // vault IS the `.napkin/` directory — `configPath === contentPath`.
-  // When a distill subprocess runs with `cwd = worktree` (a checkout of
-  // a `distill/*` branch that does NOT track a `.napkin/` subdir),
-  // napkin's `findVault` walks past the worktree and resolves to the
-  // user's REAL vault via the global config fallback. Writes bypass the
-  // worktree entirely, making the concurrency guarantee a no-op.
-  //
-  // Refuse to scaffold here so session_start can surface a migration
-  // notify. Manual `/distill` still works on any layout (it doesn't go
-  // through this path).
-  //
-  // Detection mirrors napkin's own `resolveVaultLayout` semantics: subdir
-  // layout sets `contentPath` via `vault.root` (distinct from `configPath`),
-  // while legacy embedded layout has no `vault.root` and defaults both to
-  // the `.napkin/` dir. See `@cad0p/napkin` `dist/utils/vault.js`.
-  if (vault.configPath === vault.contentPath) {
-    findings.push({
-      kind: "error",
-      invariant: INVARIANT_SUBDIR_LAYOUT,
-      message: `Vault at ${vaultPath} uses the legacy embedded layout (configPath === contentPath); auto-distill requires the subdir layout.`,
-    });
-    return {
-      initialized: false,
-      scaffolded: [],
-      error: LEGACY_EMBEDDED_LAYOUT_ERROR,
-      legacyLayout: { configPath: vault.configPath },
-      findings,
-    };
-  }
-
   const gitDir = path.join(vaultPath, ".git");
   let initialized = false;
 
@@ -1072,9 +1007,9 @@ export function ensureVaultReadyForDistill(
   // Full-level only: confirm `<configPath>/config.json` is tracked by
   // git. Distill worktrees are checked out via `git worktree add HEAD`
   // which only copies tracked files — an untracked config.json never
-  // reaches the worktree and napkin's findVault falls back to legacy
-  // embedded layout. Closes Issue #14. Auto-recovers by adding the file
-  // to scaffolded[] so the existing-repo branch below stages and
+  // reaches the worktree and napkin inside the worktree resolves the
+  // real vault instead. Closes Issue #14. Auto-recovers by adding the
+  // file to scaffolded[] so the existing-repo branch below stages and
   // commits it on the same pass.
   //
   // The auto-recovered finding is held back as `pending` and only

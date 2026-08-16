@@ -5,8 +5,8 @@
   "type": "module",
   "exports": {
     "./steering": {
-      "types": "./extensions/steering/index.ts",
-      "import": "./extensions/steering/index.ts"
+      "types": "./dist/steering/index.d.ts",
+      "import": "./dist/steering/index.js"
     }
   },
   "publishConfig": {
@@ -41,6 +41,7 @@
     "extensions/distill/distill-prompt.md",
     "extensions/**/README.md",
     "!extensions/**/test-fixtures/**",
+    "dist/steering",
     "skills",
     "README.md",
     "LICENSE"
@@ -55,6 +56,8 @@
     ]
   },
   "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "prepare": "pnpm build",
     "lint": "biome check extensions/",
     "lint:fix": "biome check --write extensions/",
     "typecheck": "tsc --noEmit",
@@ -71,7 +74,7 @@
     "vitest": "^2.1.0"
   },
   "dependencies": {
-    "@cad0p/napkin": "^0.13.2 || ^0.14.0"
+    "@cad0p/napkin": "0.14.0-20260814.2"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.74.0",

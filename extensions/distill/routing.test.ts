@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import {
@@ -19,8 +20,9 @@ import distillExtension from "./index";
  * Tests that verify Item 7 routing:
  *   - the interval timer set up by `session_start` calls `runAutoDistill`,
  *     which creates a git worktree under `$XDG_CACHE_HOME/napkin-distill/<hash>/`
- *   - the `/distill` command handler calls the legacy `runDistill`, which
- *     creates a tmp directory under `os.tmpdir()` (not a worktree)
+ *   - the `/distill` command handler calls `runDistill`, which creates a
+ *     worktree for git + enabled vaults or a tmp dir under `os.tmpdir()`
+ *     otherwise
  *
  * We don't mock the `spawn` function itself \u2014 the wrapper scripts are
  * detached and clean up after themselves when pi isn't in PATH. The test
@@ -51,13 +53,13 @@ function createEnabledGitVault(intervalMinutes: number): string {
     path.join(dir, "seed.md"),
     "---\ntitle: seed\n---\n# seed\n",
   );
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       // Sibling-layout declaration so napkin resolves contentPath=<dir>
-      // (where `.git` and notes live). Without this, napkin treats this
-      // as a legacy embedded vault and resolves contentPath=<dir>/.napkin.
+      // (where `.git` and notes live). Without it, napkin >= 0.14 refuses
+      // the vault (no `vault.root`).
       vault: { root: ".." },
       distill: { enabled: true, intervalMinutes, onShutdown: true },
     }),
@@ -69,7 +71,7 @@ function createEnabledGitVault(intervalMinutes: number): string {
 
 /**
  * Non-git vault fixture with distill.enabled=true. Used to verify that
- * `/distill` falls back to the legacy tmpdir path when the vault has no
+ * `/distill` falls back to the tmpdir path when the vault has no
  * `.git/`. Auto-distill's preflight short-circuits this case so it's
  * only exercised by manual `/distill`.
  */
@@ -79,9 +81,9 @@ function createEnabledNonGitVault(intervalMinutes: number): string {
     path.join(dir, "seed.md"),
     "---\ntitle: seed\n---\n# seed\n",
   );
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       // Sibling-layout declaration so napkin resolves contentPath=<dir>.
       vault: { root: ".." },
@@ -116,66 +118,14 @@ function createDisabledGitVault(): string {
     path.join(dir, "seed.md"),
     "---\ntitle: seed\n---\n# seed\n",
   );
-  fs.mkdirSync(path.join(dir, ".napkin"), { recursive: true });
+  fs.mkdirSync(path.join(dir, NAPKIN_MARKER), { recursive: true });
   fs.writeFileSync(
-    path.join(dir, ".napkin", "config.json"),
+    path.join(dir, NAPKIN_MARKER, "config.json"),
     JSON.stringify({
       vault: { root: ".." },
       // ENABLED=FALSE — user has explicitly opted out of auto-distill.
       distill: { enabled: false, intervalMinutes: 60, onShutdown: true },
     }),
-  );
-  git(["add", "-A"]);
-  git(["commit", "-q", "-m", "seed"]);
-  return dir;
-}
-
-/**
- * Legacy-embedded vault fixture with git initialized on top. napkin's
- * `resolveVaultLayout` returns `contentPath = configPath = <dir>/.napkin`
- * when the config lacks `vault.root`, simulating vaults from pre-subdir
- * napkin versions. This variant adds a git repo on top (rare but
- * possible: user ran `git init` themselves inside `~/.napkin/`).
- *
- * Layout:
- *   <dir>/.napkin/                 <- napkin contentPath == configPath
- *   <dir>/.napkin/.git/            <- user-initialized git repo
- *   <dir>/.napkin/config.json      <- distill.enabled=true, NO vault.root
- *   <dir>/.napkin/seed.md          <- tracked file so HEAD exists
- *
- * Used to verify SEC-R4-1: manual `/distill` on this vault MUST fall
- * back to the legacy tmpdir spawn (not the worktree path), because the
- * worktree path hits the findVault-walks-past-worktree bug on legacy
- * layouts and silently writes to the real vault.
- */
-function createEnabledLegacyEmbeddedGitVault(): string {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "routing-legacy-vault-"));
-  const napkinDir = path.join(dir, ".napkin");
-  fs.mkdirSync(napkinDir, { recursive: true });
-  // NO `vault.root` — napkin treats this as legacy embedded layout, so
-  // `configPath === contentPath === <dir>/.napkin/`.
-  fs.writeFileSync(
-    path.join(napkinDir, "config.json"),
-    JSON.stringify({
-      distill: { enabled: true, onShutdown: true, intervalMinutes: 60 },
-    }),
-  );
-  const env = {
-    ...process.env,
-    GIT_AUTHOR_NAME: "test",
-    GIT_AUTHOR_EMAIL: "t@e",
-    GIT_COMMITTER_NAME: "test",
-    GIT_COMMITTER_EMAIL: "t@e",
-  };
-  const git = (args: string[]) =>
-    spawnSync("git", ["-C", napkinDir, ...args], { env, encoding: "utf-8" });
-  git(["init", "-q", "-b", "main"]);
-  git(["config", "commit.gpgsign", "false"]);
-  git(["config", "user.name", "t"]);
-  git(["config", "user.email", "t@e"]);
-  fs.writeFileSync(
-    path.join(napkinDir, "seed.md"),
-    "---\ntitle: seed\n---\n# seed\n",
   );
   git(["add", "-A"]);
   git(["commit", "-q", "-m", "seed"]);
@@ -239,7 +189,7 @@ async function waitForWrapperDone(
       try {
         const metaPath = path.join(
           worktreePath,
-          ".napkin",
+          NAPKIN_MARKER,
           "distill",
           "meta.json",
         );
@@ -334,7 +284,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
   // Per-test TMPDIR redirect: `os.tmpdir()` is read live from $TMPDIR,
   // so redirecting it here isolates both the tests' `readdirSync(os.tmpdir())`
   // scans AND `spawnDistill`'s `mkdtempSync(os.tmpdir(), "napkin-distill-")`
-  // (the legacy tmpdir spawn path in index.ts) from sibling test files
+  // (the tmpdir spawn path in index.ts) from sibling test files
   // running in parallel forks. Without this, parallel execution lets other
   // files' `napkin-distill-*` entries pollute these scans (false positives).
   const _savedTmpdir = process.env.TMPDIR;
@@ -487,7 +437,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     expect(entries.length).toBe(1);
     expect(entries[0]).toMatch(/^[0-9a-f]{6}-\d+$/);
 
-    // No legacy tmp dir was created -- git available routes to worktree.
+    // No tmp dir was created -- git available routes to worktree.
     const tmpAfter = fs
       .readdirSync(os.tmpdir())
       .filter((n) => n.startsWith("napkin-distill-"));
@@ -500,7 +450,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     assertNoWrapperFailures(vault);
   }, 20_000); // per-test timeout: see the interval-callback test above (Flake A phase-2 wait)
 
-  test("/distill on a non-git vault falls back to tmp dir (legacy path)", async () => {
+  test("/distill on a non-git vault falls back to tmp dir (tmpdir path)", async () => {
     const { api, captured } = makeMockExtensionAPI();
     distillExtension(api as never);
     expect(captured.commands.distill).toBeDefined();
@@ -523,7 +473,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     // biome-ignore lint/suspicious/noExplicitAny: mock ctx
     await captured.commands.distill.handler("", nonGitCtx as any);
 
-    // Legacy path: new tmp dir appeared.
+    // Tmpdir path: new tmp dir appeared.
     const tmpAfter = fs
       .readdirSync(os.tmpdir())
       .filter((n) => n.startsWith("napkin-distill-"));
@@ -534,7 +484,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     const worktreesDir = resolveCacheRoot(nonGitVault);
     expect(fs.existsSync(worktreesDir)).toBe(false);
 
-    // Cleanup — the detached legacy child holds the vault as cwd until it
+    // Cleanup — the detached tmpdir child holds the vault as cwd until it
     // exits; bounded retry covers the ENOTEMPTY race (Flake A, #49).
     for (const d of newTmpDirs) {
       retryRmSync(path.join(os.tmpdir(), d));
@@ -571,7 +521,7 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     // biome-ignore lint/suspicious/noExplicitAny: mock ctx
     await captured.commands.distill.handler("", disabledCtx as any);
 
-    // Legacy path: new tmp dir appeared.
+    // Tmpdir path: new tmp dir appeared.
     const tmpAfter = fs
       .readdirSync(os.tmpdir())
       .filter((n) => n.startsWith("napkin-distill-"));
@@ -589,87 +539,12 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
       : null;
     expect(gaAfter).toBe(gaBefore);
 
-    // Cleanup — detached legacy child may still hold the vault as cwd
+    // Cleanup — detached tmpdir child may still hold the vault as cwd
     // (Flake A, #49): bounded retry instead of a bare rmSync.
     for (const d of newTmpDirs) {
       retryRmSync(path.join(os.tmpdir(), d));
     }
     retryRmSync(disabledVault);
-  });
-
-  test("/distill on a legacy-embedded git vault falls back to tmp dir (SEC-R4-1)", async () => {
-    // SEC-R4-1: on a legacy-embedded vault (configPath === contentPath,
-    // e.g. `~/.napkin/` with no `vault.root`), spawning into a worktree
-    // causes napkin's `findVault` (cwd=<worktree>) to walk past the
-    // worktree and resolve to the real vault via the global-config
-    // fallback — distill writes silently land on the real vault and the
-    // worktree stays empty. Manual `/distill` must detect legacy layout
-    // and fall back to the legacy tmpdir spawn (which resolves the
-    // vault correctly before forking the session).
-    const { api, captured } = makeMockExtensionAPI();
-    distillExtension(api as never);
-    expect(captured.commands.distill).toBeDefined();
-
-    const legacyVault = createEnabledLegacyEmbeddedGitVault();
-    // napkin will resolve cwd=<legacyVault>/.napkin to contentPath =
-    // configPath = <legacyVault>/.napkin. Seed a session file inside that
-    // dir so `runDistillWith` finds it.
-    const legacyContentPath = path.join(legacyVault, ".napkin");
-    const legacySm = createSeededSession(legacyContentPath);
-    const legacyCtx = {
-      cwd: legacyContentPath,
-      sessionManager: legacySm,
-      hasUI: false,
-      ui: null,
-    };
-
-    // Snapshot .gitattributes BEFORE the call — the legacy-layout gate
-    // should prevent the worktree path from writing the merge-driver
-    // rule. No .gitattributes exists in the fixture, so the absence
-    // before/after confirms no git side effects.
-    const gaPath = path.join(legacyContentPath, ".gitattributes");
-    const gaBefore = fs.existsSync(gaPath)
-      ? fs.readFileSync(gaPath, "utf-8")
-      : null;
-
-    const tmpBefore = new Set(
-      fs
-        .readdirSync(os.tmpdir())
-        .filter((n) => n.startsWith("napkin-distill-")),
-    );
-
-    // biome-ignore lint/suspicious/noExplicitAny: mock ctx
-    await captured.commands.distill.handler("", legacyCtx as any);
-
-    // Legacy path: new tmp dir appeared under $TMPDIR.
-    const tmpAfter = fs
-      .readdirSync(os.tmpdir())
-      .filter((n) => n.startsWith("napkin-distill-"));
-    const newTmpDirs = tmpAfter.filter((n) => !tmpBefore.has(n));
-    expect(newTmpDirs.length).toBe(1);
-
-    // No worktree under the XDG cache for this vault (the hash is keyed
-    // on contentPath, so resolveCacheRoot gives the same answer here as
-    // what the worktree path would have used).
-    const worktreesDir = resolveCacheRoot(legacyContentPath);
-    const entries = fs.existsSync(worktreesDir)
-      ? fs.readdirSync(worktreesDir)
-      : [];
-    expect(entries.length).toBe(0);
-
-    // No git side effects: .gitattributes still absent — the worktree
-    // path would have written our merge-driver rule here.
-    const gaAfter = fs.existsSync(gaPath)
-      ? fs.readFileSync(gaPath, "utf-8")
-      : null;
-    expect(gaAfter).toBe(gaBefore);
-
-    // Cleanup — detached legacy child may still hold the vault as cwd
-    // (Flake A, #49): bounded retry instead of a bare rmSync.
-    for (const d of newTmpDirs) {
-      retryRmSync(path.join(os.tmpdir(), d));
-    }
-    retryRmSync(legacyVault);
   });
 });
 

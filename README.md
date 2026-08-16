@@ -1,6 +1,6 @@
 # pi-napkin
 
-📜 [Napkin](https://github.com/cad0p/napkin) integration for [pi](https://github.com/badlogic/pi-mono).
+📜 [Napkin](https://github.com/cad0p/napkin) integration for [pi](https://github.com/earendil-works/pi).
 
 Gives a pi agent first-class access to an Obsidian-compatible knowledge vault, with automatic knowledge distillation that safely captures conversation context into notes as you work.
 
@@ -83,13 +83,11 @@ my-vault/
 ```
 
 `napkin init` creates this layout by default, so freshly created vaults work out
-of the box. If your vault uses the **legacy embedded layout** (config at
-`<vault>/config.json` with no `.napkin/` subdir, where `configPath ===
-contentPath`), you'll see a migration notification at session start and
-auto-distill will be disabled for the session. Legacy layout continues to
-work for manual `/distill` (which doesn't need concurrency safety) and for
-napkin CLI commands generally — only auto-distill requires the subdir
-layout.
+of the box. Vaults still on the embedded layout (config at `<vault>/config.json`
+with no `.napkin/` subdir) are refused by napkin >= 0.14 with
+`VaultNotFoundError` — napkin's own error message carries the migration
+guidance. Distill supports exactly what napkin resolves: a refused vault is
+treated as no vault and silently skipped.
 
 ### Why
 
@@ -98,12 +96,7 @@ subdir post-checkout, so the wrapper's `git add -A` + `git commit` +
 `git merge --squash` operations on the worktree see the isolated
 vault layout. On a subdir-layout vault, the branch tracks
 `.napkin/config.json`, so every checked-out worktree has the
-`.napkin/` subdir. On a legacy-embedded vault, the branch has no
-`.napkin/` subdir at all (`.napkin/` IS the vault), so the worktree
-has nothing to operate on — the wrapper would silently produce empty
-commits, and the per-distill napkin shim's `--vault $WORKTREE` would
-point at a directory napkin doesn't recognize as a vault. The
-concurrency guarantee silently degrades to nothing.
+`.napkin/` subdir.
 
 ### Where worktrees live
 
@@ -129,21 +122,6 @@ rm -rf ~/.cache/napkin-distill/<hash>/
 
 Safe — anything valuable is either already committed to main or was
 never going to commit.
-
-### Migration from legacy layout
-
-```bash
-# From your vault directory (e.g. ~/.napkin or wherever configPath == contentPath)
-mkdir .napkin
-mv config.json .napkin/config.json
-# Edit .napkin/config.json and add at the top level:
-#   "vault": { "root": ".." }
-# After editing, reload pi (or /quit and restart).
-```
-
-Verify with `napkin vault --json` — the `path` field should point at
-`<vault>/.napkin/` (that's the new configPath) and napkin should still
-find all your notes.
 
 ## Vault resolution
 
@@ -190,11 +168,14 @@ export default defineConfig({
 });
 ```
 
+The `@cad0p/pi-napkin/steering` subpath ships compiled JS (`dist/steering`), so plain-node consumers (native type stripping, `node --test --experimental-strip-types`) need no jiti or loader. pi's own extension loader still resolves raw `.ts` paths via jiti, so the napkin extensions are unaffected.
+
 Requirements and semantics:
 
 - **pi-steering ≥ 0.2.0-20260812.0** — the exemption registry landed in the 20260812 prerelease; stable 0.2.0 predates it.
 - **`gitPlugin` MUST stay listed** — the exemptions target the git plugin's rule names; a missing target produces `exemption-orphan` warnings with no carve-out.
-- **Zero path config** — a read-only walk-up from the command's effective cwd detects the vault by its `.napkin/` (or `.obsidian/.napkin/`) marker, mirroring napkin's own vault resolution. Goldmine, distill scratch worktrees under `~/.cache/napkin-distill/`, and future vaults are all covered automatically — no `VAULT_DIRS` to maintain.
+- **Zero path config** — a read-only walk-up from the command's effective cwd detects the vault by its `.napkin/` (or `.obsidian/.napkin/`) marker, delegating to napkin's canonical `findAncestorVault`. Goldmine, distill scratch worktrees under `~/.cache/napkin-distill/`, and future vaults are all covered automatically — no `VAULT_DIRS` to maintain.
+- **napkin ≥ 0.14.0-20260814.0** — the compiled subpath imports `findAncestorVault` from `@cad0p/napkin` at runtime (stable 0.14.0 predates the export; `@cad0p/pi-napkin` declares the range, and the global steering config must resolve it).
 - **Read-only** — the predicate never creates anything (no bare-vault fallback, no global-config fallback), and unknown walker cwd never exempts: the guard still fires (strict fail-closed).
 - **Accumulates** — exemptions union across plugins and config layers, so other tools can carve the same guards for other repo types without touching this config.
 
@@ -426,7 +407,7 @@ The block style is the same Ansible-style sentinel pattern Ansible's `blockinfil
 
 | Cadence | When | What it covers | Typical cost |
 |---|---|---|---|
-| Fast-level | Every `session_start` (every pi launch in the vault) | Subdir vs legacy-embedded layout, managed gitignore block matches canonical (auto-recover if drift), auto-init `git init` + initial commit if `.git/` is missing | Sub-second (a handful of git probes) |
+| Fast-level | Every `session_start` (every pi launch in the vault) | Managed gitignore block matches canonical (auto-recover if drift), auto-init `git init` + initial commit if `.git/` is missing | Sub-second (a handful of git probes) |
 | Full-level | On `/distill` (manual) and at each interval-driven auto-distill spawn | Everything fast-level covers, plus: `.napkin/config.json` is git-tracked, vault HEAD resolves to a commit (seed an empty initial commit if a hand-`git init`-ed vault has no commits yet), `.napkin/config.json` not gitignored outside the managed block, `.napkin/distill/` not tracked, cache root writable, no orphaned distill worktree registry entries, no stale `distill/*` branches past the grace period | A few extra git probes; runs only when a worktree is about to be spawned anyway |
 
 Fast-level findings surface as one-shot notifications at session start; the session continues regardless. Full-level findings are gated separately depending on category (below).
@@ -445,8 +426,6 @@ These are recoverable drift the health check fixes in place. Each emits a single
 
 These are conditions where auto-distill cannot safely proceed. Each emits an error notification of the form `Auto-distill cannot proceed: <message>` and `/distill` aborts before spawning a wrapper:
 
-- **Subdir-layout violation** — vault uses napkin's legacy embedded layout (config at `<vault>/config.json`, no `.napkin/` subdir). Auto-distill needs the subdir layout for worktree-based concurrency to work; see [Migration from legacy layout](#migration-from-legacy-layout).
-- **Malformed `.napkin/config.json`** — file exists but doesn't parse as JSON. Detected by `loadVaultConfig` upstream of the health check itself; auto-distill refuses to guess; fix the file and reload.
 - **`.napkin/config.json` gitignored outside the managed block** (full-level only) — a user-territory rule in `.gitignore` (or a parent `.gitignore` / global ignore) excludes the config file. Worktrees would have no config to read; remove the rule or move it inside the managed block.
 - **`.napkin/distill/` tracked in git** (full-level only) — the per-worktree session fork directory got committed at some point. Untrack it (`git rm --cached -r .napkin/distill/`) before re-running.
 - **Cache root unwritable** (full-level only) — `$XDG_CACHE_HOME/napkin-distill/<hash>/` can't be created or written. Check disk space and permissions on the cache root.
@@ -489,14 +468,13 @@ See the [Outcome classes](#outcome-classes) table for what each `<reason>` means
 - `agent-exit-nonzero` → check the model provider (rate limits, auth refresh, network). The agent's stderr is in the `.log` file.
 - `divergent-history` → a teammate likely landed a commit on `origin/<default>` while the agent's distill ran. `git pull --no-rebase` to integrate.
 
-### "vault not a git repo" / "legacy embedded layout"
+### "vault not a git repo"
 
-Auto-distill requires **git** and the **subdir vault layout**. If you see:
+Auto-distill requires **git**. If you see:
 
 - `vault not a git repo` — either set `distill.enabled: true` and let pi-napkin auto-init git for you on next session, run `git init` in the vault root manually, or disable auto-distill with `distill.enabled: false`.
-- `legacy embedded layout` — follow the [migration steps](#migration-from-legacy-layout). Auto-distill stays off for this session; manual `/distill` works regardless.
 
-Manual `/distill` works without git and works on any vault layout.
+Manual `/distill` works without git.
 
 ### Testing hooks
 

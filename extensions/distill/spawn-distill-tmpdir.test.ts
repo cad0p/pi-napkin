@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, test } from "vitest";
 import { spawnDistill } from "./index";
 
 /**
- * Regression tests for the legacy `spawnDistill` code path (manual
+ * Regression tests for the tmpdir `spawnDistill` code path (manual
  * `/distill` on git-less vaults, or as fallback when git-backed paths
  * decline). The older implementation built a shell command string and
  * `spawn("sh", ["-c", cmd])` — every interpolated variable was one
@@ -65,15 +65,15 @@ function makeMockSpawn(): {
   return { spawnFn, calls };
 }
 
-describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
+describe("spawnDistill (tmpdir argv-based path, SEC-1)", () => {
   let cwd: string;
   let sessionDir: string;
   let sessionFile: string;
   const tmpDirs: string[] = [];
 
   beforeEach(() => {
-    cwd = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-legacy-cwd-"));
-    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-legacy-src-"));
+    cwd = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-tmpdir-cwd-"));
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "spawn-tmpdir-src-"));
     sessionFile = createSeededSessionFile(cwd, sessionDir);
   });
 
@@ -153,12 +153,12 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
   test("prompt does NOT contain the worktree-isolation prefix (R7-CC-11)", () => {
     // POST-R6-CACHE moved the worktree-isolation framing into
     // `distill-prompt.md`, used only by the worktree spawn path. The
-    // legacy spawn path (this one) is for git-less / disabled /
-    // legacy-embedded vaults where there's no worktree to isolate —
-    // the framing would be a confusing lie. Pin that the prompt the
-    // legacy path sends to the wrapper does NOT contain the framing's
-    // signature phrase, so a future refactor that accidentally folds
-    // the framing into a shared helper surfaces the regression here.
+    // tmpdir spawn path (this one) is for git-less / disabled vaults
+    // where there's no worktree to isolate — the framing would be a
+    // confusing lie. Pin that the prompt the tmpdir path sends to the
+    // wrapper does NOT contain the framing's signature phrase, so a
+    // future refactor that accidentally folds the framing into a shared
+    // helper surfaces the regression here.
     const { spawnFn, calls } = makeMockSpawn();
     const tmpDir = spawnDistill(
       sessionFile,
@@ -167,7 +167,7 @@ describe("spawnDistill (legacy argv-based path, SEC-1)", () => {
       spawnFn,
     );
     if (tmpDir) tmpDirs.push(tmpDir);
-    // args[6] is the LEGACY_DISTILL_PROMPT positional that the wrapper
+    // args[6] is the TMPDIR_DISTILL_PROMPT positional that the wrapper
     // passes to `pi -p`. Worktree-isolation framing's signature phrase
     // from `distill-prompt.md` is "lives in the git worktree at".
     expect(calls[0].args[6]).not.toContain("lives in the git worktree at");

@@ -175,6 +175,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
 import distillExtension from "../extensions/distill";
@@ -208,13 +209,7 @@ const DISTILL_MAX_DURATION_MINUTES = 10;
  * caller's PATH being augmented with `node_modules/.bin/`.
  */
 const _here = path.dirname(fileURLToPath(import.meta.url));
-const NAPKIN_BIN = path.resolve(
-  _here,
-  "..",
-  "node_modules",
-  ".bin",
-  "napkin",
-);
+const NAPKIN_BIN = path.resolve(_here, "..", "node_modules", ".bin", "napkin");
 
 /** Slack added to maxDurationMinutes when waiting for the JS poller dispatch. */
 const POLLER_DISPATCH_SLACK_SECS = 30;
@@ -419,7 +414,7 @@ function resolveModel(explicit: string): string {
     let vault = globalCfg?.vault;
     if (typeof vault !== "string") return DEFAULT_MODEL;
     if (vault.startsWith("~/")) vault = path.join(os.homedir(), vault.slice(2));
-    const vaultCfgPath = path.join(vault, ".napkin", "config.json");
+    const vaultCfgPath = path.join(vault, NAPKIN_MARKER, "config.json");
     if (!fs.existsSync(vaultCfgPath)) return DEFAULT_MODEL;
     const vaultCfg = JSON.parse(fs.readFileSync(vaultCfgPath, "utf-8"));
     const provider = vaultCfg?.distill?.model?.provider;
@@ -586,7 +581,7 @@ function setupFixture(): Omit<Fixture, "startSha" | "originStartSha"> {
   // write so napkin's other sections (overview/search/daily/templates/
   // graph/vault) survive — overwriting would silently drop them and
   // mask regressions in the default schema.
-  const configPath = path.join(vaultPath, ".napkin", "config.json");
+  const configPath = path.join(vaultPath, NAPKIN_MARKER, "config.json");
   const config = JSON.parse(fs.readFileSync(configPath, "utf-8"));
   config.distill = {
     enabled: true,
@@ -721,7 +716,7 @@ interface OutcomeSidecar {
  * collapse to line 1 (the canonical class string).
  */
 function readOutcomeSidecar(vaultPath: string): OutcomeSidecar | null {
-  const errorDir = path.join(vaultPath, ".napkin", "distill", "errors");
+  const errorDir = path.join(vaultPath, NAPKIN_MARKER, "distill", "errors");
   if (!fs.existsSync(errorDir)) return null;
   const outcomeFiles = fs
     .readdirSync(errorDir)
@@ -849,7 +844,7 @@ function assertNapkinInitPostConditions(
   // fixture-patched `distill.*` block. Pinning the section names
   // catches a default-schema regression that the previous synthetic-
   // config fixture would have masked.
-  const configPath = path.join(vaultPath, ".napkin", "config.json");
+  const configPath = path.join(vaultPath, NAPKIN_MARKER, "config.json");
   const configExists = fs.existsSync(configPath);
   // biome-ignore lint/suspicious/noExplicitAny: opaque parsed config
   let config: any = null;
@@ -958,8 +953,8 @@ function assertAutoInitPostConditions(
   const results: PostConditionResult[] = [];
 
   // .git/ presence — the bare-minimum invariant: auto-init refused to
-  // run, ran but failed silently, or skipped the path on a vault it
-  // misclassified as legacy-embedded.
+  // run, ran but failed silently, or skipped the path on a vault napkin
+  // refused to resolve (no vault handle).
   const gitDirExists = fs.existsSync(path.join(vaultPath, ".git"));
   results.push({
     name: "auto-init created <vault>/.git/",
@@ -1005,11 +1000,17 @@ function assertAutoInitPostConditions(
   // closes Issue #14 also has a fast-level shadow here: auto-init's
   // initial `git add .` pass should have staged config.json into the
   // first commit. If it didn't, the next `worktree add HEAD` won't
-  // copy config.json into the worktree and napkin will fall back to
-  // legacy-embedded layout.
+  // copy config.json into the worktree and napkin inside the worktree
+  // resolves the real vault instead.
   const lsConfig = spawnSync(
     "git",
-    ["-C", vaultPath, "ls-files", "--error-unmatch", ".napkin/config.json"],
+    [
+      "-C",
+      vaultPath,
+      "ls-files",
+      "--error-unmatch",
+      path.join(NAPKIN_MARKER, "config.json"),
+    ],
     { encoding: "utf-8", env: process.env },
   );
   results.push({
@@ -1204,7 +1205,8 @@ function assertGreenPostConditions(
   const distillWorktreesStillTracked = worktreeList.stdout
     .split("\n")
     .filter(
-      (l) => l.startsWith("worktree ") && l.includes(".napkin/distill"),
+      (l) =>
+        l.startsWith("worktree ") && l.includes(`${NAPKIN_MARKER}/distill`),
     ).length;
   results.push({
     name: "distill worktrees removed",

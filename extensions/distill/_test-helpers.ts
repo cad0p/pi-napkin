@@ -11,6 +11,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
+import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { createDistillWorkspace, resolveCacheRoot } from "./distill-workspace";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
@@ -44,7 +45,7 @@ export function killDistillWrappers(vault: string): void {
     const metaPath = path.join(
       cacheRoot,
       entry,
-      ".napkin",
+      NAPKIN_MARKER,
       "distill",
       "meta.json",
     );
@@ -278,7 +279,7 @@ export function makeWrapperScaffold(prefix: string): WrapperScaffold {
   const vault = path.join(root, "vault");
   const parentCwd = path.join(root, "parent");
   const sessionsDir = path.join(root, "sessions");
-  const errorDir = path.join(vault, ".napkin", "distill", "errors");
+  const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
   const stubPi = path.join(root, "stub-pi");
 
   fs.mkdirSync(vault);

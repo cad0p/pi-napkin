@@ -13,11 +13,7 @@ import type {
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { sendCustomMessageWithFallback } from "../shared/custom-message";
-import {
-  countTrackedFiles,
-  ensureVaultReadyForDistill,
-  LEGACY_EMBEDDED_LAYOUT_ERROR,
-} from "./auto-setup";
+import { countTrackedFiles, ensureVaultReadyForDistill } from "./auto-setup";
 import {
   type ActiveDistill,
   cleanupDistillWorkspace,
@@ -291,7 +287,7 @@ export function loadVaultConfig(vaultPath: string): VaultConfig {
 }
 
 /**
- * LEGACY_DISTILL_PROMPT: used only by the legacy `spawnDistill` path
+ * TMPDIR_DISTILL_PROMPT: used only by the tmpdir `spawnDistill` path
  * (argv-based, pre-PR-12). The canonical agent-driven prompt lives in
  * `distill-prompt.md` (loaded via `buildDistillPrompt` from
  * `distill-prompt.ts`) and is the source of truth for steps 1–10 of
@@ -300,13 +296,13 @@ export function loadVaultConfig(vaultPath: string): VaultConfig {
  * This constant duplicates roughly steps 1–5 of the canonical prompt
  * (overview → templates → identify → search/append/create → daily
  * note + supersedes frontmatter). Do NOT add new steps here without
- * cross-checking distill-prompt.md — the legacy path is intentionally
- * retained for git-less / disabled / legacy-embedded vaults that
- * can't take the worktree spawn path, so drift between the two
- * prompts is a hazard. Phase D / a future cleanup pass may factor
- * the shared content into a single source.
+ * cross-checking distill-prompt.md — the tmpdir path is intentionally
+ * retained for git-less or disabled vaults that can't take the
+ * worktree spawn path, so drift between the two prompts is a
+ * hazard. Phase D / a future cleanup pass may factor the shared
+ * content into a single source.
  */
-const LEGACY_DISTILL_PROMPT = `Distill this conversation into the napkin vault.
+const TMPDIR_DISTILL_PROMPT = `Distill this conversation into the napkin vault.
 
 1. \`napkin overview\` — learn the vault structure and what exists. Read \`_about.md\` files to understand what each folder is for. These are short folder descriptions (1-2 paragraphs) explaining what kinds of notes belong there — see existing ones for style.
 2. \`napkin template list\` and \`napkin template read\` — learn the note formats.
@@ -324,7 +320,7 @@ stand alone.
 
 Be selective. Only capture knowledge useful to someone working on this project later. Skip meta-discussion, tool output, and chatter.`;
 
-// Inline bash script template for the legacy (git-optional) manual
+// Inline bash script template for the tmpdir (git-optional) manual
 // /distill path. Tainted values flow through positional `$1..$5` argv;
 // the template itself is a fixed literal, never interpolated from user
 // input. Same trust boundary as the worktree wrapper, without a
@@ -332,7 +328,7 @@ Be selective. Only capture knowledge useful to someone working on this project l
 //
 // Bash (not sh) because we use arrays for optional --model splicing;
 // Ubuntu's /bin/sh is dash which parse-errors on `pi_args=(...)`.
-const LEGACY_SPAWN_SCRIPT = `set -u
+const TMPDIR_SPAWN_SCRIPT = `set -u
 PI_BIN="$1"; SESSION="$2"; TMPDIR_ARG="$3"; PROMPT="$4"; MODEL="$5"
 pi_args=(--session "$SESSION" -p "$PROMPT")
 if [ -n "$MODEL" ]; then
@@ -348,10 +344,9 @@ rm -rf -- "$TMPDIR_ARG"
  * dir. Returns the temp dir path (used as a completion marker — when it
  * disappears, distill is done).
  *
- * Used only by manual `/distill` on git-less, disabled, or legacy-embedded
- * vaults. Manual `/distill` with git + subdir layout + enabled takes the
- * worktree path. Auto-distill requires git + subdir layout unconditionally
- * (Phase C1).
+ * Used only by manual `/distill` on git-less or disabled vaults. Manual
+ * `/distill` with git + enabled takes the worktree path. Auto-distill
+ * requires git unconditionally (Phase C1).
  */
 export function spawnDistill(
   sessionFile: string,
@@ -378,12 +373,12 @@ export function spawnDistill(
       "bash",
       [
         "-c",
-        LEGACY_SPAWN_SCRIPT,
+        TMPDIR_SPAWN_SCRIPT,
         "_",
         piBin,
         forkedFile,
         tmpDir,
-        LEGACY_DISTILL_PROMPT,
+        TMPDIR_DISTILL_PROMPT,
         modelStr,
       ],
       {
@@ -464,6 +459,14 @@ export default function (pi: ExtensionAPI) {
   };
   let uiRef: DistillUIRef | null = null;
 
+  // Session liveness guard for timer callbacks. pi invalidates the ctx captured
+  // at session_start after session replacement/reload — but a setInterval
+  // callback already queued in the macrotask queue still fires after
+  // clearInterval() (JS semantics), so a tick can observe an invalidated ctx.
+  // session_shutdown handlers complete BEFORE invalidation (pi lifecycle), so
+  // flipping this flag there makes any queued tick a clean no-op (issue #84).
+  let sessionActive = false;
+
   pi.on("before_provider_request", (event) =>
     applyDistillPromptCacheKey(event.payload),
   );
@@ -501,16 +504,17 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (event, ctx) => {
+    // Arm the session liveness guard FIRST — before any early-return path — so
+    // a tick queued from a previous session can never observe a dead session
+    // while this one is starting (issue #84).
+    sessionActive = true;
+
     // Reset to default before any early-return paths below; the persisted state
     // (if any) is re-read further down when distill is enabled for the session.
     autoDistillSuppressed = false;
 
-    let napkinVault: { configPath: string; contentPath: string };
-    try {
-      napkinVault = new Napkin(ctx.cwd).vault;
-    } catch {
-      return;
-    }
+    const napkinVault = resolveDistillVault(ctx.cwd);
+    if (!napkinVault) return;
     const vaultConfigPath = napkinVault.configPath;
 
     let showStatus: boolean;
@@ -578,43 +582,24 @@ export default function (pi: ExtensionAPI) {
         },
         "fast",
       );
-      if (setup.error === LEGACY_EMBEDDED_LAYOUT_ERROR) {
-        // Legacy embedded layout (`~/.napkin/` with `config.json`
-        // alongside notes, no `.napkin/` subdir). Worktree-based
-        // concurrency requires the subdir layout so napkin's
-        // `findVault` resolves cwd=worktree to the worktree itself.
-        // README has the migration steps; point there instead of
-        // duplicating them in the notify (keeps the notification
-        // short enough to render cleanly in every UI surface). Skip
-        // the structured per-finding render below so the same
-        // condition doesn't fire two error notifies.
-        setupFailed = true;
-        if (ctx.hasUI) {
-          ctx.ui.notify(
-            "Auto-distill requires the subdir vault layout. See README for migration, or set distill.enabled: false in vault config.json.",
-            "error",
-          );
-        }
-      } else {
-        // Surface every non-legacy finding through the structured
-        // helper so fast-level error invariants (malformed gitignore
-        // markers, invalid `config.json`) get the same notify
-        // treatment as the full-level call sites and so auto-recovered
-        // findings (gitignore install / migrate / reset) reach the user
-        // here at session_start instead of at the first interval tick.
-        const { hasErrors } = surfaceHealthFindings(ctx, setup.findings);
-        setupFailed = !!setup.error || hasErrors;
+      // Surface every finding through the structured
+      // helper so fast-level error invariants (malformed gitignore
+      // markers, invalid `config.json`) get the same notify
+      // treatment as the full-level call sites and so auto-recovered
+      // findings (gitignore install / migrate / reset) reach the user
+      // here at session_start instead of at the first interval tick.
+      const { hasErrors } = surfaceHealthFindings(ctx, setup.findings);
+      setupFailed = !!setup.error || hasErrors;
 
-        // Generic fail-soft errors (git init / add / commit /
-        // scaffolding-write failures) populate `setup.error` but not
-        // `findings`; surface the underlying message so the user knows
-        // why setup aborted on this session.
-        if (setup.error && ctx.hasUI) {
-          ctx.ui.notify(
-            `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
-            "error",
-          );
-        }
+      // Generic fail-soft errors (git init / add / commit /
+      // scaffolding-write failures) populate `setup.error` but not
+      // `findings`; surface the underlying message so the user knows
+      // why setup aborted on this session.
+      if (setup.error && ctx.hasUI) {
+        ctx.ui.notify(
+          `Auto-distill setup failed: ${setup.error}. Disabling auto-distill for this session.`,
+          "error",
+        );
       }
 
       // Initial-run onboarding notify carries scope context (file
@@ -709,19 +694,43 @@ export default function (pi: ExtensionAPI) {
 
     if (ctx.hasUI && showStatus) {
       countdownHandle = setInterval(() => {
-        // `renderIdleStatus` self-guards against in-flight distills; when off
-        // it paints `distill: off (session)` (pi dedupes identical status strings).
-        renderIdleStatus();
+        // Queued tick after session replacement/reload must not touch
+        // `uiRef.ui` (stale ctx) — skip the countdown render entirely.
+        if (!sessionActive) return;
+        try {
+          // `renderIdleStatus` self-guards against in-flight distills; when
+          // off it paints `distill: off (session)` (pi dedupes identical
+          // status strings).
+          renderIdleStatus();
+        } catch (err) {
+          // A tick must never take down pi (same invariant as the
+          // auto-distill interval tick): any unexpected render error logs
+          // and is retried on the next countdown repaint.
+          console.error("[napkin-distill] countdown tick failed:", err);
+        }
       }, IDLE_STATUS_REPAINT_INTERVAL_MS);
     }
 
     intervalHandle = setInterval(() => {
+      if (!sessionActive) return; // queued tick after replacement/reload → clean no-op
       if (autoDistillSuppressed) return;
-      runAutoDistill(ctx);
+      try {
+        runAutoDistill(ctx);
+      } catch (err) {
+        // A tick must never take down pi: any unexpected error (stale ctx,
+        // vault config, spawn) logs and is retried on the next tick.
+        console.error("[napkin-distill] auto-distill tick failed:", err);
+      }
     }, intervalMs);
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    // Drop the liveness guard BEFORE clearing the timers — both are
+    // synchronous, so no window exists where a tick sees `sessionActive` true
+    // with cleared handles. A tick already queued in the macrotask queue
+    // becomes a clean no-op (issue #84).
+    sessionActive = false;
+
     if (countdownHandle) {
       clearInterval(countdownHandle);
       countdownHandle = null;
@@ -754,12 +763,7 @@ export default function (pi: ExtensionAPI) {
     // session_start — handler scope keeps closures small, and the cost of
     // one extra JSON parse at shutdown is negligible.
     try {
-      let vaultInfo: { configPath: string; contentPath: string } | null = null;
-      try {
-        vaultInfo = new Napkin(ctx.cwd).vault;
-      } catch {
-        // No vault resolvable — skip spawn, proceed to final resets.
-      }
+      const vaultInfo = resolveDistillVault(ctx.cwd);
       if (vaultInfo) {
         const { distill: config } = loadVaultConfig(vaultInfo.configPath);
         const sessionFile = ctx.sessionManager.getSessionFile?.();
@@ -875,7 +879,7 @@ export default function (pi: ExtensionAPI) {
   >;
 
   /**
-   * Strategy bundle for the shared runner. Each caller (legacy or worktree)
+   * Strategy bundle for the shared runner. Each caller (tmpdir or worktree)
    * supplies a preflight check, a spawn invocation, a poll-completion
    * target, and a timeout cleanup step. Everything else (config load,
    * size dedup, status-bar painting, poll loop wiring, completion
@@ -884,7 +888,7 @@ export default function (pi: ExtensionAPI) {
    * All strategy callbacks receive `vaultContentPath` — the vault's content
    * root as resolved by napkin, NOT `ctx.cwd`. This is what makes the
    * whole auto-distill pipeline cwd-independent: worktrees, git, and the
-   * legacy spawn all target the user's actual vault even when pi is
+   * tmpdir spawn all target the user's actual vault even when pi is
    * launched from another directory (napkin's findVault walks up from
    * `ctx.cwd` and falls back to the global config).
    */
@@ -930,9 +934,9 @@ export default function (pi: ExtensionAPI) {
        * but after creating its forensic log). Returns null on success.
        *
        * The runner uses the result to surface a UI failure on the
-       * worktree path (mirrors the timeout-surfacing pattern). Legacy
-       * spawn doesn't produce error logs in this shape — omit or
-       * return null.
+       * worktree path (mirrors the timeout-surfacing pattern). The
+       * tmpdir spawn doesn't produce error logs in this shape — omit
+       * or return null.
        */
       checkFailure?: () => string | null;
       /**
@@ -944,8 +948,8 @@ export default function (pi: ExtensionAPI) {
        * Missing sidecar AND missing failure log = abnormal termination
        * (SIGKILL / `set -e` / disk full / race) — the runner surfaces
        * a warn-level notification per the locked notification severity
-       * contract. Legacy spawn doesn't produce outcome sidecars — omit
-       * or return null.
+       * contract. The tmpdir spawn doesn't produce outcome sidecars —
+       * omit or return null.
        */
       checkOutcome?: () => DistillOutcome | null;
     } | null;
@@ -1055,12 +1059,8 @@ export default function (pi: ExtensionAPI) {
   function runDistillWith(ctx: RunCtx, strategy: DistillStrategy): void {
     if (isRunning) return;
 
-    let vaultInfo: { configPath: string; contentPath: string };
-    try {
-      vaultInfo = new Napkin(ctx.cwd).vault;
-    } catch {
-      return;
-    }
+    const vaultInfo = resolveDistillVault(ctx.cwd);
+    if (!vaultInfo) return;
     const vaultContentPath = vaultInfo.contentPath;
 
     let showStatus: boolean;
@@ -1151,7 +1151,12 @@ export default function (pi: ExtensionAPI) {
       );
     }
 
-    pollHandle = setInterval(() => {
+    // Poll body lives in its own closure function so the timer wrapper below
+    // can guard it: queued stale ticks after session replacement/reload must
+    // not touch ctx.ui / ctx.sessionManager NOR reset isRunning — shutdown
+    // already cleared pollHandle and reset isRunning; the next session owns
+    // them.
+    const pollTick = (): void => {
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
       const timedOut = Date.now() - startTime > getMaxDistillDurationMs(config);
 
@@ -1244,9 +1249,10 @@ export default function (pi: ExtensionAPI) {
       // `*.outcome` sidecar before any successful exit-0 path; the
       // class string drives the UI severity per the locked notification
       // severity contract. See `formatOutcomeNotification` for the
-      // full mapping. Strategies that don't produce sidecars (legacy
-      // /distill on git-less or disabled vaults) skip this entire
-      // dispatch and fall through to the default info notification.
+      // full mapping. Strategies that don't produce sidecars (the
+      // tmpdir `/distill` on git-less or disabled vaults) skip this
+      // entire dispatch and fall through to the default info
+      // notification.
       let outcome: DistillOutcome | null = null;
       if (checkOutcome) {
         try {
@@ -1281,47 +1287,48 @@ export default function (pi: ExtensionAPI) {
         }
         ctx.ui.notify(message, level);
       }
+    };
+
+    pollHandle = setInterval(() => {
+      // Queued stale tick after session replacement/reload → clean no-op.
+      if (!sessionActive) return;
+      try {
+        pollTick();
+      } catch (err) {
+        // A tick must never take down pi (same invariant as the auto-distill
+        // interval tick): in the cached-module reload window an old-session
+        // tick can pass the re-armed guard and hit the stale ctx — log and
+        // drop (the next session owns all poll state).
+        console.error("[napkin-distill] distill poll tick failed:", err);
+      }
     }, DISTILL_POLL_TICK_MS);
   }
 
   function runDistill(ctx: RunCtx) {
     // Manual `/distill` routing: use the worktree path only when the user
-    // has opted into auto-distill (`distill.enabled=true`), git is
-    // available, AND the vault uses the subdir layout. Otherwise fall
-    // back to the legacy tmpdir spawn, which has zero git side effects.
+    // has opted into auto-distill (`distill.enabled=true`) and git is
+    // available. Otherwise fall back to the tmpdir spawn, which has zero
+    // git side effects.
     //
     // `distill.enabled=false` means the user opted out of auto-distill's
     // infrastructure (worktree-based concurrency, scaffolded `.gitignore`,
-    // session-fork housekeeping). Legacy path bypasses all of it.
+    // session-fork housekeeping). The tmpdir path bypasses all of it.
     //
-    // Legacy-embedded layout (`configPath === contentPath`) forces the
-    // same fallback: the worktree path silently corrupts on that layout
-    // because napkin's `findVault` from cwd=<worktree> walks past the
-    // worktree and resolves to the real `~/.napkin/` via global config
-    // fallback. Distill writes land on the real vault, worktree stays
-    // empty, concurrency guarantee degrades to zero. README covers the
-    // subdir migration; auto-distill refuses this layout at session_start.
-    //
-    // Cross-session concurrency caveat: the legacy fallback has no
-    // worktree isolation — two concurrent `/distill` calls on a git-less,
-    // disabled, or legacy-embedded vault race on napkin writes. With
-    // git + enabled + subdir layout, both manual and auto paths serialize
-    // through per-distill worktrees, and the agent owns merge resolution
-    // end-to-end (PR #12).
+    // Cross-session concurrency caveat: the tmpdir fallback has no
+    // worktree isolation — two concurrent `/distill` calls on a git-less
+    // or disabled vault race on napkin writes. With git + enabled, both
+    // manual and auto paths serialize through per-distill worktrees, and
+    // the agent owns merge resolution end-to-end (PR #12).
     runDistillWith(ctx, {
       spawnFn: (args) => {
         const gitPresent = fs.existsSync(
           path.join(args.vaultContentPath, ".git"),
         );
-        // Legacy-embedded detection matches the predicate in
-        // `ensureVaultReadyForDistill` (keep the two gates in lockstep).
-        const isLegacyEmbedded = args.vaultConfigPath === args.vaultContentPath;
-        if (gitPresent && args.config.enabled && !isLegacyEmbedded) {
+        if (gitPresent && args.config.enabled) {
           // Full health-check before the worktree-based spawn. Surfaces
           // auto-recovered findings as info notifies; aborts the spawn
           // when any error finding fires (corrupt config, malformed
-          // gitignore markers, etc.). Legacy-embedded routing skips this
-          // entirely — those vaults are untouched by auto-distill.
+          // gitignore markers, etc.).
           const setup = ensureVaultReadyForDistill(
             {
               contentPath: args.vaultContentPath,
@@ -1334,7 +1341,7 @@ export default function (pi: ExtensionAPI) {
           if (hasErrors || setup.error) return null;
           return worktreeSpawnFn(args);
         }
-        return legacySpawnFn(args);
+        return tmpdirSpawnFn(args);
       },
     });
   }
@@ -1363,8 +1370,7 @@ export default function (pi: ExtensionAPI) {
         // Full health-check before each tick: rewires drift in the
         // managed gitignore block, re-emits structured findings, aborts
         // the spawn on any error finding (corrupt config, malformed
-        // markers). Auto-distill always uses the worktree path; the
-        // legacy-embedded route only exists for manual `/distill`.
+        // markers). Auto-distill always uses the worktree path.
         const setup = ensureVaultReadyForDistill(
           {
             contentPath: args.vaultContentPath,
@@ -1381,7 +1387,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * Legacy tmpdir spawn strategy. Forks the session under `$TMPDIR` and
+   * Tmpdir spawn strategy. Forks the session under `$TMPDIR` and
    * runs `pi -p` detached; cleanup is a plain `rmSync`. No git, no
    * concurrency coordination. Only used by manual `/distill` as a
    * fallback for vaults without `.git/`.
@@ -1391,11 +1397,9 @@ export default function (pi: ExtensionAPI) {
    * (cwd-independent via `new Napkin(ctx.cwd).vault`). The distill
    * subprocess itself calls `napkin` commands that walk up from their
    * cwd, so targeting `vaultContentPath` ensures they hit the user's
-   * real vault regardless of where pi was originally launched. This
-   * matches the pre-worktree behavior where the session operated
-   * directly on the vault root — no isolation, napkin-from-cwd only.
+   * real vault regardless of where pi was originally launched.
    */
-  function legacySpawnFn(args: {
+  function tmpdirSpawnFn(args: {
     ctx: RunCtx;
     vaultContentPath: string;
     vaultConfigPath: string;
@@ -1486,7 +1490,10 @@ export default function (pi: ExtensionAPI) {
       // repaint.
       let showStatus = true;
       try {
-        ({ showStatus } = loadVaultConfig(new Napkin(c.cwd).vault.configPath));
+        const cfgVault = resolveDistillVault(c.cwd);
+        if (cfgVault) {
+          ({ showStatus } = loadVaultConfig(cfgVault.configPath));
+        }
       } catch (cfgErr) {
         if (cfgErr instanceof MalformedVaultConfigError && c.hasUI) {
           c.ui.notify(
@@ -1537,9 +1544,12 @@ export default function (pi: ExtensionAPI) {
       // Detect when distill is disabled in the vault config so we can warn that
       // toggling the session flag has no effect.
       let vaultDistillEnabled = false;
+      const cfgVault = resolveDistillVault(ctx.cwd);
       try {
-        const vaultConfigPath = new Napkin(ctx.cwd).vault.configPath;
-        vaultDistillEnabled = loadVaultConfig(vaultConfigPath).distill.enabled;
+        if (cfgVault) {
+          vaultDistillEnabled = loadVaultConfig(cfgVault.configPath).distill
+            .enabled;
+        }
       } catch {
         // No vault — treat as disabled at vault level.
       }
@@ -1641,16 +1651,36 @@ export default function (pi: ExtensionAPI) {
   // ---------------------------------------------------------------------------
 
   /**
+   * Resolve the distill vault handle from a cwd.
+   *
+   * Uses napkin's own resolution (`new Napkin(cwd).vault`, which
+   * includes the global-config fallback). napkin >= 0.14 refuses
+   * legacy-embedded layouts and missing/unreadable `config.json` with
+   * `VaultNotFoundError`; distill supports exactly what napkin
+   * resolves — a refused vault is treated as no vault (silent skip;
+   * napkin's own CLI surfaces the refusal with migration guidance).
+   *
+   * Returns null when no vault can be resolved.
+   */
+  function resolveDistillVault(cwd: string): {
+    configPath: string;
+    contentPath: string;
+  } | null {
+    try {
+      const vault = new Napkin(cwd).vault;
+      return { configPath: vault.configPath, contentPath: vault.contentPath };
+    } catch {
+      return null;
+    }
+  }
+
+  /**
    * Resolve the main vault path from a command `ctx`. Returns null when
    * no vault can be resolved (ctx.cwd isn't inside a napkin vault) — callers
    * surface a user-facing message in that case.
    */
   function resolveVaultPath(cwd: string): string | null {
-    try {
-      return new Napkin(cwd).vault.contentPath;
-    } catch {
-      return null;
-    }
+    return resolveDistillVault(cwd)?.contentPath ?? null;
   }
 
   pi.registerCommand("distill-status", {
