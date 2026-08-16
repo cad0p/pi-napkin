@@ -2,6 +2,32 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.1] - 2026-08-16
+
+<!-- USER-EDITABLE SECTION START -->
+**Steering plugin GA + distill crash fix:**
+
+- **Steering carve-outs now ship as a plugin**: `@cad0p/pi-napkin/steering` narrows pi-steering's `no-main-commit` / `no-main-commit-github` guards by name via the exemption registry (pi-steering ≥ 0.2.0-20260812.0) — zero path config, fail-closed on unknown cwd. Hand-rolled `VAULT_DIRS` rule copies can be deleted.
+- **Plain-node consumers can import `./steering`**: the subpath ships compiled `dist/steering` (JS + declarations + maps), no jiti/loader needed; pi's own extension loader still resolves raw `.ts` via jiti.
+- **Vault walk de-duplicated** onto napkin's `findAncestorVault` (requires napkin ≥ 0.14.0-20260814.0); the `.napkin` marker name is single-sourced from `NAPKIN_MARKER` (requires napkin ≥ 0.14.0-20260814.2).
+- **Auto-distill no longer crashes pi** on session replacement: distill timers guard against stale context after session-new/fork/switch and `/reload` (#84).
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(steering)* Napkin-vault carve-outs via pi-steering exemption registry ([#73](https://github.com/cad0p/pi-napkin/pull/73)) ([#75](https://github.com/cad0p/pi-napkin/pull/75))
+- *(steering)* Compile the steering subpath to dist/steering (closes #78) ([#79](https://github.com/cad0p/pi-napkin/pull/79))
+- *(steering)* De-dup the vault walk via napkin's findAncestorVault (fixes #80) ([#81](https://github.com/cad0p/pi-napkin/pull/81))
+
+### 🐛 Bug Fixes
+
+- *(extension)* Guard distill timers against stale ctx after session replacement (closes #84)
+
+### 🚜 Refactor
+
+- Import NAPKIN_MARKER from @cad0p/napkin, drop .napkin literals (fixes #82) ([#83](https://github.com/cad0p/pi-napkin/pull/83))
+
+
 ## [0.7.0] - 2026-08-12
 
 <!-- USER-EDITABLE SECTION START -->
