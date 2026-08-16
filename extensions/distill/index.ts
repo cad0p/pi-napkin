@@ -459,6 +459,14 @@ export default function (pi: ExtensionAPI) {
   };
   let uiRef: DistillUIRef | null = null;
 
+  // Session liveness guard for timer callbacks. pi invalidates the ctx captured
+  // at session_start after session replacement/reload — but a setInterval
+  // callback already queued in the macrotask queue still fires after
+  // clearInterval() (JS semantics), so a tick can observe an invalidated ctx.
+  // session_shutdown handlers complete BEFORE invalidation (pi lifecycle), so
+  // flipping this flag there makes any queued tick a clean no-op (issue #84).
+  let sessionActive = false;
+
   pi.on("before_provider_request", (event) =>
     applyDistillPromptCacheKey(event.payload),
   );
@@ -496,6 +504,11 @@ export default function (pi: ExtensionAPI) {
   }
 
   pi.on("session_start", async (event, ctx) => {
+    // Arm the session liveness guard FIRST — before any early-return path — so
+    // a tick queued from a previous session can never observe a dead session
+    // while this one is starting (issue #84).
+    sessionActive = true;
+
     // Reset to default before any early-return paths below; the persisted state
     // (if any) is re-read further down when distill is enabled for the session.
     autoDistillSuppressed = false;
@@ -681,19 +694,43 @@ export default function (pi: ExtensionAPI) {
 
     if (ctx.hasUI && showStatus) {
       countdownHandle = setInterval(() => {
-        // `renderIdleStatus` self-guards against in-flight distills; when off
-        // it paints `distill: off (session)` (pi dedupes identical status strings).
-        renderIdleStatus();
+        // Queued tick after session replacement/reload must not touch
+        // `uiRef.ui` (stale ctx) — skip the countdown render entirely.
+        if (!sessionActive) return;
+        try {
+          // `renderIdleStatus` self-guards against in-flight distills; when
+          // off it paints `distill: off (session)` (pi dedupes identical
+          // status strings).
+          renderIdleStatus();
+        } catch (err) {
+          // A tick must never take down pi (same invariant as the
+          // auto-distill interval tick): any unexpected render error logs
+          // and is retried on the next countdown repaint.
+          console.error("[napkin-distill] countdown tick failed:", err);
+        }
       }, IDLE_STATUS_REPAINT_INTERVAL_MS);
     }
 
     intervalHandle = setInterval(() => {
+      if (!sessionActive) return; // queued tick after replacement/reload → clean no-op
       if (autoDistillSuppressed) return;
-      runAutoDistill(ctx);
+      try {
+        runAutoDistill(ctx);
+      } catch (err) {
+        // A tick must never take down pi: any unexpected error (stale ctx,
+        // vault config, spawn) logs and is retried on the next tick.
+        console.error("[napkin-distill] auto-distill tick failed:", err);
+      }
     }, intervalMs);
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
+    // Drop the liveness guard BEFORE clearing the timers — both are
+    // synchronous, so no window exists where a tick sees `sessionActive` true
+    // with cleared handles. A tick already queued in the macrotask queue
+    // becomes a clean no-op (issue #84).
+    sessionActive = false;
+
     if (countdownHandle) {
       clearInterval(countdownHandle);
       countdownHandle = null;
@@ -1114,7 +1151,12 @@ export default function (pi: ExtensionAPI) {
       );
     }
 
-    pollHandle = setInterval(() => {
+    // Poll body lives in its own closure function so the timer wrapper below
+    // can guard it: queued stale ticks after session replacement/reload must
+    // not touch ctx.ui / ctx.sessionManager NOR reset isRunning — shutdown
+    // already cleared pollHandle and reset isRunning; the next session owns
+    // them.
+    const pollTick = (): void => {
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
       const timedOut = Date.now() - startTime > getMaxDistillDurationMs(config);
 
@@ -1244,6 +1286,20 @@ export default function (pi: ExtensionAPI) {
           );
         }
         ctx.ui.notify(message, level);
+      }
+    };
+
+    pollHandle = setInterval(() => {
+      // Queued stale tick after session replacement/reload → clean no-op.
+      if (!sessionActive) return;
+      try {
+        pollTick();
+      } catch (err) {
+        // A tick must never take down pi (same invariant as the auto-distill
+        // interval tick): in the cached-module reload window an old-session
+        // tick can pass the re-armed guard and hit the stale ctx — log and
+        // drop (the next session owns all poll state).
+        console.error("[napkin-distill] distill poll tick failed:", err);
       }
     }, DISTILL_POLL_TICK_MS);
   }
