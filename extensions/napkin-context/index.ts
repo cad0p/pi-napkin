@@ -188,9 +188,17 @@ function getOverview(n: Napkin): { text: string; root: string } | null {
     const overview = n.overview();
     if (!overview) return null;
 
-    let text = overview.context || "";
+    // The tags delimit the injected blocks so the provider's merge of
+    // consecutive user-role turns keeps vault context distinguishable from
+    // the user's actual message. Constant tag text keeps the prompt-cache
+    // prefix stable.
+    const blocks: string[] = [];
+    const context = overview.context?.trim();
+    if (context) {
+      blocks.push(`<napkin-context>\n${context}\n</napkin-context>`);
+    }
     if (overview.overview && overview.overview.length > 0) {
-      text += "\n\n";
+      let listing = "";
       for (const folder of overview.overview) {
         const collapsed = folder.collapsedFolders
           ? ` (+${folder.collapsedFolders} similar subfolders)`
@@ -198,19 +206,22 @@ function getOverview(n: Napkin): { text: string; root: string } | null {
         // The SDK reports the vault root as "/"; the CLI renders it as
         // "./". Mirror that here — "//" looked like a broken path.
         const path = folder.path === "/" ? "." : folder.path;
-        text += `${path}/${collapsed}\n`;
+        listing += `${path}/${collapsed}\n`;
         if (folder.keywords && folder.keywords.length > 0) {
-          text += `  keywords: ${folder.keywords.join(", ")}\n`;
+          listing += `  keywords: ${folder.keywords.join(", ")}\n`;
         }
-        text += `  notes: ${folder.notes}\n`;
+        listing += `  notes: ${folder.notes}\n`;
       }
       if (overview.truncated) {
         // maxRows cap in the SDK dropped the tail of the sorted listing;
         // tell the agent the vault is bigger than what's shown.
-        text += `\n… ${overview.truncated.rows} more folders (${overview.truncated.notes} notes) — use kb_search to find specific content\n`;
+        listing += `\n… ${overview.truncated.rows} more folders (${overview.truncated.notes} notes) — use kb_search to find specific content\n`;
       }
+      blocks.push(
+        `<napkin-overview>\n${listing.trimEnd()}\n</napkin-overview>`,
+      );
     }
-    const body = text.trim();
+    const body = blocks.join("\n\n").trim();
     if (!body) return null;
     return { text: body, root: overview.root };
   } catch {

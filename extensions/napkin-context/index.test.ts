@@ -483,6 +483,10 @@ describe("vault overview (session context)", () => {
     const { injected, calls } = await runSessionStart(vault);
 
     expect(calls).toBe(1);
+    // listing-only injection (no NAPKIN.md in this vault): wrapped in the
+    // self-describing overview tag
+    expect(injected[0]).toContain("<napkin-overview>");
+    expect(injected[0]).toContain("</napkin-overview>");
     expect(injected[0]).toContain("./");
     expect(injected[0]).not.toContain("//");
     expect(injected[0]).toContain("notes: 1");
@@ -496,15 +500,38 @@ describe("vault overview (session context)", () => {
     const { injected, calls } = await runSessionStart(vault);
 
     expect(calls).toBe(1);
-    // the message starts directly with the NAPKIN.md CONTENT — the
-    // preamble sentence and the "Vault root:" line are gone (the root now
-    // lives in the before_agent_start system prompt mandate)
+    // the message starts directly with the NAPKIN.md CONTENT wrapped in the
+    // self-describing tag — the preamble sentence and the "Vault root:" line
+    // are gone (the root now lives in the before_agent_start system prompt
+    // mandate)
     expect(injected[0]).not.toContain("Vault root:");
     expect(injected[0]).not.toContain("## Napkin vault context");
     expect(injected[0]).toContain("fixture context");
     expect(
-      injected[0].startsWith("# My vault\n\n## What is this?\nfixture context"),
+      injected[0].startsWith(
+        "<napkin-context>\n# My vault\n\n## What is this?\nfixture context\n</napkin-context>",
+      ),
     ).toBe(true);
+    // NAPKIN.md-only vault: the SDK returns { context, overview: [] }, so no
+    // listing block is injected
+    expect(injected[0]).not.toContain("<napkin-overview>");
+  });
+
+  test("wraps the NAPKIN.md content and folder listing in separate self-describing blocks, context first", async () => {
+    const vault = makeVault({
+      "NAPKIN.md": "# My vault\n\n## What is this?\nfixture context",
+      "notes/a.md": "# A\n\nnote content about fixture notes\n",
+    });
+
+    const { injected, calls } = await runSessionStart(vault);
+
+    expect(calls).toBe(1);
+    // context block comes first, listing block second, joined by a blank line
+    expect(injected[0]).toContain("<napkin-context>");
+    expect(injected[0].startsWith("<napkin-context>\n# My vault")).toBe(true);
+    expect(injected[0]).toContain("</napkin-context>\n\n<napkin-overview>");
+    expect(injected[0].endsWith("</napkin-overview>")).toBe(true);
+    expect(injected[0]).toContain("notes/");
   });
 
   test("injects nothing for an empty vault (no root-only message)", async () => {
