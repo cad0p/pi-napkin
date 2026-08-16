@@ -697,9 +697,17 @@ export default function (pi: ExtensionAPI) {
         // Queued tick after session replacement/reload must not touch
         // `uiRef.ui` (stale ctx) — skip the countdown render entirely.
         if (!sessionActive) return;
-        // `renderIdleStatus` self-guards against in-flight distills; when off
-        // it paints `distill: off (session)` (pi dedupes identical status strings).
-        renderIdleStatus();
+        try {
+          // `renderIdleStatus` self-guards against in-flight distills; when
+          // off it paints `distill: off (session)` (pi dedupes identical
+          // status strings).
+          renderIdleStatus();
+        } catch (err) {
+          // A tick must never take down pi (same invariant as the
+          // auto-distill interval tick): any unexpected render error logs
+          // and is retried on the next countdown repaint.
+          console.error("[napkin-distill] countdown tick failed:", err);
+        }
       }, IDLE_STATUS_REPAINT_INTERVAL_MS);
     }
 
@@ -1143,11 +1151,12 @@ export default function (pi: ExtensionAPI) {
       );
     }
 
-    pollHandle = setInterval(() => {
-      // Queued stale tick after session replacement/reload: must not touch
-      // ctx.ui / ctx.sessionManager NOR reset isRunning — shutdown already
-      // cleared pollHandle and reset isRunning; the next session owns them.
-      if (!sessionActive) return;
+    // Poll body lives in its own closure function so the timer wrapper below
+    // can guard it: queued stale ticks after session replacement/reload must
+    // not touch ctx.ui / ctx.sessionManager NOR reset isRunning — shutdown
+    // already cleared pollHandle and reset isRunning; the next session owns
+    // them.
+    const pollTick = (): void => {
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
       const timedOut = Date.now() - startTime > getMaxDistillDurationMs(config);
 
@@ -1277,6 +1286,20 @@ export default function (pi: ExtensionAPI) {
           );
         }
         ctx.ui.notify(message, level);
+      }
+    };
+
+    pollHandle = setInterval(() => {
+      // Queued stale tick after session replacement/reload → clean no-op.
+      if (!sessionActive) return;
+      try {
+        pollTick();
+      } catch (err) {
+        // A tick must never take down pi (same invariant as the auto-distill
+        // interval tick): in the cached-module reload window an old-session
+        // tick can pass the re-armed guard and hit the stale ctx — log and
+        // drop (the next session owns all poll state).
+        console.error("[napkin-distill] distill poll tick failed:", err);
       }
     }, DISTILL_POLL_TICK_MS);
   }

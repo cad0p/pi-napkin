@@ -178,6 +178,7 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
   let xdgCacheDir: string;
 
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
+  const _savedHaltAfterMeta = process.env.NAPKIN_DISTILL_HALT_AFTER_META;
   const _savedXdgCache = process.env.XDG_CACHE_HOME;
   const _savedGitEnv = {
     authorName: process.env.GIT_AUTHOR_NAME,
@@ -206,7 +207,7 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     // meta.json pid rewrite (clears the EXIT trap, exits 0), keeping the
     // worktree on disk and skipping the napkin shim install — so the tests
     // never race the wrapper and need no napkin on PATH. Harmless for the
-    // no-spawn tests (1 and 5); keeping it set everywhere is simpler.
+    // no-spawn tests (1, 5, 6); keeping it set everywhere is simpler.
     process.env.NAPKIN_DISTILL_HALT_AFTER_META = "1";
 
     capturedIntervals = [];
@@ -228,7 +229,9 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     if (_savedRecurse !== undefined)
       process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
-    delete process.env.NAPKIN_DISTILL_HALT_AFTER_META;
+    if (_savedHaltAfterMeta !== undefined)
+      process.env.NAPKIN_DISTILL_HALT_AFTER_META = _savedHaltAfterMeta;
+    else delete process.env.NAPKIN_DISTILL_HALT_AFTER_META;
     for (const [key, val] of [
       ["GIT_AUTHOR_NAME", _savedGitEnv.authorName],
       ["GIT_AUTHOR_EMAIL", _savedGitEnv.authorEmail],
@@ -407,5 +410,61 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
       "[napkin-distill] auto-distill tick failed:",
     );
     expect(countWorktrees(vault)).toBe(0);
+  });
+
+  test("queued OLD-session poll tick after NEW session_start does not crash (load-bearing try/catch)", async () => {
+    // The reload-with-cached-module window, mirrored for the poll loop: an
+    // old-session poll tick queued before the new session_start re-armed
+    // `sessionActive = true` passes the guard, then hits the stale ctx at
+    // `ctx.hasUI` — the first ctx access in the in-flight branch — and
+    // only the poll wrapper's try/catch prevents an uncaughtException.
+    // The tick logs via console.error (captured below) and performs no
+    // work (nothing new is spawned; the session-1 worktree stays).
+    vault = createVault(1);
+    const sm = SessionManager.create(vault, vault);
+    sm.appendMessage({ role: "user", content: "hello" });
+    sm.appendMessage({ role: "assistant", content: "hi" });
+    const ctx1 = makeCtx(sm, vault);
+    const { captured } = await startSession(ctx1);
+
+    // Fire session 1's auto tick → spawns a worktree + registers the
+    // 2000ms pollHandle. The spawn sets lastSpawnedSize, so the shutdown
+    // below dedupes (guard 8) and spawns nothing.
+    const firstSessionInterval = capturedIntervals.find((i) => i.ms === 60_000);
+    expect(firstSessionInterval).toBeDefined();
+    // biome-ignore lint/style/noNonNullAssertion: verified above
+    firstSessionInterval!.cb();
+    expect(countWorktrees(vault)).toBe(1);
+    const firstSessionPoll = [...capturedIntervals]
+      .reverse()
+      .find((i) => i.ms === 2000);
+    expect(firstSessionPoll).toBeDefined();
+
+    await captured.handlers.session_shutdown({ reason: "reload" }, ctx1);
+    // New session re-arms the flag on a FRESH ctx...
+    const ctx2 = makeCtx(sm, vault);
+    await captured.handlers.session_start({ reason: "new" }, ctx2);
+    // ...while the old session's ctx is now invalidated.
+    makeCtxStale(ctx1);
+
+    const tickErrors: unknown[][] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      tickErrors.push(args);
+    };
+    try {
+      // biome-ignore lint/style/noNonNullAssertion: verified above
+      expect(() => firstSessionPoll!.cb()).not.toThrow();
+    } finally {
+      console.error = originalConsoleError;
+    }
+    // The wrapper's try/catch swallowed the stale-ctx throw at the first
+    // ctx access — the poll body ran nothing else, so the session-1
+    // worktree is still the only one.
+    expect(tickErrors).toHaveLength(1);
+    expect(tickErrors[0]?.[0]).toBe(
+      "[napkin-distill] distill poll tick failed:",
+    );
+    expect(countWorktrees(vault)).toBe(1);
   });
 });
