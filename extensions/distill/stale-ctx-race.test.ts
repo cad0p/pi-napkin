@@ -428,8 +428,9 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     const { captured } = await startSession(ctx1);
 
     // Fire session 1's auto tick → spawns a worktree + registers the
-    // 2000ms pollHandle. The spawn sets lastSpawnedSize, so the shutdown
-    // below dedupes (guard 8) and spawns nothing.
+    // 2000ms pollHandle. The shutdown below uses reason "reload", which
+    // shouldDistillOnShutdown guard 2 short-circuits (no shutdown spawn);
+    // lastSpawnedSize (guard 8) would dedupe it as well for other reasons.
     const firstSessionInterval = capturedIntervals.find((i) => i.ms === 60_000);
     expect(firstSessionInterval).toBeDefined();
     // biome-ignore lint/style/noNonNullAssertion: verified above
