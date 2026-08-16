@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.7.2] - 2026-08-16
 
 <!-- USER-EDITABLE SECTION START -->
 **Vault overview no longer merges with the user's first message:**
