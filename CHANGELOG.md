@@ -5,7 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [calver-released]
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+**Steering plugin GA + distill crash fix:**
+
+- **Steering carve-outs now ship as a plugin**: `@cad0p/pi-napkin/steering` narrows pi-steering's `no-main-commit` / `no-main-commit-github` guards by name via the exemption registry (pi-steering ≥ 0.2.0-20260812.0) — zero path config, fail-closed on unknown cwd. Hand-rolled `VAULT_DIRS` rule copies can be deleted.
+- **Plain-node consumers can import `./steering`**: the subpath ships compiled `dist/steering` (JS + declarations + maps), no jiti/loader needed; pi's own extension loader still resolves raw `.ts` via jiti.
+- **Vault walk de-duplicated** onto napkin's `findAncestorVault` (requires napkin ≥ 0.14.0-20260814.0); the `.napkin` marker name is single-sourced from `NAPKIN_MARKER` (requires napkin ≥ 0.14.0-20260814.2).
+- **Auto-distill no longer crashes pi** on session replacement: distill timers guard against stale context after session-new/fork/switch and `/reload` (#84).
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🚀 Features
