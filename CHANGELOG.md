@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [0.7.1] - 2026-08-16
+## [calver-released]
 
 <!-- USER-EDITABLE SECTION START -->
 **Steering plugin GA + distill crash fix:**
