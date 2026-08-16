@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(extension)* Delimit napkin-context vault overview injection with <napkin-context>/<napkin-overview> tags (closes #89) ([#90](https://github.com/cad0p/pi-napkin/pull/90))
+
+
 ## [0.7.1] - 2026-08-16
 
 <!-- USER-EDITABLE SECTION START -->
