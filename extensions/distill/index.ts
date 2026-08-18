@@ -466,6 +466,13 @@ export default function (pi: ExtensionAPI) {
   // session_shutdown handlers complete BEFORE invalidation (pi lifecycle), so
   // flipping this flag there makes any queued tick a clean no-op (issue #84).
   let sessionActive = false;
+  // Session generation (issue #93): incremented at every session_start. Each
+  // timer captures the generation at ARM time; a queued tick from an earlier
+  // session that fires after the next session_start re-armed `sessionActive`
+  // sees a mismatch and returns BEFORE touching its (invalidated) ctx — a
+  // clean no-op instead of the stale-ctx throw + `tick failed` log that #84's
+  // try/catch could only downgrade, not prevent.
+  let sessionGeneration = 0;
 
   pi.on("before_provider_request", (event) =>
     applyDistillPromptCacheKey(event.payload),
@@ -508,6 +515,11 @@ export default function (pi: ExtensionAPI) {
     // a tick queued from a previous session can never observe a dead session
     // while this one is starting (issue #84).
     sessionActive = true;
+    // Increment the session generation BEFORE any early return (issue #93): a
+    // previous session's tick already queued in the macrotask queue must see
+    // a generation mismatch even when this session_start bails on vault/
+    // config below.
+    sessionGeneration += 1;
 
     // Reset to default before any early-return paths below; the persisted state
     // (if any) is re-read further down when distill is enabled for the session.
@@ -692,11 +704,17 @@ export default function (pi: ExtensionAPI) {
       );
     }
 
+    // Generation seen by the timers armed by THIS session_start. A queued
+    // tick from an earlier session that fires after the next session_start
+    // re-armed the flag sees a mismatch and no-ops (issue #93).
+    const armedGeneration = sessionGeneration;
+
     if (ctx.hasUI && showStatus) {
       countdownHandle = setInterval(() => {
         // Queued tick after session replacement/reload must not touch
         // `uiRef.ui` (stale ctx) — skip the countdown render entirely.
         if (!sessionActive) return;
+        if (armedGeneration !== sessionGeneration) return; // old-session tick → clean no-op (#93)
         try {
           // `renderIdleStatus` self-guards against in-flight distills; when
           // off it paints `distill: off (session)` (pi dedupes identical
@@ -713,6 +731,7 @@ export default function (pi: ExtensionAPI) {
 
     intervalHandle = setInterval(() => {
       if (!sessionActive) return; // queued tick after replacement/reload → clean no-op
+      if (armedGeneration !== sessionGeneration) return; // old-session tick → clean no-op (#93)
       if (autoDistillSuppressed) return;
       try {
         runAutoDistill(ctx);
@@ -1289,9 +1308,14 @@ export default function (pi: ExtensionAPI) {
       }
     };
 
+    // Capture the generation at ARM time so a queued poll tick from an
+    // earlier session that fires after the next session_start re-armed the
+    // flag no-ops before touching its stale ctx (issue #93).
+    const armedGeneration = sessionGeneration;
     pollHandle = setInterval(() => {
       // Queued stale tick after session replacement/reload → clean no-op.
       if (!sessionActive) return;
+      if (armedGeneration !== sessionGeneration) return; // old-session tick → clean no-op (#93)
       try {
         pollTick();
       } catch (err) {
