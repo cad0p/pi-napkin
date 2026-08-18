@@ -14,11 +14,13 @@
  * takes down the whole pi process.
  *
  * Fix: a closure-scoped `sessionActive` liveness flag (armed at the top of
- * `session_start`, dropped at the top of `session_shutdown`) makes any
- * queued tick a clean no-op, plus a load-bearing try/catch around the
- * auto-distill tick for the reload-with-cached-module window (an old-session
- * tick queued BEFORE the new `session_start` re-armed the flag passes the
- * guard, then hits the stale ctx and would throw).
+ * `session_start`, dropped at the top of `session_shutdown`) makes any queued
+ * tick after shutdown a clean no-op, and a monotonic `sessionGeneration`
+ * counter (issue #93) makes a queued OLD-session tick that fires after the
+ * next session_start re-armed the flag a clean no-op too — it returns before
+ * touching its invalidated ctx, so no throw and no `tick failed` log. The
+ * load-bearing try/catches stay as belt-and-braces for genuine current-
+ * session errors only.
  *
  * Real pi invalidation is simulated by a ctx whose getters throw the exact
  * stale-ctx error (modelling `ExtensionRunner.assertActive`). The setInterval
@@ -30,8 +32,14 @@
  *   2. Queued poll tick after session_shutdown → clean no-op (no ctx access).
  *   3. Normal tick still spawns a worktree (guard does not block the happy path).
  *   4. Flag re-arms across sessions (reload keeps the cached module closure).
- *   5. Queued OLD-session tick after NEW session_start → no crash
- *      (the load-bearing try/catch window).
+ *   5. Queued OLD-session auto tick after NEW session_start → no throw, no
+ *      console.error, no work (issue #93: before the generation guard it
+ *      logged `auto-distill tick failed` through the try/catch).
+ *   6. Queued OLD-session poll tick after NEW session_start → no throw, no
+ *      console.error, no work (same #93 window, mirrored for the poll loop).
+ *   7. Queued OLD-session countdown tick after NEW session_start → no render
+ *      (pre-#93 it redundantly repainted the status bar through the refreshed
+ *      uiRef; the unit under test is the render, not the log).
  */
 
 import { spawnSync } from "node:child_process";
@@ -41,7 +49,7 @@ import * as path from "node:path";
 import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { cleanupDistillWorktrees } from "./_test-helpers";
+import { cleanupDistillWorktrees, makeFakeUI } from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -270,6 +278,19 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     return { cwd, sessionManager: sm, hasUI: false, ui: null };
   }
 
+  /**
+   * A UI-enabled ctx: session_start arms the countdown timer only when
+   * `ctx.hasUI && showStatus` (showStatus defaults true in the createVault
+   * config), so this shape is required to arm + assert on countdown renders.
+   */
+  function makeUICtx(
+    sm: SessionManager,
+    cwd: string,
+    ui: unknown,
+  ): Record<string, unknown> {
+    return { cwd, sessionManager: sm, hasUI: true, ui };
+  }
+
   test("queued auto-distill tick after session_shutdown is a clean no-op (stale ctx, no crash)", async () => {
     // The exact crash repro from issue #84: a tick queued in the macrotask
     // queue fires after session_shutdown completed and pi invalidated the
@@ -371,13 +392,15 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     expect(countWorktrees(vault)).toBe(1);
   });
 
-  test("queued OLD-session tick after NEW session_start does not crash (load-bearing try/catch)", async () => {
-    // The reload-with-cached-module window: an old-session tick is queued
-    // BEFORE the new session_start re-armed `sessionActive = true`, so it
-    // passes the guard, then hits the stale ctx at `resolveDistillVault
-    // (ctx.cwd)` — the FIRST ctx access, before any side effect. Only the
-    // tick's try/catch prevents an uncaughtException. The tick logs via
-    // console.error (captured below) and performs no work.
+  test("queued OLD-session auto tick after NEW session_start is a clean no-op (no log, no work) — issue #93", async () => {
+    // The issue #93 window: an old-session tick queued in the macrotask
+    // queue fires AFTER the new session_start re-armed `sessionActive =
+    // true`, so the #84 flag check passes. The session generation guard is
+    // the only thing that tells this tick it belongs to the OLD session: it
+    // returns before `runAutoDistill` touches the invalidated ctx at
+    // `resolveDistillVault(ctx.cwd)` — no throw and no work. Pre-#93 this
+    // exact window threw inside the tick's try/catch and logged
+    // `auto-distill tick failed`; the generation guard makes it silent.
     vault = createVault(1);
     const sm = SessionManager.create(vault, vault);
     const ctx1 = makeCtx(sm, vault);
@@ -386,7 +409,7 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     expect(firstSessionInterval).toBeDefined();
 
     await captured.handlers.session_shutdown({ reason: "new" }, ctx1);
-    // New session re-arms the flag on a FRESH ctx...
+    // New session re-arms the flag + generation on a FRESH ctx...
     const ctx2 = makeCtx(sm, vault);
     await captured.handlers.session_start({ reason: "new" }, ctx2);
     // ...while the old session's ctx is now invalidated.
@@ -403,23 +426,19 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     } finally {
       console.error = originalConsoleError;
     }
-    // The try/catch swallowed the stale-ctx throw at the first ctx access —
-    // nothing else in the tick ran, so nothing was spawned.
-    expect(tickErrors).toHaveLength(1);
-    expect(tickErrors[0]?.[0]).toBe(
-      "[napkin-distill] auto-distill tick failed:",
-    );
+    // Silent no-op: zero console.error calls, nothing spawned.
+    expect(tickErrors).toHaveLength(0);
     expect(countWorktrees(vault)).toBe(0);
   });
 
-  test("queued OLD-session poll tick after NEW session_start does not crash (load-bearing try/catch)", async () => {
-    // The reload-with-cached-module window, mirrored for the poll loop: an
-    // old-session poll tick queued before the new session_start re-armed
-    // `sessionActive = true` passes the guard, then hits the stale ctx at
-    // `ctx.hasUI` — the first ctx access in the in-flight branch — and
-    // only the poll wrapper's try/catch prevents an uncaughtException.
-    // The tick logs via console.error (captured below) and performs no
-    // work (nothing new is spawned; the session-1 worktree stays).
+  test("queued OLD-session poll tick after NEW session_start is a clean no-op (no log, no work) — issue #93", async () => {
+    // The issue #93 window, mirrored for the poll loop: an old-session poll
+    // tick queued before the new session_start re-armed `sessionActive =
+    // true` passes the #84 flag check. The session generation guard returns
+    // before `pollTick` touches the stale ctx (first access: `ctx.hasUI`),
+    // so no throw and no `poll tick failed` log; the session-1 worktree
+    // stays the only one. Pre-#93 this window logged through the poll
+    // wrapper's try/catch; the generation guard makes it silent.
     vault = createVault(1);
     const sm = SessionManager.create(vault, vault);
     sm.appendMessage({ role: "user", content: "hello" });
@@ -442,7 +461,7 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     expect(firstSessionPoll).toBeDefined();
 
     await captured.handlers.session_shutdown({ reason: "reload" }, ctx1);
-    // New session re-arms the flag on a FRESH ctx...
+    // New session re-arms the flag + generation on a FRESH ctx...
     const ctx2 = makeCtx(sm, vault);
     await captured.handlers.session_start({ reason: "new" }, ctx2);
     // ...while the old session's ctx is now invalidated.
@@ -459,13 +478,45 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     } finally {
       console.error = originalConsoleError;
     }
-    // The wrapper's try/catch swallowed the stale-ctx throw at the first
-    // ctx access — the poll body ran nothing else, so the session-1
-    // worktree is still the only one.
-    expect(tickErrors).toHaveLength(1);
-    expect(tickErrors[0]?.[0]).toBe(
-      "[napkin-distill] distill poll tick failed:",
-    );
+    // Silent no-op: zero console.error calls; the session-1 worktree is
+    // still the only one and `isRunning` was not touched.
+    expect(tickErrors).toHaveLength(0);
     expect(countWorktrees(vault)).toBe(1);
+  });
+
+  test("queued OLD-session countdown tick after NEW session_start performs no render (issue #93)", async () => {
+    // The countdown callback captures no ctx — it renders through the
+    // module-level `uiRef`, which the new session_start has already
+    // refreshed — so pre-#93 a queued old countdown tick does NOT throw or
+    // log: it performs a duplicate, redundant `setStatus` render through the
+    // NEW session's ui. The generation guard makes it a clean no-op; this
+    // test asserts on the RENDER (no setStatus call), not the log.
+    vault = createVault(1);
+    const sm = SessionManager.create(vault, vault);
+    // Both sessions need a UI context so each session_start arms its own
+    // countdown (armed only when hasUI && showStatus).
+    const ui1 = makeFakeUI();
+    const ui2 = makeFakeUI();
+    const ctx1 = makeUICtx(sm, vault, ui1.ui);
+    const { captured } = await startSession(ctx1);
+    // The countdown repaints every 1000ms (IDLE_STATUS_REPAINT_INTERVAL_MS).
+    const firstSessionCountdown = capturedIntervals.find((i) => i.ms === 1000);
+    expect(firstSessionCountdown).toBeDefined();
+
+    await captured.handlers.session_shutdown({ reason: "new" }, ctx1);
+    // New session re-arms the flag + generation on a FRESH UI ctx...
+    const ctx2 = makeUICtx(sm, vault, ui2.ui);
+    await captured.handlers.session_start({ reason: "new" }, ctx2);
+    // ...while the old session's ctx is now invalidated.
+    makeCtxStale(ctx1);
+
+    // session_start #2 already painted the idle status through ui2; snapshot
+    // that count so the assertion targets only the queued-tick render.
+    const callsAfterSession2 = ui2.setStatusCalls.length;
+    // biome-ignore lint/style/noNonNullAssertion: verified above
+    expect(() => firstSessionCountdown!.cb()).not.toThrow();
+    // Pre-#93 the queued old tick rendered through the refreshed uiRef and
+    // called setStatus again; the generation guard makes it a clean no-op.
+    expect(ui2.setStatusCalls.length).toBe(callsAfterSession2);
   });
 });
