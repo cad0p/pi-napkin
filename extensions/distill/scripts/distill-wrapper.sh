@@ -634,9 +634,19 @@ salvage() {
 # always emits ALL THREE marker types (`<<<<<<< `, `======= `, `>>>>>>> `)
 # in the same file. The any-of-three rule false-positives on Setext
 # H1 underlines and on documentation prose that quotes one or two
-# markers; co-presence eliminates those classes. The acknowledged
-# tradeoff (a vault that genuinely documents the full triple inside
-# a single file) is documented at validate_no_markers below.
+# markers; co-presence eliminates those classes.
+#
+# Fence-aware scanning (issue #95): a vault that documents a complete
+# conflict example inside a fenced code block (```` ``` ```` / `~~~`) or an
+# indented code block is NOT in a conflicted state — the markers are
+# literal example text. The previous scanner naively grepped for the
+# three marker regexes anywhere in the file, so a note containing a
+# regex recipe like `pattern = re.compile(r"<<<<<<< HEAD...")` inside a
+# fence was misclassified as a pre-existing conflict and every distill
+# was rejected with `failed:pre-existing-markers`. The scanner now
+# tracks markdown fence state per line and only counts markers that
+# appear OUTSIDE fenced/indented code regions, so documented examples
+# pass while real (prose) markers still fail.
 #
 # Restricted to `*.md` because that's the only file class the agent
 # touches; scanning the entire vault would false-positive on user
@@ -644,9 +654,8 @@ salvage() {
 #
 # Why a `git ls-files` enumeration: gitignored content (e.g. the
 # per-distill `.napkin/distill/` shim dir) is skipped automatically.
-# Per-file `grep -q` invocations are O(N) in tracked .md files; the
-# prior single-pass `xargs grep` was O(1) but couldn't express the
-# per-file all-three-co-present predicate. For vaults with thousands
+# Per-file awk invocations are O(N) in tracked .md files; the prior
+# per-file `grep -q` chain was O(N) too. For vaults with thousands
 # of .md files this is slower but still well under wall-clock
 # budget. CLEAN-A-15 tracks the optimisation opportunity.
 #
@@ -665,13 +674,24 @@ list_marker_files() {
   local output_file="$2"
   local file
   while IFS= read -r -d '' file; do
-    # All three markers must appear in the same file. `grep -q`
-    # short-circuits on first match, and the `&&` chain stops as
-    # soon as one marker type is absent — minimising work in the
-    # common no-conflict case.
-    if grep -qE '^<{7} ' -- "$vault/$file" 2>/dev/null \
-       && grep -qE '^={7}$' -- "$vault/$file" 2>/dev/null \
-       && grep -qE '^>{7} ' -- "$vault/$file" 2>/dev/null; then
+    # Fence-aware co-presence scan. `awk` tracks whether each line is
+    # inside a ```-fence, a ~~~-fence, or a 4-space indented code block
+    # and only counts marker lines outside those regions. A file must
+    # have all three markers co-present OUTSIDE code to be flagged.
+    # Markers inside a fence (documented examples) no longer trip the
+    # validator — see issue #95.
+    if awk '
+      /^```/ { infence = !infence; next }
+      /^~~~/ { intilde = !intilde; next }
+      infence || intilde { next }
+      /^(    |\t)/ { indented = 1; next }
+      indented && !/^(    |\t)/ { indented = 0 }
+      !indented && /^<{7} / { lt = 1 }
+      !indented && /^={7}$/ { eq = 1 }
+      !indented && /^>{7} / { gt = 1 }
+      lt && eq && gt { exit 0 }
+      END { exit !(lt && eq && gt) }
+    ' "$vault/$file" 2>/dev/null; then
       printf '%s\n' "$file" >> "$output_file"
     fi
   done < <(git -C "$vault" ls-files -z -- '*.md' 2>/dev/null)

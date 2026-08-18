@@ -519,4 +519,55 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     // called setStatus again; the generation guard makes it a clean no-op.
     expect(ui2.setStatusCalls.length).toBe(callsAfterSession2);
   });
+
+
+  test("stale-ctx error inside a tick disarms the auto interval and logs once (issue #95)", async () => {
+    // Issue #95 residual window: a tick can pass BOTH the sessionActive and
+    // generation guards yet still hold a ctx whose runner was invalidated
+    // WITHOUT the matching session_shutdown reaching this closure (a pi-core
+    // edge the event-keyed guards cannot see). Pre-fix the interval threw +
+    // logged `auto-distill tick failed` on EVERY tick forever. Post-fix the
+    // first stale-ctx error disarms the interval and logs ONE notice; the
+    // next session_start re-arms cleanly.
+    vault = createVault(1);
+    const sm = SessionManager.create(vault, vault);
+    sm.appendMessage({ role: "user", content: "hello" });
+    sm.appendMessage({ role: "assistant", content: "hi" });
+    const ctx = makeCtx(sm, vault);
+    const { captured } = await startSession(ctx);
+
+    // Simulate the residual window: session is "current" (guards pass) but
+    // the ctx is stale. WITHOUT a shutdown in between (the exact pi-core edge).
+    makeCtxStale(ctx);
+
+    const autoInterval = capturedIntervals.find((i) => i.ms === 60_000);
+    expect(autoInterval).toBeDefined();
+
+    const tickErrors: unknown[][] = [];
+    const originalConsoleError = console.error;
+    console.error = (...args: unknown[]) => {
+      tickErrors.push(args);
+    };
+    try {
+      // First tick: throws stale-ctx inside runAutoDistill → disarms + logs once.
+      expect(() => autoInterval!.cb()).not.toThrow();
+      expect(tickErrors).toHaveLength(1);
+      expect(String(tickErrors[0]?.[0])).toContain(
+        "[napkin-distill] auto tick hit a stale session ctx",
+      );
+
+      // Second tick: interval is disarmed — no new error, no new log.
+      expect(() => autoInterval!.cb()).not.toThrow();
+      expect(tickErrors).toHaveLength(1);
+
+      // A fresh session_start clears the lockdown and re-arms.
+      const ctx2 = makeCtx(sm, vault);
+      await captured.handlers.session_start({ reason: "new" }, ctx2);
+      expect(() => autoInterval!.cb()).not.toThrow();
+      // The re-armed session's tick runs against a valid ctx (no stale error).
+      expect(tickErrors).toHaveLength(1);
+    } finally {
+      console.error = originalConsoleError;
+    }
+  });
 });

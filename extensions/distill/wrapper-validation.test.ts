@@ -398,16 +398,17 @@ git -C "${s.vault}" commit -m "distill: split markers" >/dev/null
     }
   });
 
-  test("validate_no_markers FAIL (CORR-A-1, SEC-A-7): all-three markers inside a code block trip the validator — acknowledged tradeoff", () => {
-    // Acknowledged tradeoff: the validator does not parse markdown
-    // structure, so a fenced code block that demonstrates a complete
-    // `<<<<<<<` / `=======` / `>>>>>>>` example will trip the
-    // co-presence check. Users who genuinely want to document a full
-    // example can escape the markers (leading whitespace, HTML
-    // comments, or split across two files — see the split-across-
-    // files test above). The cost of false-positives on the prior
-    // any-of-three regex was much higher (block-all-distills-forever
-    // on legitimate documentation) than this rare-explicit-doc case.
+  test("validate_no_markers PASS (CORR-A-1, issue #95): all-three markers inside fenced/indented code blocks do NOT trip the validator", () => {
+    // Issue #95: a note documenting a complete conflict example inside
+    // a fenced code block (```` ``` ```` / `~~~`) or an indented code block is
+    // NOT in a conflicted state — the markers are literal example text.
+    // The previous scanner naively grepped for the three marker regexes
+    // anywhere in the file, so a regex recipe like
+    // `pattern = re.compile(r"<<<<<<< HEAD...")` inside a fence was
+    // misclassified as a pre-existing conflict and every distill was
+    // rejected with `failed:pre-existing-markers`. The scanner is now
+    // fence-aware: markers outside code regions still fail, documented
+    // examples pass.
     const s = makeScaffold();
     try {
       writeStubPi(
@@ -417,17 +418,66 @@ git -C "${s.vault}" config user.email test@example.com
 git -C "${s.vault}" config user.name test
 cat > "${s.vault}/example.md" <<'BODY'
 # Conflict block example
-A full conflict block looks like this:
+A regex recipe:
+\`\`\`python
+pattern = re.compile(r"<<<<<<< HEAD\\n(.*?)\\n=======\\n(.*?)\\n>>>>>>> [^\\n]+", re.DOTALL)
 \`\`\`
+And a tilde fence:
+~~~
+<<<<<<< HEAD
+x
+=======
+y
+>>>>>>> z
+~~~
+And an indented block:
+    <<<<<<< HEAD
+    local
+    =======
+    remote
+    >>>>>>> feature
+BODY
+git -C "${s.vault}" add .
+git -C "${s.vault}" commit -m "distill: full doc example" >/dev/null
+`,
+      );
+      const r = runWrapper(s);
+      expect(r.exitCode).toBe(0);
+      expect(r.outcome).toBe("merged-content");
+    } finally {
+      fs.rmSync(s.root, { recursive: true, force: true });
+    }
+  });
+
+  test("validate_no_markers FAIL (CORR-A-1, SEC-A-7): real prose markers still trip the validator even with a fenced example elsewhere", () => {
+    // The fence-aware scan must NOT over-correct: real conflict markers
+    // in prose (outside any code region) still fail, even when the same
+    // file also documents a fenced example. Mixed content = still a
+    // conflicted vault.
+    const s = makeScaffold();
+    try {
+      writeStubPi(
+        s,
+        `
+git -C "${s.vault}" config user.email test@example.com
+git -C "${s.vault}" config user.name test
+cat > "${s.vault}/example.md" <<'BODY'
+# Real conflict + doc example
 <<<<<<< HEAD
 local
 =======
 remote
 >>>>>>> feature
 \`\`\`
+<<<<<<< HEAD
+fenced local
+=======
+fenced remote
+>>>>>>> fenced feature
+\`\`\`
 BODY
 git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: full doc example" >/dev/null
+git -C "${s.vault}" commit -m "distill: real conflict" >/dev/null
 `,
       );
       const r = runWrapper(s);
