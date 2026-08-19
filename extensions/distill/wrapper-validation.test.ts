@@ -225,23 +225,13 @@ git -C "${s.vault}" merge conflict-side >/dev/null 2>&1 || true
   // *.md files is inherently ambiguous with documentation.
 
   /** Create a real unresolved merge conflict in the vault (unmerged index). */
-  function stageRealConflict(
-    vault: string,
-    relPath: string,
-  ): void {
+  function stageRealConflict(vault: string, relPath: string): void {
     // Build divergent history on a side branch, then merge it in so git
     // records stages 1/2/3 in the index for relPath.
     spawnSync("git", ["-C", vault, "checkout", "-q", "-b", "conflict-side"]);
     fs.writeFileSync(path.join(vault, relPath), "side version\n");
     spawnSync("git", ["-C", vault, "add", relPath]);
-    spawnSync("git", [
-      "-C",
-      vault,
-      "commit",
-      "-q",
-      "-m",
-      "conflict-side",
-    ]);
+    spawnSync("git", ["-C", vault, "commit", "-q", "-m", "conflict-side"]);
     spawnSync("git", ["-C", vault, "checkout", "-q", "main"]);
     fs.writeFileSync(path.join(vault, relPath), "main version\n");
     spawnSync("git", ["-C", vault, "add", relPath]);
@@ -253,13 +243,6 @@ git -C "${s.vault}" merge conflict-side >/dev/null 2>&1 || true
     if (merge.status === 0) {
       throw new Error("stageRealConflict: merge unexpectedly resolved cleanly");
     }
-  }
-
-  /** Resolve a conflict by taking the main side and committing. */
-  function resolveConflict(vault: string, relPath: string): void {
-    spawnSync("git", ["-C", vault, "checkout", "-q", "--ours", "--", relPath]);
-    spawnSync("git", ["-C", vault, "add", relPath]);
-    spawnSync("git", ["-C", vault, "commit", "-q", "-m", "resolved"]);
   }
 
   test("validate_no_unresolved_conflicts PASS: no conflicts in vault → happy path", () => {
