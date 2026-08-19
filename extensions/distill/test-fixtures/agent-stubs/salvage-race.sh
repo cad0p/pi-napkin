@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # salvage-race.sh — stub-pi that triggers the wrapper's salvage path
-# by leaving conflict markers in vault `*.md` files, then exits 0.
+# by leaving a REAL unresolved merge conflict in the vault (git index
+# stages 1/2/3), then exits 0.
 #
 # Used by wrapper-invariant.test.ts's salvage-path case. The stub:
-#   1. Commits content with literal `<<<<<<<` / `=======` / `>>>>>>>`
-#      markers in a vault `*.md` file (so the squash-commit lands on
-#      the default branch, but `validate_no_markers` will reject it).
+#   1. Creates divergent history and merges it, leaving conflict.md
+#      unmerged in the vault's index (so `git ls-files -u` lists it
+#      and the conflict validator rejects the run).
 #   2. Exits 0 — the stub itself doesn't error; the failure surfaces
 #      in the wrapper's post-validation step.
 #
-# Wrapper response: `validate_no_markers` finds the markers, returns
-# non-zero, and the wrapper enters `salvage("markers-after-agent-exit")`.
-# The salvage path:
+# Wrapper response: `validate_no_unresolved_conflicts` finds the
+# unmerged path, returns non-zero, and the wrapper enters
+# `salvage("markers-after-agent-exit")`. The salvage path:
 #   - cd's out of the worktree
 #   - removes the worktree (this is the moment the test polls)
 #   - composes a recovery hint
@@ -42,26 +43,27 @@ DEFAULT_BRANCH="${NAPKIN_STUB_DEFAULT_BRANCH:-main}"
 git -C "$VAULT" config user.email "stub@example.com"
 git -C "$VAULT" config user.name "stub"
 
-# Commit a file containing literal conflict markers. We commit
-# directly in the vault (not the worktree) because the wrapper's
-# `validate_no_markers` scans the vault — same shape as the
-# happy-path stub's commit, just with corrupt content.
-#
-# The marker triple must be complete (<<<<<<< / ======= / >>>>>>>)
-# to match `list_marker_files`'s scanner; partial markers don't
-# trigger the validator.
+# Leave a REAL unresolved merge conflict in the vault. The wrapper's
+# conflict validator uses `git ls-files -u` (index stages 1/2/3) — a
+# literal marker-text commit would no longer trip it, so we create
+# divergent history and merge it without resolving.
+git -C "$VAULT" checkout -q -b conflict-side
 cat > "$VAULT/distilled-with-markers.md" <<'MD'
 # distilled (salvage-race)
 
-<<<<<<< HEAD
 This is the local side.
-=======
-This is the incoming side.
->>>>>>> distill/abc-123
 MD
+git -C "$VAULT" add distilled-with-markers.md
+git -C "$VAULT" commit -q -m "conflict side" >/dev/null
+git -C "$VAULT" checkout -q "$DEFAULT_BRANCH"
+cat > "$VAULT/distilled-with-markers.md" <<'MD'
+# distilled (salvage-race)
 
-git -C "$VAULT" add .
-git -C "$VAULT" commit -m "distill: salvage-race squash with markers" >/dev/null
+This is the incoming side.
+MD
+git -C "$VAULT" add distilled-with-markers.md
+git -C "$VAULT" commit -q -m "conflict main" >/dev/null
+git -C "$VAULT" merge conflict-side >/dev/null 2>&1 || true
 
-# Exit cleanly. The wrapper's post-validation will detect the markers
-# and route into salvage().
+# Exit cleanly. The wrapper's post-validation will detect the
+# unresolved conflict and route into salvage().

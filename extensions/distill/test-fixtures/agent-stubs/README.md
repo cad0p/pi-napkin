@@ -52,7 +52,7 @@ reads them with bash defaults (`${NAPKIN_STUB_FOO:-default}`).
 |----------------------------------|-----------------------------------------------------------------------------|-----------------------------------|
 | `clean-distill.sh`               | commits 1 file directly on default branch                                   | `merged-content`                  |
 | `conflict-resolve-clean.sh`      | commits to distill branch, merges default with a conflict, resolves, squash | `merged-content`                  |
-| `conflict-leave-markers.sh`      | commits a file containing all 3 marker types to default branch              | `failed:markers-after-agent-exit` |
+| `conflict-leave-markers.sh`      | creates a REAL unresolved merge conflict (index stages 1/2/3)               | `failed:markers-after-agent-exit` |
 | `no-distill.sh`                  | exits 0 without producing any commits                                       | `no-content`                      |
 | `squash-skipped.sh`              | commits to distill branch but never squashes to default branch              | `no-content`                      |
 | `multiple-commits-on-main.sh`    | commits 2+ times directly on default branch                                 | `merged-content`                  |
@@ -71,7 +71,7 @@ snapshot the outcome sidecar at the moment the worktree disappears.
 | Fixture            | Behavior                                                                  | Expected outcome                  |
 |--------------------|---------------------------------------------------------------------------|-----------------------------------|
 | `step10-race.sh`   | happy-path commit + squash, then `sleep 0.5` to widen the cleanup window  | `merged-content`                  |
-| `salvage-race.sh`  | commits with conflict markers in vault `*.md`, then `sleep 0.5`           | `failed:markers-after-agent-exit` |
+| `salvage-race.sh`  | leaves a REAL unresolved merge conflict, then `sleep 0.5`                 | `failed:markers-after-agent-exit` |
 
 ## Adding a fixture
 

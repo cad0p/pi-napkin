@@ -82,30 +82,30 @@ describe("distill-wrapper.sh salvage path (PR #12 A4)", () => {
   test("markers-after-agent-exit: outcome sidecar carries reason + recovery hint", () => {
     const s = makeScaffold();
     try {
-      // Stub agent commits a file with conflict markers (simulates a
-      // botched merge resolution that landed on main).
+      // Stub agent leaves a REAL unresolved merge conflict (divergent
+      // history + merge without resolving) on main.
       writeStubPi(
         s,
         `
 git -C "${s.vault}" config user.email test@example.com
 git -C "${s.vault}" config user.name test
-cat > "${s.vault}/conflict.md" <<'MARKERS'
-<<<<<<< HEAD
-local
-=======
-remote
->>>>>>> feature
-MARKERS
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: with markers" >/dev/null
+git -C "${s.vault}" checkout -q -b conflict-side
+echo "side" > "${s.vault}/conflict.md"
+git -C "${s.vault}" add conflict.md
+git -C "${s.vault}" commit -q -m "conflict side" >/dev/null
+git -C "${s.vault}" checkout -q main
+echo "main" > "${s.vault}/conflict.md"
+git -C "${s.vault}" add conflict.md
+git -C "${s.vault}" commit -q -m "conflict main" >/dev/null
+git -C "${s.vault}" merge conflict-side >/dev/null 2>&1 || true
 `,
       );
       const r = runWrapper(s);
       assertCleanedUp(s, r);
 
-      // Per V3 lockdown, salvage NEVER resets main. The agent's commit
-      // (with markers) stays on main; the user must `git revert HEAD`
-      // manually \u2014 that's exactly what the recovery hint tells them.
+      // Per V3 lockdown, salvage NEVER resets main. The divergent
+      // history commit (conflict main) stays on main; the user must
+      // resolve the merge manually \u2014 that's exactly what the hint tells them.
       const postSha = spawnSync("git", ["-C", s.vault, "rev-parse", "main"], {
         encoding: "utf-8",
       }).stdout.trim();
@@ -117,9 +117,9 @@ git -C "${s.vault}" commit -m "distill: with markers" >/dev/null
       expect(parsed).not.toBeNull();
       expect(parsed?.outcomeClass).toBe("failed:markers-after-agent-exit");
       expect(parsed?.recoveryHint).toBeTruthy();
-      // Hint must mention `git revert` (the design spec's primary
-      // recovery action for marker-corruption).
-      expect(parsed?.recoveryHint).toMatch(/git -C .* revert HEAD --no-edit/);
+      // Hint must mention resolving the merge (mergetool), not the old
+      // `git revert` advice (the marker-text scan's recovery).
+      expect(parsed?.recoveryHint).toMatch(/mergetool/);
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
