@@ -6,7 +6,8 @@
  * effects (mimicking the agent's behavior). Asserts that each
  * validator helper trips the right outcome class:
  *
- *   - validate_no_markers       \u2192 failed:markers-after-agent-exit
+ *   - validate_no_unresolved_conflicts
+ *                               \u2192 failed:markers-after-agent-exit
  *   - validate_head_on_default  \u2192 failed:head-not-on-default
  *   - validate_commit_count     \u2192 no-content (when 0 commits since startSha)
  *   - detect_local_only         \u2192 merged-local (when origin diverges)
@@ -24,7 +25,7 @@
  * The stub-pi receives the wrapper's positional invocation
  * (`--session ... [--model ...] -p $PROMPT`) and runs whatever
  * filesystem mutations the test wants \u2014 e.g. write a file with
- * conflict markers into the vault, or do nothing at all, or move
+ * unresolved merge conflicts into the vault, or do nothing at all, or move
  * HEAD off main. The wrapper proceeds to validate.
  */
 
@@ -160,15 +161,15 @@ git -C "${s.vault}" checkout -q --detach "$seed_sha"
     //   1. agent-timeout (rc 124/137)
     //   2. agent-exit-nonzero (rc != 0)
     //   3. validate_head_on_default → head-not-on-default
-    //   4. validate_no_markers      → markers-after-agent-exit / etc.
+    //   4. validate_no_unresolved_conflicts → markers-after-agent-exit / etc.
     //   5. validate_commit_count    → no-content / agent-exit-nonzero
     //   6. detect_local_only        → merged-local / divergent-history
     //
     // When the agent leaves the vault in MULTIPLE invalid states
     // simultaneously, the earliest validator in this order wins.
-    // This test pins the head-vs-markers ordering: agent commits a
-    // file containing all-three markers AND switches off the default
-    // branch. The wrapper should report `failed:head-not-on-default`
+    // This test pins the head-vs-conflicts ordering: agent leaves an
+    // unresolved merge conflict AND switches off the default branch.
+    // The wrapper should report `failed:head-not-on-default`
     // (head fires first), not `failed:markers-after-agent-exit`.
     //
     // Why this matters: forensic clarity. When triaging a failed
@@ -184,24 +185,25 @@ git -C "${s.vault}" checkout -q --detach "$seed_sha"
         `
 git -C "${s.vault}" config user.email test@example.com
 git -C "${s.vault}" config user.name test
-# (a) commit a file with all-three markers on the default branch
-cat > "${s.vault}/conflict.md" <<'MARKERS'
-<<<<<<< HEAD
-local
-=======
-remote
->>>>>>> feature
-MARKERS
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: with markers" >/dev/null
-# (b) then switch HEAD off default. Both invariants are now violated.
+# (a) switch HEAD off default FIRST (a mid-merge index cannot be
+# checked out to a new branch — git refuses until resolved).
 git -C "${s.vault}" checkout -q -b feature-branch
+# (b) then leave an unresolved merge conflict on that branch.
+git -C "${s.vault}" checkout -q -b conflict-side
+echo "side" > "${s.vault}/conflict.md"
+git -C "${s.vault}" add conflict.md
+git -C "${s.vault}" commit -q -m "conflict side" >/dev/null
+git -C "${s.vault}" checkout -q feature-branch
+echo "main" > "${s.vault}/conflict.md"
+git -C "${s.vault}" add conflict.md
+git -C "${s.vault}" commit -q -m "conflict main" >/dev/null
+git -C "${s.vault}" merge conflict-side >/dev/null 2>&1 || true
 `,
       );
       const r = runWrapper(s);
       expect(r.exitCode).toBe(1);
-      // head-on-default fires before validate_no_markers in the
-      // wrapper's dispatch.
+      // head-on-default fires before validate_no_unresolved_conflicts in
+      // the wrapper's dispatch.
       expect(r.outcome).toBe("failed:head-not-on-default");
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
@@ -209,10 +211,41 @@ git -C "${s.vault}" checkout -q -b feature-branch
   });
 
   // -------------------------------------------------------------------------
-  // validate_no_markers
+  // validate_no_unresolved_conflicts
   // -------------------------------------------------------------------------
+  //
+  // The wrapper detects unresolved merge conflicts via the AUTHORITATIVE
+  // git index state (`git ls-files -u`: entries with stages 1/2/3 exist
+  // only during an unresolved merge) rather than by scanning file
+  // contents for marker TEXT. A documented conflict example inside a
+  // fenced code block is ordinary committed content — it never appears
+  // as an unmerged index entry, so it can never false-positive a
+  // distill (issue #95). The old content scan needed fence-aware
+  // parsing precisely because grepping marker text anywhere in tracked
+  // *.md files is inherently ambiguous with documentation.
 
-  test("validate_no_markers PASS: no conflict markers in vault \u2192 happy path", () => {
+  /** Create a real unresolved merge conflict in the vault (unmerged index). */
+  function stageRealConflict(vault: string, relPath: string): void {
+    // Build divergent history on a side branch, then merge it in so git
+    // records stages 1/2/3 in the index for relPath.
+    spawnSync("git", ["-C", vault, "checkout", "-q", "-b", "conflict-side"]);
+    fs.writeFileSync(path.join(vault, relPath), "side version\n");
+    spawnSync("git", ["-C", vault, "add", relPath]);
+    spawnSync("git", ["-C", vault, "commit", "-q", "-m", "conflict-side"]);
+    spawnSync("git", ["-C", vault, "checkout", "-q", "main"]);
+    fs.writeFileSync(path.join(vault, relPath), "main version\n");
+    spawnSync("git", ["-C", vault, "add", relPath]);
+    spawnSync("git", ["-C", vault, "commit", "-q", "-m", "conflict-main"]);
+    const merge = spawnSync("git", ["-C", vault, "merge", "conflict-side"], {
+      encoding: "utf-8",
+    });
+    // The merge MUST leave the path unmerged for the test to be valid.
+    if (merge.status === 0) {
+      throw new Error("stageRealConflict: merge unexpectedly resolved cleanly");
+    }
+  }
+
+  test("validate_no_unresolved_conflicts PASS: no conflicts in vault → happy path", () => {
     const s = makeScaffold();
     try {
       writeStubPi(
@@ -233,28 +266,26 @@ git -C "${s.vault}" commit -m "distill: clean" >/dev/null
     }
   });
 
-  test("validate_no_markers FAIL: tracked *.md file has unresolved markers \u2192 failed:markers-after-agent-exit", () => {
+  test("validate_no_unresolved_conflicts FAIL: agent leaves a real unresolved conflict → failed:markers-after-agent-exit", () => {
+    // Stub: agent creates divergent history and merges it, leaving the
+    // index unmerged (stages 1/2/3). Pre-snapshot was clean; post has a
+    // new conflict path → rc 1 → failed:markers-after-agent-exit.
     const s = makeScaffold();
     try {
-      // Stub: agent commits a file with conflict markers (simulates an
-      // incomplete merge resolution). Heredoc ensures the markers land
-      // verbatim at line start.
       writeStubPi(
         s,
         `
 git -C "${s.vault}" config user.email test@example.com
 git -C "${s.vault}" config user.name test
-cat > "${s.vault}/conflict.md" <<'MARKERS'
-# header
-<<<<<<< HEAD
-local
-=======
-remote
->>>>>>> feature
-trailing
-MARKERS
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: with markers" >/dev/null
+git -C "${s.vault}" checkout -q -b agent-side
+echo "agent version" > "${s.vault}/conflict.md"
+git -C "${s.vault}" add conflict.md
+git -C "${s.vault}" commit -q -m "agent side" >/dev/null
+git -C "${s.vault}" checkout -q main
+echo "main version" > "${s.vault}/conflict.md"
+git -C "${s.vault}" add conflict.md
+git -C "${s.vault}" commit -q -m "main side" >/dev/null
+git -C "${s.vault}" merge agent-side >/dev/null 2>&1 || true
 `,
       );
       const r = runWrapper(s);
@@ -265,149 +296,14 @@ git -C "${s.vault}" commit -m "distill: with markers" >/dev/null
     }
   });
 
-  // ---- validate_no_markers regression guards (CORR-A-1, SEC-A-7) ---------
-  // The validator was tightened to require ALL THREE marker types
-  // (`^<{7} `, `^={7}$`, `^>{7} `) co-present in the same file before
-  // declaring a conflict. The next five tests pin the false-positive
-  // shapes the prior any-of-three regex would have tripped on, and the
-  // one acknowledged tradeoff (all-three inside a code block).
-
-  test("validate_no_markers PASS (CORR-A-1): setext H1 underline `=======` is not a conflict", () => {
-    // Markdown setext H1: `# title\n=======` renders as a heading and
-    // is exceedingly common in user vaults. The prior `^={7}$` rule
-    // false-positived on every such heading. The tightened validator
-    // requires all three marker types co-present, so a lone
-    // `=======` line passes.
-    const s = makeScaffold();
-    try {
-      writeStubPi(
-        s,
-        `
-git -C "${s.vault}" config user.email test@example.com
-git -C "${s.vault}" config user.name test
-cat > "${s.vault}/setext.md" <<'BODY'
-# Heading
-=======
-body text
-BODY
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: setext heading" >/dev/null
-`,
-      );
-      const r = runWrapper(s);
-      expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
-    } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
-    }
-  });
-
-  test("validate_no_markers PASS (CORR-A-1): single-marker documentation prose is not a conflict", () => {
-    // Notes / READMEs may legitimately quote a single conflict marker
-    // when discussing merges (e.g. \"the `<<<<<<< HEAD` line marks the
-    // local side\"). The prior validator would permanently block
-    // distills on such vaults. With co-presence required, a lone
-    // `<<<<<<< HEAD` line in prose passes.
-    const s = makeScaffold();
-    try {
-      writeStubPi(
-        s,
-        `
-git -C "${s.vault}" config user.email test@example.com
-git -C "${s.vault}" config user.name test
-cat > "${s.vault}/doc.md" <<'BODY'
-# Merge conflict notes
-When git renders a conflict it inserts a header marker:
-<<<<<<< HEAD
-That line opens the local side. (No closing markers in this note.)
-BODY
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: doc with single marker" >/dev/null
-`,
-      );
-      const r = runWrapper(s);
-      expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
-    } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
-    }
-  });
-
-  test("validate_no_markers PASS (CORR-A-1): two-marker documentation prose is not a conflict", () => {
-    // A note may walk the reader through the opening half of a
-    // conflict (`<<<<<<< HEAD` + `=======`) without ever showing the
-    // closing `>>>>>>> ` line. The any-of-three rule would have
-    // failed; co-presence requires all three, so this passes.
-    const s = makeScaffold();
-    try {
-      writeStubPi(
-        s,
-        `
-git -C "${s.vault}" config user.email test@example.com
-git -C "${s.vault}" config user.name test
-cat > "${s.vault}/doc.md" <<'BODY'
-# Conflict marker primer
-The opening half of a conflict block:
-<<<<<<< HEAD
-local side
-=======
-(closing marker omitted intentionally for brevity)
-BODY
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: doc with two markers" >/dev/null
-`,
-      );
-      const r = runWrapper(s);
-      expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
-    } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
-    }
-  });
-
-  test("validate_no_markers PASS (CORR-A-1): markers split across two files is not a conflict", () => {
-    // Per-file all-three predicate: the validator inspects each tracked
-    // *.md file in isolation. A vault that splits marker examples
-    // across two notes (one shows `<<<<<<<`, another shows `>>>>>>>`)
-    // never has any single file with all three, so passes. The prior
-    // any-of-three rule would have flagged both files.
-    const s = makeScaffold();
-    try {
-      writeStubPi(
-        s,
-        `
-git -C "${s.vault}" config user.email test@example.com
-git -C "${s.vault}" config user.name test
-cat > "${s.vault}/opener.md" <<'BODY'
-<<<<<<< HEAD
-opener-only note
-BODY
-cat > "${s.vault}/closer.md" <<'BODY'
->>>>>>> feature
-closer-only note
-BODY
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: split markers" >/dev/null
-`,
-      );
-      const r = runWrapper(s);
-      expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
-    } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
-    }
-  });
-
-  test("validate_no_markers FAIL (CORR-A-1, SEC-A-7): all-three markers inside a code block trip the validator — acknowledged tradeoff", () => {
-    // Acknowledged tradeoff: the validator does not parse markdown
-    // structure, so a fenced code block that demonstrates a complete
-    // `<<<<<<<` / `=======` / `>>>>>>>` example will trip the
-    // co-presence check. Users who genuinely want to document a full
-    // example can escape the markers (leading whitespace, HTML
-    // comments, or split across two files — see the split-across-
-    // files test above). The cost of false-positives on the prior
-    // any-of-three regex was much higher (block-all-distills-forever
-    // on legitimate documentation) than this rare-explicit-doc case.
+  test("validate_no_unresolved_conflicts PASS (issue #95): documented conflict example in a fenced code block is NOT a conflict", () => {
+    // Issue #95 regression: a note documenting a complete conflict
+    // example inside a fenced code block (e.g. a Python re.compile
+    // recipe containing the marker strings) used to trip the old
+    // marker-TEXT scan and block every distill with
+    // failed:pre-existing-markers. With index-based detection it is
+    // ordinary committed content — git never records it as unmerged —
+    // so the distill passes.
     const s = makeScaffold();
     try {
       writeStubPi(
@@ -417,81 +313,13 @@ git -C "${s.vault}" config user.email test@example.com
 git -C "${s.vault}" config user.name test
 cat > "${s.vault}/example.md" <<'BODY'
 # Conflict block example
-A full conflict block looks like this:
-\`\`\`
-<<<<<<< HEAD
-local
-=======
-remote
->>>>>>> feature
+A regex recipe:
+\`\`\`python
+pattern = re.compile(r"<<<<<<< HEAD\\n(.*?)\\n=======\\n(.*?)\\n>>>>>>> [^\\n]+", re.DOTALL)
 \`\`\`
 BODY
 git -C "${s.vault}" add .
 git -C "${s.vault}" commit -m "distill: full doc example" >/dev/null
-`,
-      );
-      const r = runWrapper(s);
-      expect(r.exitCode).toBe(1);
-      expect(r.outcome).toBe("failed:markers-after-agent-exit");
-    } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
-    }
-  });
-
-  // ---- validate_no_markers pre-existing classification (CORR-1) ----------
-  // The pre-distill marker snapshot lets the wrapper distinguish:
-  //   - NEW marker-bearing files post-distill        → markers-after-agent-exit
-  //   - Only PRE-EXISTING marker-bearing files       → pre-existing-markers
-  //                                                    (NOT agent-induced)
-  //   - Both new AND pre-existing                    → markers-after-agent-exit
-  //                                                    (dominant signal)
-  //   - Pre-existing markers cleaned up by agent     → merged-content
-  //                                                    (post snapshot empty)
-  //
-  // Helper: stage a pre-existing-markers file in the vault BEFORE the
-  // wrapper runs (commits it to the seed history so the snapshot
-  // captures it before the agent's stub mutates anything).
-  function stagePreExistingMarkerFile(vault: string, relPath: string): void {
-    const lines = [
-      "# preexisting",
-      "<<<<<<< HEAD",
-      "local",
-      "=======",
-      "remote",
-      ">>>>>>> feature",
-      "trailing",
-      "",
-    ];
-    fs.writeFileSync(path.join(vault, relPath), lines.join("\n"));
-    spawnSync("git", ["-C", vault, "add", relPath]);
-    spawnSync("git", [
-      "-C",
-      vault,
-      "commit",
-      "-m",
-      `seed: pre-existing markers in ${relPath}`,
-    ]);
-  }
-
-  test("validate_no_markers PASS (CORR-1): agent CLEANS pre-existing markers → merged-content", () => {
-    // Pre-existing marker file is committed before the wrapper runs.
-    // The stub-agent rewrites the file to remove all three marker
-    // types and commits the cleanup. Post-distill snapshot is empty
-    // → validate_no_markers returns rc 0 → merged-content.
-    const s = makeScaffold();
-    try {
-      stagePreExistingMarkerFile(s.vault, "preexisting.md");
-      writeStubPi(
-        s,
-        `
-git -C "${s.vault}" config user.email test@example.com
-git -C "${s.vault}" config user.name test
-cat > "${s.vault}/preexisting.md" <<'BODY'
-# preexisting (cleaned)
-resolved content
-BODY
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: clean pre-existing markers" >/dev/null
 `,
       );
       const r = runWrapper(s);
@@ -502,32 +330,30 @@ git -C "${s.vault}" commit -m "distill: clean pre-existing markers" >/dev/null
     }
   });
 
-  test("validate_no_markers FAIL (CORR-1): only pre-existing markers, agent untouched → failed:pre-existing-markers", () => {
-    // Pre-existing marker file is committed before the wrapper runs.
-    // The stub-agent commits a different file (so VAULT_COMMIT_COUNT
-    // > 0 and we reach validate_no_markers) but doesn't touch the
-    // pre-existing-markers file. Post-distill snapshot lists the
-    // same single file as pre-distill snapshot → rc 2 →
-    // failed:pre-existing-markers.
+  // ---- pre-existing conflict classification (CORR-1) ----------------------
+
+  test("validate_no_unresolved_conflicts FAIL (CORR-1): only pre-existing conflicts, agent untouched → failed:pre-existing-markers", () => {
+    // A genuine unresolved merge conflict exists in the vault BEFORE the
+    // wrapper runs. The pre-snapshot captures it; the agent's stub leaves
+    // it untouched and exits 0 (a mid-merge index cannot accept ANY new
+    // commit — git refuses — so the agent has nothing it can commit).
+    // Post conflicts ⊆ pre → rc 2 → failed:pre-existing-markers.
     const s = makeScaffold();
     try {
-      stagePreExistingMarkerFile(s.vault, "preexisting.md");
+      stageRealConflict(s.vault, "preexisting.md");
       writeStubPi(
         s,
         `
 git -C "${s.vault}" config user.email test@example.com
 git -C "${s.vault}" config user.name test
-echo "# new note" > "${s.vault}/note.md"
-git -C "${s.vault}" add note.md
-git -C "${s.vault}" commit -m "distill: new note" >/dev/null
+# Do nothing: mid-merge, git refuses all commits. Exit 0.
+exit 0
 `,
       );
       const r = runWrapper(s);
       expect(r.exitCode).toBe(1);
       expect(r.outcome).toBe("failed:pre-existing-markers");
       // Recovery hint surfaces in the outcome sidecar (lines 2+).
-      // The wrapper's salvage() emits the pre-existing-markers hint
-      // pointing the user at manual fix-up.
       expect(r.outcomePath).not.toBeNull();
       const raw = fs.readFileSync(r.outcomePath as string, "utf-8");
       expect(raw).toContain("already present in the vault before");
@@ -536,33 +362,60 @@ git -C "${s.vault}" commit -m "distill: new note" >/dev/null
     }
   });
 
-  test("validate_no_markers FAIL (CORR-1): pre-existing AND new markers → failed:markers-after-agent-exit (dominant signal)", () => {
-    // Pre-existing marker file is committed before the wrapper runs.
-    // The stub-agent commits a SECOND file with NEW markers in a
-    // different path. Post-distill snapshot lists both files;
-    // pre-distill lists only the first → set diff has at least one
-    // NEW marker file → rc 1 → failed:markers-after-agent-exit. The
-    // agent making things worse takes priority over the pre-existing
-    // file's classification.
+  test("validate_no_unresolved_conflicts PASS (CORR-1): agent RESOLVES pre-existing conflict → merged-content", () => {
+    // Pre-existing unresolved conflict; the agent resolves it (checkout
+    // --ours + add + commit). Post conflicts empty → rc 0 → merged-content.
     const s = makeScaffold();
     try {
-      stagePreExistingMarkerFile(s.vault, "preexisting.md");
+      stageRealConflict(s.vault, "preexisting.md");
       writeStubPi(
         s,
         `
 git -C "${s.vault}" config user.email test@example.com
 git -C "${s.vault}" config user.name test
-cat > "${s.vault}/new-conflict.md" <<'MARKERS'
-# new
-<<<<<<< HEAD
-local
-=======
-remote
->>>>>>> branch
-end
-MARKERS
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: agent-induced markers" >/dev/null
+git -C "${s.vault}" checkout -q --ours -- preexisting.md
+git -C "${s.vault}" add preexisting.md
+git -C "${s.vault}" commit -q -m "resolve conflict" >/dev/null
+echo "# new note" > "${s.vault}/note.md"
+git -C "${s.vault}" add note.md
+git -C "${s.vault}" commit -m "distill: new note" >/dev/null
+`,
+      );
+      const r = runWrapper(s);
+      expect(r.exitCode).toBe(0);
+      expect(r.outcome).toBe("merged-content");
+    } finally {
+      fs.rmSync(s.root, { recursive: true, force: true });
+    }
+  });
+
+  test("validate_no_unresolved_conflicts FAIL (CORR-1): pre-existing AND new conflicts → failed:markers-after-agent-exit (dominant signal)", () => {
+    // The agent RESOLVES the pre-existing conflict (required before any
+    // further git work — a mid-merge index blocks all commits), then
+    // creates a NEW conflict in a different path. Post has a path not
+    // in pre → rc 1 (dominant).
+    const s = makeScaffold();
+    try {
+      stageRealConflict(s.vault, "preexisting.md");
+      writeStubPi(
+        s,
+        `
+git -C "${s.vault}" config user.email test@example.com
+git -C "${s.vault}" config user.name test
+# Resolve the pre-existing conflict first (git blocks all commits mid-merge).
+git -C "${s.vault}" checkout -q --ours -- preexisting.md
+git -C "${s.vault}" add preexisting.md
+git -C "${s.vault}" commit -q -m "resolve pre-existing" >/dev/null
+# Now create a NEW conflict in a different path.
+git -C "${s.vault}" checkout -q -b agent-side2
+echo "agent2" > "${s.vault}/new-conflict.md"
+git -C "${s.vault}" add new-conflict.md
+git -C "${s.vault}" commit -q -m "agent2 side" >/dev/null
+git -C "${s.vault}" checkout -q main
+echo "main2" > "${s.vault}/new-conflict.md"
+git -C "${s.vault}" add new-conflict.md
+git -C "${s.vault}" commit -q -m "main2 side" >/dev/null
+git -C "${s.vault}" merge agent-side2 >/dev/null 2>&1 || true
 `,
       );
       const r = runWrapper(s);
@@ -573,90 +426,48 @@ git -C "${s.vault}" commit -m "distill: agent-induced markers" >/dev/null
     }
   });
 
-  test("validate_no_markers FAIL (CORR-1, regression guard): no pre-existing, agent introduces markers → failed:markers-after-agent-exit", () => {
-    // Regression guard: the existing FAIL behaviour for an
-    // agent-induced marker file (no pre-existing markers in the
-    // vault) must continue to classify as markers-after-agent-exit,
-    // not pre-existing-markers. This is the test that's already in
-    // the file at line ~135 in spirit; we re-assert here to cement
-    // that adding the pre-distill snapshot didn't change the
-    // dominant fail path.
-    const s = makeScaffold();
-    try {
-      writeStubPi(
-        s,
-        `
-git -C "${s.vault}" config user.email test@example.com
-git -C "${s.vault}" config user.name test
-cat > "${s.vault}/conflict.md" <<'MARKERS'
-# header
-<<<<<<< HEAD
-local
-=======
-remote
->>>>>>> feature
-trailing
-MARKERS
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: with markers" >/dev/null
-`,
-      );
-      const r = runWrapper(s);
-      expect(r.exitCode).toBe(1);
-      expect(r.outcome).toBe("failed:markers-after-agent-exit");
-    } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
-    }
-  });
-
-  test("validate_no_markers FAIL (CORR-1 R3 / SEC-1 R3): post-distill mktemp failure → failed:internal-validator-error (NOT markers-after-agent-exit)", () => {
-    // CORR-1 R3 / SEC-1 R3 cross-reviewer consensus: when the
-    // post-distill snapshot's mktemp call fails (full disk,
-    // locked-down TMPDIR, etc.), the wrapper used to return rc 1 from
-    // validate_no_markers → caller dispatched to
-    // failed:markers-after-agent-exit. That misled the user into
-    // believing the validator had observed markers in the vault when
-    // it had never actually scanned. Fix: distinct rc 3 →
-    // failed:internal-validator-error whose recovery hint truthfully
-    // says "validator could not run" instead of "markers landed in
-    // the vault."
+  test("validate_no_unresolved_conflicts FAIL (CORR-1 R3 / SEC-1 R3): git ls-files failure → failed:internal-validator-error (NOT markers-after-agent-exit)", () => {
+    // CORR-1 R3 / SEC-1 R3: when the validator cannot run (git
+    // ls-files -u fails — e.g. vault git dir is corrupt/unreadable),
+    // the wrapper must NOT blame the agent for state nobody observed.
+    // It routes to failed:internal-validator-error whose recovery hint
+    // truthfully says the validator could not run.
     //
-    // Simulating mktemp failure cleanly: a TMPDIR override would
-    // also break the agent stub (which itself calls mktemp). Instead
-    // we shim mktemp via PATH — a fake mktemp that fails for the
-    // post-distill template and delegates to the real mktemp for
-    // every other template (including pre-distill, the agent stub's
-    // own usage, and the npm/bun toolchain).
+    // Simulating git failure cleanly: shim `git` via PATH with a fake
+    // that fails ONLY for `ls-files -u` and delegates everything else
+    // (worktree ops, the agent stub, etc.) to the real git.
     const s = makeScaffold();
     try {
-      // Build a shim dir with a fake mktemp.
       const shimDir = path.join(s.root, "shim-bin");
       fs.mkdirSync(shimDir, { recursive: true });
-      const realMktemp =
-        spawnSync("command", ["-v", "mktemp"], {
+      const realGit =
+        spawnSync("command", ["-v", "git"], {
           encoding: "utf-8",
           shell: true,
-        }).stdout.trim() ||
-        // Fallback to the canonical path if `command -v` returns
-        // nothing under bun's restricted PATH (rare).
-        "/usr/bin/mktemp";
-      const fakeMktemp = path.join(shimDir, "mktemp");
+        }).stdout.trim() || "/usr/bin/git";
+      const fakeGit = path.join(shimDir, "git");
       fs.writeFileSync(
-        fakeMktemp,
+        fakeGit,
         `#!/usr/bin/env bash
-# Fail iff the template is the post-distill marker snapshot.
-# Pre-distill marker snapshot uses napkin-distill-pre-marker; agent
-# stub and toolchain use unrelated templates — those delegate to
-# the real mktemp.
+# Fail iff this is the POST-distill ls-files -u (the conflict
+# validator). The PRE-distill snapshot also calls ls-files -u and must
+# succeed — otherwise the pre-snapshot is empty and the post-validate
+# would see "every conflict is NEW". Distinguish by invocation count:
+# the pre-snapshot is the FIRST ls-files -u call; the post-validate is
+# the SECOND. The count file lives in the vault's .git so only
+# ls-files calls against THIS vault are counted.
+COUNT_FILE="\${NAPKIN_STUB_VAULT}/.git/ls-files-count"
 for arg in "$@"; do
-  case "$arg" in
-    *napkin-distill-post-marker*)
-      echo "mktemp: simulated post-distill failure" >&2
+  if [ "$arg" = "ls-files" ]; then
+    if [ -f "$COUNT_FILE" ]; then
+      echo "git: simulated post-distill ls-files failure" >&2
       exit 1
-      ;;
-  esac
+    fi
+    touch "$COUNT_FILE"
+    break
+  fi
 done
-exec ${JSON.stringify(realMktemp)} "$@"
+exec ${JSON.stringify(realGit)} "$@"
 `,
         { mode: 0o755 },
       );
@@ -677,19 +488,9 @@ git -C "${s.vault}" commit -m "distill: clean note" >/dev/null
       });
       expect(r.exitCode).toBe(1);
       expect(r.outcome).toBe("failed:internal-validator-error");
-      // Recovery hint surfaces in the outcome sidecar (lines 2+).
-      // It must explicitly say the validator could NOT run — the
-      // whole point of the new reason code is to avoid the
-      // "markers landed in the vault" misclassification.
       expect(r.outcomePath).not.toBeNull();
       const raw = fs.readFileSync(r.outcomePath as string, "utf-8");
       expect(raw).toContain("could NOT run");
-      // Anti-regression: the previous (wrong) hint pointed the user
-      // at reverting the squash on the claim that markers had
-      // landed. Pin that the new hint does NOT make that false
-      // claim outright — it offers revert as a CONDITIONAL recovery
-      // step, gated on manual inspection.
-      expect(raw).toContain("manually for unresolved");
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }

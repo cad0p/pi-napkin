@@ -473,6 +473,14 @@ export default function (pi: ExtensionAPI) {
   // clean no-op instead of the stale-ctx throw + `tick failed` log that #84's
   // try/catch could only downgrade, not prevent.
   let sessionGeneration = 0;
+  // Stale-ctx lockdown (issue #95): if a tick ever catches the stale-ctx
+  // error (the session_start's ctx was invalidated without the matching
+  // session_shutdown clearing this closure's timers — a pi-core edge that
+  // the #84/#93 guards cannot see because they key off events this closure
+  // never received), the interval would otherwise throw + log on EVERY
+  // tick forever. On first detection we disarm the auto interval and log
+  // once; a later session_start re-arms everything cleanly.
+  let staleCtxDisarmed = false;
 
   pi.on("before_provider_request", (event) =>
     applyDistillPromptCacheKey(event.payload),
@@ -510,6 +518,41 @@ export default function (pi: ExtensionAPI) {
       : `${secs}s`;
   }
 
+  /**
+   * True when `err` is pi's stale-ctx error (the ctx captured at
+   * session_start was invalidated by a session replacement/reload).
+   * Matched by the message pi's ExtensionRunner throws — deliberately
+   * substring-based so it survives minor wording drift and stays
+   * independent of the internal stack frames.
+   */
+  function isStaleCtxError(err: unknown): boolean {
+    return (
+      err instanceof Error &&
+      err.message.includes("stale after session replacement")
+    );
+  }
+
+  /**
+   * One-time stale-ctx lockdown (issue #95). If a tick catches the
+   * stale-ctx error, the closure's session_start ctx is dead and the
+   * #84/#93 event-keyed guards can't see it (the matching
+   * session_shutdown never reached this closure). The interval would
+   * otherwise throw + log on EVERY tick until the next session_start.
+   * Disarm the auto interval on first detection and log once; the next
+   * session_start clears the flag and re-arms cleanly.
+   */
+  function handleStaleCtxInTick(kind: "auto" | "poll" | "countdown"): void {
+    if (staleCtxDisarmed) return;
+    staleCtxDisarmed = true;
+    if (intervalHandle) {
+      clearInterval(intervalHandle);
+      intervalHandle = null;
+    }
+    console.error(
+      `[napkin-distill] ${kind} tick hit a stale session ctx; auto-distill disarmed until the next session_start (pi session replaced/reloaded mid-session)`,
+    );
+  }
+
   pi.on("session_start", async (event, ctx) => {
     // Arm the session liveness guard FIRST — before any early-return path — so
     // a tick queued from a previous session can never observe a dead session
@@ -524,6 +567,10 @@ export default function (pi: ExtensionAPI) {
     // Reset to default before any early-return paths below; the persisted state
     // (if any) is re-read further down when distill is enabled for the session.
     autoDistillSuppressed = false;
+    // A fresh session_start means this closure has a live session again —
+    // clear the stale-ctx lockdown so the new session's timers can run
+    // (issue #95).
+    staleCtxDisarmed = false;
 
     const napkinVault = resolveDistillVault(ctx.cwd);
     if (!napkinVault) return;
@@ -723,8 +770,14 @@ export default function (pi: ExtensionAPI) {
         } catch (err) {
           // A tick must never take down pi (same invariant as the
           // auto-distill interval tick): any unexpected render error logs
-          // and is retried on the next countdown repaint.
-          console.error("[napkin-distill] countdown tick failed:", err);
+          // and is retried on the next countdown repaint. A stale-ctx
+          // error means the session was replaced under us — disarm once
+          // instead of spamming (issue #95).
+          if (isStaleCtxError(err)) {
+            handleStaleCtxInTick("countdown");
+          } else {
+            console.error("[napkin-distill] countdown tick failed:", err);
+          }
         }
       }, IDLE_STATUS_REPAINT_INTERVAL_MS);
     }
@@ -737,8 +790,15 @@ export default function (pi: ExtensionAPI) {
         runAutoDistill(ctx);
       } catch (err) {
         // A tick must never take down pi: any unexpected error (stale ctx,
-        // vault config, spawn) logs and is retried on the next tick.
-        console.error("[napkin-distill] auto-distill tick failed:", err);
+        // vault config, spawn) logs and is retried on the next tick. A
+        // stale-ctx error means this closure's session was replaced without
+        // the matching shutdown reaching us — disarm once instead of
+        // throwing+logging on every tick (issue #95).
+        if (isStaleCtxError(err)) {
+          handleStaleCtxInTick("auto");
+        } else {
+          console.error("[napkin-distill] auto-distill tick failed:", err);
+        }
       }
     }, intervalMs);
   });
@@ -1322,8 +1382,13 @@ export default function (pi: ExtensionAPI) {
         // A tick must never take down pi (same invariant as the auto-distill
         // interval tick): in the cached-module reload window an old-session
         // tick can pass the re-armed guard and hit the stale ctx — log and
-        // drop (the next session owns all poll state).
-        console.error("[napkin-distill] distill poll tick failed:", err);
+        // drop (the next session owns all poll state). A stale-ctx error
+        // disarms the auto interval once instead of spamming (issue #95).
+        if (isStaleCtxError(err)) {
+          handleStaleCtxInTick("poll");
+        } else {
+          console.error("[napkin-distill] distill poll tick failed:", err);
+        }
       }
     }, DISTILL_POLL_TICK_MS);
   }

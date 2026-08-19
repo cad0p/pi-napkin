@@ -181,7 +181,9 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       const branchShort = r.branch.replace(/^distill\//, "");
       const parsed = findDistillOutcomeForBranch(s.errorDir, branchShort);
       expect(parsed?.outcomeClass).toBe("failed:markers-after-agent-exit");
-      expect(parsed?.recoveryHint).toMatch(/git -C .* revert HEAD --no-edit/);
+      // Recovery hint now points the user at resolving the merge (not
+      // `git revert` — the old marker-text scan's advice).
+      expect(parsed?.recoveryHint).toMatch(/mergetool/);
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
