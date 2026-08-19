@@ -520,7 +520,6 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     expect(ui2.setStatusCalls.length).toBe(callsAfterSession2);
   });
 
-
   test("stale-ctx error inside a tick disarms the auto interval and logs once (issue #95)", async () => {
     // Issue #95 residual window: a tick can pass BOTH the sessionActive and
     // generation guards yet still hold a ctx whose runner was invalidated
