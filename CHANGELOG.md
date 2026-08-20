@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(extension)* Make stale-session distill ticks clean no-ops via a session generation guard (closes #93)
+- *(distill)* Authoritative git ls-files -u conflict detection + stale-ctx tick lockdown (closes #96) ([#97](https://github.com/cad0p/pi-napkin/pull/97))
+
+
 ## [0.7.2] - 2026-08-16
 
 <!-- USER-EDITABLE SECTION START -->
