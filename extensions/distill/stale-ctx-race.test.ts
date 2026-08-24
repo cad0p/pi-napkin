@@ -4,22 +4,47 @@
  * Background. pi invalidates the extension ctx captured at `session_start`
  * after any session replacement (`newSession` / `fork` / `switchSession`) or
  * `reload()`: every ctx getter (`cwd`, `hasUI`, `ui`, `sessionManager`)
- * starts throwing `ExtensionRunner.assertActive`'s stale-ctx error. pi's
- * lifecycle runs `session_shutdown` handlers BEFORE invalidation, so the
- * distill timers ARE cleared — but a `setInterval` callback already queued
- * in the macrotask queue still fires after `clearInterval()` (pure JS
- * semantics), and the async shutdown handler can take seconds. A tick
- * landing in that window observes an invalidated ctx, `resolveDistillVault
- * (ctx.cwd)` throws inside the timer callback, and the uncaughtException
- * takes down the whole pi process.
+ * starts throwing `ExtensionRunner.assertActive`'s stale-ctx error. On every
+ * TUI-side teardown path, pi's lifecycle runs `session_shutdown` handlers
+ * BEFORE invalidation, so the distill timers ARE cleared — but a `setInterval`
+ * callback already queued in the macrotask queue still fires after
+ * `clearInterval()` (pure JS semantics), and the async shutdown handler can
+ * take seconds. A tick landing in that window observes an invalidated ctx,
+ * `resolveDistillVault(ctx.cwd)` throws inside the timer callback, and the
+ * uncaughtException takes down the whole pi process.
  *
- * Fix: a closure-scoped `sessionActive` liveness flag (armed at the top of
- * `session_start`, dropped at the top of `session_shutdown`) makes any queued
- * tick after shutdown a clean no-op, and a monotonic `sessionGeneration`
- * counter (issue #93) makes a queued OLD-session tick that fires after the
- * next session_start re-armed the flag a clean no-op too — it returns before
- * touching its invalidated ctx, so no throw and no `tick failed` log. The
- * load-bearing try/catches stay as belt-and-braces for genuine current-
+ * Issue #100 — the raw-dispose hole. That lifecycle guarantee holds only for
+ * TUI-side teardowns. SDK/host consumers (every tintinweb subagent spawns an
+ * in-process pi session that loads all extensions) tear sessions down via a
+ * raw `AgentSession.dispose()`, which invalidates the runner WITHOUT emitting
+ * `session_shutdown`. Those sidechain sessions bind no UI (`ctx.hasUI ===
+ * false`) yet session_start used to arm the 60-min auto-distill interval
+ * unconditionally — so every subagent closure leaked a timer whose orphaned
+ * tick later hit the #96 lockdown log ("stale session ctx ... disarmed").
+ * The fix closes the hole upstream: session_start arms nothing (and paints
+ * nothing) unless the session is interactive AND has a forkable session
+ * file — `!ctx.hasUI || !getSessionFile()` returns early before `uiRef`, the
+ * initial status paint, and BOTH timer arms. Ephemeral `--no-session` runs
+ * (in-memory SessionManager, `getSessionFile() === undefined` forever) are
+ * gated by the same condition. Shutdown distill needs no change:
+ * `shouldDistillOnShutdown` already returns false without a session file.
+ *
+ * Fixes layered over time:
+ *
+ * - closure-scoped `sessionActive` liveness flag (issue #84): armed at the
+ *   top of `session_start`, dropped at the top of `session_shutdown`, makes
+ *   any queued tick after shutdown a clean no-op.
+ * - monotonic `sessionGeneration` counter (issue #93): makes a queued
+ *   OLD-session tick that fires after the next session_start re-armed the
+ *   flag a clean no-op too — it returns before touching its invalidated ctx,
+ *   so no throw and no `tick failed` log.
+ * - one-time stale-ctx lockdown (issue #96): if a tick still catches the
+ *   stale-ctx error (the event-keyed guards above are blind to it), disarm
+ *   the auto interval once and log once.
+ * - arm gate (issue #100, tested in the nested describe at the bottom):
+ *   non-interactive / session-less sessions never arm timers at all.
+ *
+ * The load-bearing try/catches stay as belt-and-braces for genuine current-
  * session errors only.
  *
  * Real pi invalidation is simulated by a ctx whose getters throw the exact
@@ -40,6 +65,15 @@
  *   7. Queued OLD-session countdown tick after NEW session_start → no render
  *      (pre-#93 it redundantly repainted the status bar through the refreshed
  *      uiRef; the unit under test is the render, not the log).
+ *   8. Stale-ctx error inside a live-guarded tick disarms the auto interval
+ *      and logs exactly once (issue #96 lockdown).
+ *   9. Arm gate (issue #100): hasUI=false ctx → ZERO intervals armed, ZERO
+ *      setStatus calls (SDK/subagent sidechains must stay timer-free).
+ *  10. Arm gate (issue #100): hasUI=true + in-memory SessionManager (no
+ *      session file — ephemeral --no-session run) → same silence.
+ *  11. Arm-gate regression: interactive persisted session still arms BOTH
+ *      the auto-distill interval and the countdown repaint, and paints the
+ *      initial status.
  */
 
 import { spawnSync } from "node:child_process";
@@ -49,7 +83,11 @@ import * as path from "node:path";
 import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { cleanupDistillWorktrees, makeFakeUI } from "./_test-helpers";
+import {
+  cleanupDistillWorktrees,
+  makeFakeUI,
+  makeUICtx,
+} from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -278,19 +316,6 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     return { cwd, sessionManager: sm, hasUI: false, ui: null };
   }
 
-  /**
-   * A UI-enabled ctx: session_start arms the countdown timer only when
-   * `ctx.hasUI && showStatus` (showStatus defaults true in the createVault
-   * config), so this shape is required to arm + assert on countdown renders.
-   */
-  function makeUICtx(
-    sm: SessionManager,
-    cwd: string,
-    ui: unknown,
-  ): Record<string, unknown> {
-    return { cwd, sessionManager: sm, hasUI: true, ui };
-  }
-
   test("queued auto-distill tick after session_shutdown is a clean no-op (stale ctx, no crash)", async () => {
     // The exact crash repro from issue #84: a tick queued in the macrotask
     // queue fires after session_shutdown completed and pi invalidated the
@@ -303,7 +328,10 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     // subprocess — the tick assertion must see zero worktrees.
     vault = createVault(1);
     const sm = SessionManager.create(vault, vault);
-    const ctx = makeCtx(sm, vault);
+    // Issue #100 arm gate: timers are armed only for interactive sessions,
+    // so these tests need a UI ctx (a fake UI suffices).
+    const { ui } = makeFakeUI();
+    const ctx = makeUICtx(sm, vault, ui);
     const { captured } = await startSession(ctx);
     await captured.handlers.session_shutdown({ reason: "new" }, ctx);
 
@@ -325,7 +353,8 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     const sm = SessionManager.create(vault, vault);
     sm.appendMessage({ role: "user", content: "hello" });
     sm.appendMessage({ role: "assistant", content: "hi" });
-    const ctx = makeCtx(sm, vault);
+    const { ui } = makeFakeUI();
+    const ctx = makeUICtx(sm, vault, ui);
     const { captured } = await startSession(ctx);
 
     // Fire the auto-distill tick → spawns a worktree + registers the
@@ -356,7 +385,8 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     const sm = SessionManager.create(vault, vault);
     sm.appendMessage({ role: "user", content: "hello" });
     sm.appendMessage({ role: "assistant", content: "hi" });
-    await startSession(makeCtx(sm, vault));
+    const { ui } = makeFakeUI();
+    await startSession(makeUICtx(sm, vault, ui));
 
     const autoInterval = capturedIntervals.find((i) => i.ms === 60_000);
     expect(autoInterval).toBeDefined();
@@ -374,12 +404,13 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     const sm = SessionManager.create(vault, vault);
     sm.appendMessage({ role: "user", content: "hello" });
     sm.appendMessage({ role: "assistant", content: "hi" });
-    const ctx1 = makeCtx(sm, vault);
+    const { ui } = makeFakeUI();
+    const ctx1 = makeUICtx(sm, vault, ui);
     const { captured } = await startSession(ctx1);
     await captured.handlers.session_shutdown({ reason: "reload" }, ctx1);
 
     // Same extension instance, second session on a fresh ctx.
-    const ctx2 = makeCtx(sm, vault);
+    const ctx2 = makeUICtx(sm, vault, ui);
     await captured.handlers.session_start({ reason: "new" }, ctx2);
 
     // The LAST registered 60_000ms interval belongs to session #2.
@@ -403,14 +434,15 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     // `auto-distill tick failed`; the generation guard makes it silent.
     vault = createVault(1);
     const sm = SessionManager.create(vault, vault);
-    const ctx1 = makeCtx(sm, vault);
+    const { ui } = makeFakeUI();
+    const ctx1 = makeUICtx(sm, vault, ui);
     const { captured } = await startSession(ctx1);
     const firstSessionInterval = capturedIntervals.find((i) => i.ms === 60_000);
     expect(firstSessionInterval).toBeDefined();
 
     await captured.handlers.session_shutdown({ reason: "new" }, ctx1);
     // New session re-arms the flag + generation on a FRESH ctx...
-    const ctx2 = makeCtx(sm, vault);
+    const ctx2 = makeUICtx(sm, vault, ui);
     await captured.handlers.session_start({ reason: "new" }, ctx2);
     // ...while the old session's ctx is now invalidated.
     makeCtxStale(ctx1);
@@ -443,7 +475,8 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     const sm = SessionManager.create(vault, vault);
     sm.appendMessage({ role: "user", content: "hello" });
     sm.appendMessage({ role: "assistant", content: "hi" });
-    const ctx1 = makeCtx(sm, vault);
+    const { ui } = makeFakeUI();
+    const ctx1 = makeUICtx(sm, vault, ui);
     const { captured } = await startSession(ctx1);
 
     // Fire session 1's auto tick → spawns a worktree + registers the
@@ -462,7 +495,7 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
 
     await captured.handlers.session_shutdown({ reason: "reload" }, ctx1);
     // New session re-arms the flag + generation on a FRESH ctx...
-    const ctx2 = makeCtx(sm, vault);
+    const ctx2 = makeUICtx(sm, vault, ui);
     await captured.handlers.session_start({ reason: "new" }, ctx2);
     // ...while the old session's ctx is now invalidated.
     makeCtxStale(ctx1);
@@ -520,8 +553,8 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     expect(ui2.setStatusCalls.length).toBe(callsAfterSession2);
   });
 
-  test("stale-ctx error inside a tick disarms the auto interval and logs once (issue #95)", async () => {
-    // Issue #95 residual window: a tick can pass BOTH the sessionActive and
+  test("stale-ctx error inside a tick disarms the auto interval and logs once (issue #96)", async () => {
+    // Issue #96 residual window: a tick can pass BOTH the sessionActive and
     // generation guards yet still hold a ctx whose runner was invalidated
     // WITHOUT the matching session_shutdown reaching this closure (a pi-core
     // edge the event-keyed guards cannot see). Pre-fix the interval threw +
@@ -532,7 +565,8 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     const sm = SessionManager.create(vault, vault);
     sm.appendMessage({ role: "user", content: "hello" });
     sm.appendMessage({ role: "assistant", content: "hi" });
-    const ctx = makeCtx(sm, vault);
+    const { ui } = makeFakeUI();
+    const ctx = makeUICtx(sm, vault, ui);
     const { captured } = await startSession(ctx);
 
     // Simulate the residual window: session is "current" (guards pass) but
@@ -560,7 +594,7 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
       expect(tickErrors).toHaveLength(1);
 
       // A fresh session_start clears the lockdown and re-arms.
-      const ctx2 = makeCtx(sm, vault);
+      const ctx2 = makeUICtx(sm, vault, ui);
       await captured.handlers.session_start({ reason: "new" }, ctx2);
       expect(() => autoInterval!.cb()).not.toThrow();
       // The re-armed session's tick runs against a valid ctx (no stale error).
@@ -568,5 +602,58 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     } finally {
       console.error = originalConsoleError;
     }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Issue #100 — arm gate: SDK/sidechain sessions bind no UI and ephemeral
+  // (--no-session) runs have no forkable session file, yet session_start used
+  // to arm the 60-min auto-distill interval unconditionally. When the host
+  // tears such a session down via raw AgentSession.dispose() (which NEVER
+  // emits session_shutdown), the orphaned tick hit the #96 lockdown. The fix:
+  // arm nothing, paint nothing, unless `ctx.hasUI && getSessionFile()`.
+  // ---------------------------------------------------------------------------
+  describe("arm gate for non-interactive / ephemeral sessions (issue #100)", () => {
+    test("hasUI=false session (SDK/subagent sidechain): zero intervals armed, zero setStatus", async () => {
+      // Sidechain/SDK sessions bind no UI. Pass a fake UI anyway to prove
+      // session_start paints nothing through it, and assert the interval
+      // stub captured NOTHING (no auto-distill timer, no countdown).
+      vault = createVault(1);
+      const sm = SessionManager.create(vault, vault);
+      const fake = makeFakeUI();
+      const ctx = { ...makeCtx(sm, vault), ui: fake.ui };
+      await startSession(ctx);
+
+      expect(capturedIntervals).toHaveLength(0);
+      expect(fake.setStatusCalls).toHaveLength(0);
+    });
+
+    test("hasUI=true but in-memory session (--no-session ephemeral run): zero intervals, zero setStatus", async () => {
+      // Same gate, other leg: SessionManager.inMemory() returns undefined
+      // from getSessionFile() forever (no forkable session file), so even a
+      // UI-bound ephemeral session arms nothing.
+      vault = createVault(1);
+      const sm = SessionManager.inMemory(vault);
+      expect(sm.getSessionFile()).toBeUndefined();
+      const fake = makeFakeUI();
+      await startSession(makeUICtx(sm, vault, fake.ui));
+
+      expect(capturedIntervals).toHaveLength(0);
+      expect(fake.setStatusCalls).toHaveLength(0);
+    });
+
+    test("regression: interactive persisted session still arms auto + countdown intervals and paints status", async () => {
+      // The gate must not touch the normal TUI happy path: hasUI=true plus a
+      // persisted session file arms BOTH intervals (auto-distill at
+      // intervalMinutes*60_000 and the 1s countdown repaint) and paints the
+      // initial idle status.
+      vault = createVault(1);
+      const sm = SessionManager.create(vault, vault);
+      const fake = makeFakeUI();
+      await startSession(makeUICtx(sm, vault, fake.ui));
+
+      expect(capturedIntervals.some((i) => i.ms === 60_000)).toBe(true);
+      expect(capturedIntervals.some((i) => i.ms === 1000)).toBe(true);
+      expect(fake.setStatusCalls.length).toBeGreaterThan(0);
+    });
   });
 });

@@ -220,7 +220,7 @@ git -C "${s.vault}" merge conflict-side >/dev/null 2>&1 || true
   // contents for marker TEXT. A documented conflict example inside a
   // fenced code block is ordinary committed content — it never appears
   // as an unmerged index entry, so it can never false-positive a
-  // distill (issue #95). The old content scan needed fence-aware
+  // distill (issue #96). The old content scan needed fence-aware
   // parsing precisely because grepping marker text anywhere in tracked
   // *.md files is inherently ambiguous with documentation.
 
@@ -296,8 +296,8 @@ git -C "${s.vault}" merge agent-side >/dev/null 2>&1 || true
     }
   });
 
-  test("validate_no_unresolved_conflicts PASS (issue #95): documented conflict example in a fenced code block is NOT a conflict", () => {
-    // Issue #95 regression: a note documenting a complete conflict
+  test("validate_no_unresolved_conflicts PASS (issue #96): documented conflict example in a fenced code block is NOT a conflict", () => {
+    // Issue #96 regression: a note documenting a complete conflict
     // example inside a fenced code block (e.g. a Python re.compile
     // recipe containing the marker strings) used to trip the old
     // marker-TEXT scan and block every distill with

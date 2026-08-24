@@ -34,7 +34,11 @@ import * as path from "node:path";
 import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { cleanupDistillWorktrees } from "./_test-helpers";
+import {
+  cleanupDistillWorktrees,
+  makeFakeUI,
+  makeUICtx,
+} from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -232,13 +236,10 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
 
     const { api, captured } = makeMockAPI();
     distillExtension(api as never);
-    // biome-ignore lint/suspicious/noExplicitAny: partial ctx
-    const ctx: any = {
-      cwd: vault,
-      sessionManager: sm,
-      hasUI: false,
-      ui: null,
-    };
+    // Issue #100 arm gate: interval-arming requires an interactive session
+    // with a persisted session file, so fire the captured auto interval from
+    // a UI ctx (a fake UI is enough).
+    const ctx = makeUICtx(sm, vault, makeFakeUI().ui);
     await captured.handlers.session_start({ reason: "new" }, ctx);
 
     // Fire the auto-distill tick → spawns worktree A + registers pollHandle.
