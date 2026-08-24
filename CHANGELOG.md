@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.7.3] - 2026-08-24
+
+<!-- USER-EDITABLE SECTION START -->
+**Auto-distill arms only for interactive sessions — stale-ctx tick log eliminated:**
+
+- SDK/subagent sidechains (`hasUI=false`) and ephemeral `--no-session` runs arm no distill timers and paint no status entry; ticks orphaned by raw session disposal can no longer emit `[napkin-distill] auto tick hit a stale session ctx; auto-distill disarmed…`. Interactive TUI sessions and shutdown distill are unaffected (#100 / #101).
+- Stale-session ticks are clean no-ops via a session generation guard (#93); a one-time lockdown keeps any residual stale tick a single diagnosable log line instead of per-tick spam (#96).
+- Requires `@cad0p/napkin` ≥ 0.14.0-20260820.1 (#98): `$HOME/.napkin` is no longer resolved as a vault root (inherited from cad0p/napkin#78).
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(extension)* Make stale-session distill ticks clean no-ops via a session generation guard (closes #93)
+- *(distill)* Authoritative git ls-files -u conflict detection + stale-ctx tick lockdown (closes #96) ([#97](https://github.com/cad0p/pi-napkin/pull/97))
+- *(distill)* Arm auto-distill only for interactive sessions with a forkable session file (closes #100) ([#101](https://github.com/cad0p/pi-napkin/pull/101))
+
+
 ## [0.7.2] - 2026-08-16
 
 <!-- USER-EDITABLE SECTION START -->
