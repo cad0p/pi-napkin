@@ -543,6 +543,23 @@ export function makeFakeUI(): {
 }
 
 /**
+ * Build a UI-enabled session_start ctx (`hasUI: true`) around the given
+ * session manager and ui stub. The distill extension arms its countdown
+ * repaint — and, before the issue #100 arm gate, only ever armed the
+ * auto-distill interval at all — for interactive sessions with a persisted
+ * session file, so interval-firing tests need this ctx shape (`makeFakeUI()`
+ * supplies the `ui` object). Shared by stale-ctx-race, pollhandle-timeout,
+ * routing, and shutdown-handler suites.
+ */
+export function makeUICtx(
+  sm: SessionManager,
+  cwd: string,
+  ui: unknown,
+): Record<string, unknown> {
+  return { cwd, sessionManager: sm, hasUI: true, ui };
+}
+
+/**
  * Spy-style ExtensionAPI that records `on(event, handler)` and
  * `registerCommand(name, opts)` calls. Other methods are no-ops since
  * extension `session_start` and command invocation don't use them.
