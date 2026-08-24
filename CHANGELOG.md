@@ -5,7 +5,9 @@ All notable changes to this project will be documented in this file.
 ## [calver-released]
 
 <!-- USER-EDITABLE SECTION START -->
-<!-- Add your curated release notes here. -->
+**Auto-distill arms only for interactive sessions — stale-ctx tick log eliminated:**
+
+- SDK/subagent sidechains (`hasUI=false`) and ephemeral `--no-session` runs arm no distill timers and paint no status entry; ticks orphaned by raw session disposal can no longer emit `[napkin-distill] auto tick hit a stale session ctx; auto-distill disarmed…`. Interactive TUI sessions and shutdown distill are unaffected (#100 / #101).
 <!-- USER-EDITABLE SECTION END -->
 
 ### 🐛 Bug Fixes
