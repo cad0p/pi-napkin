@@ -83,9 +83,10 @@
 #                                                 main, pushes if origin, cleans
 #                                                 up worktree+branch — see
 #                                                 extensions/distill/distill-prompt.md)
-#   4. validate agent output                     (markers, HEAD on default,
+#   4. validate agent output                     (unresolved conflicts,
+#                                                 HEAD on default,
 #                                                 commit count; see
-#                                                 validate_no_markers /
+#                                                 validate_no_unresolved_conflicts /
 #                                                 validate_head_on_default /
 #                                                 validate_commit_count below)
 #   5. salvage if validation fails               (force-cleanup worktree+
@@ -294,12 +295,13 @@ ERROR_LOG="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.log"
 # failed:<reason> → error.
 OUTCOME_PATH="$ERROR_DIR/${TIMESTAMP}-$$-${BRANCH_SHORT}.outcome"
 
-# Pre-distill marker snapshot tmp file (CORR-1). Captured right before
+# Pre-distill unresolved-conflict snapshot (CORR-1). Captured right before
 # the agent runs (after START_SHA is recovered from meta.json) so the
-# post-agent validate_no_markers can distinguish agent-induced markers
-# from pre-existing ones. Empty string until the snapshot is
-# captured. Cleaned up in the EXIT trap.
-PRE_DISTILL_MARKER_FILES_FILE=""
+# post-agent validate_no_unresolved_conflicts can distinguish
+# agent-induced conflicts from pre-existing ones. A plain shell variable
+# (no tmp file) — `git ls-files -u` output is small and the EXIT trap has
+# nothing to clean up.
+PRE_DISTILL_CONFLICT_FILES=""
 
 # Lazy-create error log on first write. Empty file is the "no error" signal.
 ERROR_LOG_TOUCHED=0
@@ -546,13 +548,13 @@ salvage() {
   local hint
   case "$reason" in
     markers-after-agent-exit)
-      hint="Conflict markers landed in the vault. Inspect '$vault', then 'git -C $vault revert HEAD --no-edit' to undo the corrupt commit. Distill content is recoverable from 'git -C $vault reflog' for ~90 days."
+      hint="Unresolved merge conflicts landed in the vault. Inspect '$vault' and resolve them with 'git -C $vault mergetool' (or edit the conflicted files + 'git add' them), then commit the resolution. Distill content is recoverable from 'git -C $vault reflog' for ~90 days."
       ;;
     pre-existing-markers)
-      hint="Conflict markers were already present in the vault before this distill ran (likely from a prior failed merge or a hand-edit). The agent did NOT introduce them, so this distill was rejected to avoid compounding the corruption. Inspect '$vault' (the error log lists the affected files) and resolve manually — delete the marker lines, keep the desired content, and commit. Once clean, re-run distill."
+      hint="Unresolved merge conflicts were already present in the vault before this distill ran (likely from a prior failed merge or an in-progress manual merge). The agent did NOT introduce them, so this distill was rejected to avoid compounding the corruption. Inspect '$vault' (the error log lists the affected files) and resolve the merge manually — edit the conflicted files, 'git add' them, and commit. Once clean, re-run distill."
       ;;
     internal-validator-error)
-      hint="The post-distill conflict-marker validator could NOT run (mktemp failed to allocate a tempfile — likely a full disk or locked-down TMPDIR). The vault was NOT scanned for markers after the agent exited, so the wrapper cannot say whether the squash commit introduced corruption. Inspect '$vault' manually for unresolved '<<<<<<< / ======= / >>>>>>>' markers; if clean, the squash is keepable, otherwise 'git -C $vault revert HEAD --no-edit'. Distill content is recoverable from 'git -C $vault reflog' for ~90 days."
+      hint="The post-distill conflict validator could NOT run (git ls-files failed — likely a corrupt or unreadable vault git dir). The vault was NOT scanned for unresolved conflicts after the agent exited, so the wrapper cannot say whether the squash commit introduced a conflict state. Inspect '$vault' manually with 'git -C $vault status' and 'git -C $vault ls-files -u'; if clean, the squash is keepable, otherwise resolve the conflicts. Distill content is recoverable from 'git -C $vault reflog' for ~90 days."
       ;;
     head-not-on-default)
       hint="Vault HEAD is not on '$DEFAULT_BRANCH'. Run 'git -C $vault checkout $DEFAULT_BRANCH' before the next distill. Distill content is recoverable from 'git -C $vault reflog'."
@@ -622,184 +624,96 @@ salvage() {
 # beyond logging — the salvage path (A4) is the only thing that mutates
 # the worktree/branch on validation failure.
 
-# list_marker_files <vault> <output_file>
+# validate_no_unresolved_conflicts <vault> <pre_conflict_files>
 #
-# Scan the vault's tracked `*.md` files and write the relative path of
-# every file that contains a complete conflict-marker triple to
-# <output_file>, one per line. Empty output file = no conflict-marked
-# files in the vault. Idempotent: caller is responsible for
-# truncating <output_file> first.
+# Checks the vault for UNRESOLVED MERGE CONFLICTS via the authoritative
+# git index state (`git ls-files -u`: entries with stages 1/2/3 exist
+# only during an unresolved merge) and classifies any conflicts against
+# the pre-distill snapshot captured just before the agent ran:
 #
-# Marker triple definition (CORR-A-1, SEC-A-7): a real merge conflict
-# always emits ALL THREE marker types (`<<<<<<< `, `======= `, `>>>>>>> `)
-# in the same file. The any-of-three rule false-positives on Setext
-# H1 underlines and on documentation prose that quotes one or two
-# markers; co-presence eliminates those classes. The acknowledged
-# tradeoff (a vault that genuinely documents the full triple inside
-# a single file) is documented at validate_no_markers below.
+#   pass (rc 0) — no unresolved conflicts post-distill
+#   fail rc 1   — at least one NEW conflict path (agent-induced)
+#   fail rc 2   — only pre-existing conflict paths (NOT agent-induced —
+#                 the user's vault was already mid-merge; the agent
+#                 didn't make it worse)
+#   fail rc 3   — validator could not run (git ls-files failed);
+#                 internal-validator-error (graceful degradation; do
+#                 NOT blame the agent for state nobody observed)
 #
-# Restricted to `*.md` because that's the only file class the agent
-# touches; scanning the entire vault would false-positive on user
-# scripts that legitimately discuss markers.
-#
-# Why a `git ls-files` enumeration: gitignored content (e.g. the
-# per-distill `.napkin/distill/` shim dir) is skipped automatically.
-# Per-file `grep -q` invocations are O(N) in tracked .md files; the
-# prior single-pass `xargs grep` was O(1) but couldn't express the
-# per-file all-three-co-present predicate. For vaults with thousands
-# of .md files this is slower but still well under wall-clock
-# budget. CLEAN-A-15 tracks the optimisation opportunity.
-#
-# bash 3.2 portability (macOS default): `while read -d ''` with array
-# `+=` is supported. Process substitution `< <(...)` is also bash 3.2.
-#
-# Used by:
-#   - The pre-distill snapshot capture (right before the agent runs)
-#     to record which files already had markers, so post-distill
-#     validation can distinguish agent-induced markers from
-#     pre-existing ones (CORR-1).
-#   - validate_no_markers (post-distill), which calls this helper
-#     against the same vault and diffs the two snapshots.
-list_marker_files() {
-  local vault="$1"
-  local output_file="$2"
-  local file
-  while IFS= read -r -d '' file; do
-    # All three markers must appear in the same file. `grep -q`
-    # short-circuits on first match, and the `&&` chain stops as
-    # soon as one marker type is absent — minimising work in the
-    # common no-conflict case.
-    if grep -qE '^<{7} ' -- "$vault/$file" 2>/dev/null \
-       && grep -qE '^={7}$' -- "$vault/$file" 2>/dev/null \
-       && grep -qE '^>{7} ' -- "$vault/$file" 2>/dev/null; then
-      printf '%s\n' "$file" >> "$output_file"
-    fi
-  done < <(git -C "$vault" ls-files -z -- '*.md' 2>/dev/null)
-}
-
-# validate_no_markers <vault> <pre_distill_marker_files>
-#
-# Searches the vault's tracked `*.md` files for unresolved git conflict
-# markers and classifies any matches against the pre-distill snapshot
-# captured just before the agent ran:
-#
-#   pass (rc 0) — no marker-bearing files post-distill
-#   fail rc 1   — at least one NEW marker-bearing file (agent-induced)
-#   fail rc 2   — only pre-existing marker-bearing files (NOT
-#                 agent-induced — the user's vault was already in this
-#                 state; the agent didn't make it worse)
-#
-# rc 1 takes priority when both new and pre-existing markers are
+# rc 1 takes priority when both new and pre-existing conflicts are
 # present: the agent's run made things worse, which is the dominant
-# signal even if it didn't touch the pre-existing files. Only rc 2
-# fires when EVERY marker-bearing file post-distill was already
-# marker-bearing pre-distill.
+# signal even if it didn't touch the pre-existing files.
 #
-# Caller dispatches on the rc to choose the right salvage reason
-# code:
-#   rc 1 → markers-after-agent-exit (agent-induced; existing reason)
-#   rc 2 → pre-existing-markers     (NOT agent-induced; new reason
-#                                    code with a recovery hint that
-#                                    points the user at fixing the
-#                                    listed files manually)
-#   rc 3 → internal-validator-error (validator could NOT run because
-#                                    its post-distill mktemp failed;
-#                                    surfaced as its own reason so the
-#                                    user is NOT told markers were
-#                                    found post-agent-exit when the
-#                                    validator never observed the
-#                                    vault state — CORR-1 R3 / SEC-1 R3)
+# Why the index state instead of scanning file contents (CORR-A-1,
+# SEC-A-7, issue #95): a REAL merge conflict is recorded in the index
+# by git itself — no regex can beat that signal. A documented conflict
+# EXAMPLE inside a fenced code block is ordinary committed content, not
+# an unmerged index entry, so it can never false-positive a distill.
+# The old content scan needed fence-aware parsing precisely because it
+# grepped marker TEXT anywhere in tracked *.md files, which is
+# inherently ambiguous with documentation.
 #
-# CORR-1: pre-existing markers (from a prior failed run, user error,
-# leftover state from a botched manual merge) used to classify as
-# `markers-after-agent-exit` because the wrapper had no
-# pre-distill marker snapshot. That misled the user into blaming the
-# agent for state it didn't create. Capturing the snapshot at
-# wrapper start lets us differentiate.
-#
-# Marker triple definition (CORR-A-1, SEC-A-7): a real merge conflict
-# always emits ALL THREE marker types in the same file. See
-# list_marker_files for the per-file predicate.
-#
-# Acknowledged tradeoff: a vault that genuinely documents a complete
-# `<<<<<<<` / `=======` / `>>>>>>>` example INSIDE A SINGLE FILE will
-# trip the validator post-distill — but if it ALSO tripped
-# pre-distill, this code path classifies it as `pre-existing-markers`
-# (rc 2) instead of as agent-induced. Users who hit this can escape
-# the markers in their docs (leading space, HTML comments) once and
-# subsequent distills see no markers either pre or post.
-#
-# Why scan post-squash on the vault: the agent merges into its branch
-# inside the worktree, then squashes onto the default branch in the
-# vault. Markers in the agent's branch get squashed into the vault's
-# default branch — they become committed corruption in the vault. The
-# vault working tree is the canonical post-condition.
-validate_no_markers() {
+# `git ls-files -u` emits three entries per conflicted path (stages
+# 1/2/3); `cut -f2` isolates the path column and `sort -u` dedupes.
+# The caller passes the pre-distill snapshot as a newline-separated
+# path list (empty string when none was captured), and /dev/null when
+# the pre-capture failed, which collapses to "every post conflict is
+# NEW" and routes to failed:markers-after-agent-exit.
+validate_no_unresolved_conflicts() {
   local vault="$1"
-  local pre_file="$2"
-  if [ -z "$vault" ] || [ -z "$pre_file" ]; then
-    log_error "validate_no_markers: both <vault> and <pre_distill_marker_files> are required (caller passes /dev/null when no pre-distill snapshot is available)"
+  local pre_files="$2"
+  if [ -z "$vault" ]; then
+    log_error "validate_no_unresolved_conflicts: <vault> is required"
     return 3
   fi
 
-  local post_file
-  post_file="$(mktemp -t napkin-distill-post-marker.XXXXXX 2>/dev/null || true)"
-  if [ -z "$post_file" ]; then
-    # CORR-1 R3 / SEC-1 R3: post-distill mktemp failure (full disk,
-    # locked-down TMPDIR, etc.) USED to return 1 — which the caller
-    # mapped to `failed:markers-after-agent-exit`. That misled the
-    # user into reverting a possibly-correct squash commit on the
-    # claim that markers had landed in the vault, even though the
-    # validator never actually scanned the vault. Return a distinct
-    # rc 3 so the caller routes to `failed:internal-validator-error`
-    # whose recovery hint truthfully tells the user the validator
-    # couldn't run — inspect the vault before relying on the squash.
-    log_error "validate_no_markers: mktemp failed for post-distill snapshot — cannot scan vault for conflict markers; routing to internal-validator-error (NOT markers-after-agent-exit) to avoid misattributing unobserved state to the agent"
+  local post_files post_rc
+  # `ls-files -u` exit status is load-bearing: a git failure must route
+  # to rc 3 (internal-validator-error), NOT be mistaken for "no
+  # conflicts" (empty output). The pipe to cut/sort would mask git's
+  # exit code (the last command's status wins), so capture it first.
+  post_files="$(git -C "$vault" ls-files -u 2>/dev/null)"
+  post_rc=$?
+  if [ "$post_rc" -ne 0 ]; then
+    log_error "validate_no_unresolved_conflicts: git ls-files failed (rc $post_rc) — cannot scan vault for unresolved conflicts; routing to internal-validator-error (NOT markers-after-agent-exit) to avoid misattributing unobserved state to the agent"
     return 3
   fi
-  list_marker_files "$vault" "$post_file"
-
-  # Empty post-distill snapshot = no marker-bearing files = pass.
-  if [ ! -s "$post_file" ]; then
-    rm -f "$post_file" 2>/dev/null || true
+  post_files="$(printf '%s\n' "$post_files" | cut -f2 | sort -u)"
+  if [ -z "$post_files" ]; then
+    # No unresolved conflicts post-distill = pass.
     return 0
   fi
 
-  # Compute set difference: files in post but NOT in pre = NEW (agent-induced).
-  # `comm` requires sorted input. The caller passes /dev/null as pre_file
-  # when no pre-distill snapshot is available (mktemp failed at startup),
-  # which collapses to "every post-marker file is NEW" and routes to
-  # failed:markers-after-agent-exit.
-  local new_marker_files pre_existing_marker_files
-  new_marker_files="$(comm -23 <(sort -u "$post_file") <(sort -u "$pre_file" 2>/dev/null) 2>/dev/null || cat "$post_file")"
-  pre_existing_marker_files="$(comm -12 <(sort -u "$post_file") <(sort -u "$pre_file" 2>/dev/null) 2>/dev/null || true)"
+  # Diff against the pre-distill snapshot. `comm` requires sorted input;
+  # /dev/null as pre collapses to "every post conflict is NEW".
+  local new_conflicts pre_existing_conflicts
+  new_conflicts="$(comm -23 <(printf '%s\n' "$post_files") <(printf '%s\n' "$pre_files" 2>/dev/null | sort -u) 2>/dev/null || printf '%s\n' "$post_files")"
+  pre_existing_conflicts="$(comm -12 <(printf '%s\n' "$post_files") <(printf '%s\n' "$pre_files" 2>/dev/null | sort -u) 2>/dev/null || true)"
 
-  rm -f "$post_file" 2>/dev/null || true
-
-  if [ -n "$new_marker_files" ]; then
-    # Agent-induced markers present (alone or alongside pre-existing).
+  if [ -n "$new_conflicts" ]; then
+    # Agent-induced conflicts present (alone or alongside pre-existing).
     # Dominant signal: the run made things worse.
-    log_error "validate_no_markers: NEW conflict markers (agent-induced) in vault \`$vault\`:"
+    log_error "validate_no_unresolved_conflicts: NEW unresolved merge conflicts (agent-induced) in vault \`$vault\`:"
     while IFS= read -r file; do
       [ -n "$file" ] && log_error "  $vault/$file"
-    done <<< "$new_marker_files"
-    if [ -n "$pre_existing_marker_files" ]; then
-      log_error "validate_no_markers: also pre-existing conflict markers (present before agent ran) in:"
+    done <<< "$new_conflicts"
+    if [ -n "$pre_existing_conflicts" ]; then
+      log_error "validate_no_unresolved_conflicts: also pre-existing conflicts (present before agent ran) in:"
       while IFS= read -r file; do
         [ -n "$file" ] && log_error "  $vault/$file"
-      done <<< "$pre_existing_marker_files"
+      done <<< "$pre_existing_conflicts"
     fi
     return 1
   fi
 
-  # Only pre-existing markers post-distill — the agent didn't touch
+  # Only pre-existing conflicts post-distill — the agent didn't touch
   # those files (or touched them but didn't make things worse). Not
   # agent-induced; route to a different reason code so the user can
-  # fix the underlying files manually.
-  log_error "validate_no_markers: pre-existing conflict markers (NOT agent-induced) in vault \`$vault\`:"
+  # resolve the merge manually.
+  log_error "validate_no_unresolved_conflicts: pre-existing unresolved merge conflicts (NOT agent-induced) in vault \`$vault\`:"
   while IFS= read -r file; do
     [ -n "$file" ] && log_error "  $vault/$file"
-  done <<< "$pre_existing_marker_files"
+  done <<< "$pre_existing_conflicts"
   return 2
 }
 
@@ -987,13 +901,9 @@ cleanup() {
   # was the last distill for the vault. ENOTEMPTY (other concurrent
   # distills) and ENOENT (race) are both expected and benign.
   rmdir "$(dirname "$WORKTREE")" 2>/dev/null || true
-  # CORR-1: the pre-distill marker snapshot tmp file is the wrapper's
-  # internal scratch state. Empty string when the snapshot was never
-  # captured (NAPKIN_DISTILL_SKIP_PI=1, early-exit before snapshot,
-  # mktemp failed). `rm -f` is idempotent on missing paths.
-  if [ -n "${PRE_DISTILL_MARKER_FILES_FILE:-}" ]; then
-    rm -f "$PRE_DISTILL_MARKER_FILES_FILE" 2>/dev/null || true
-  fi
+  # The pre-distill conflict snapshot is a plain variable — nothing to
+  # clean up on exit (the old mktemp-backed marker snapshot file is gone;
+  # issue #95 simplification).
   # SEC-2 R3: pi_stderr is the agent's stderr capture file (allocated
   # via mktemp before invoking pi). Normal-path cleanup happens inline
   # at the post-agent block, but a SIGTERM-on-grace, OOM kill, or any
@@ -1193,35 +1103,39 @@ if [ "${NAPKIN_DISTILL_FORCE_CLEANUP:-}" = "1" ]; then
   exit 1
 fi
 
-# --- Pre-distill marker snapshot (CORR-1) -----------------------------------
+# --- Pre-distill conflict snapshot (CORR-1) -------------------------------
 #
-# Capture which tracked `*.md` files in the vault already contain a
-# complete conflict-marker triple BEFORE the agent runs. Used by
-# validate_no_markers post-agent to differentiate:
+# Capture the vault's UNRESOLVED MERGE CONFLICTS (index stage entries)
+# BEFORE the agent runs. Used by validate_no_unresolved_conflicts
+# post-agent to differentiate:
 #
-#   - Files marker-bearing post-distill but NOT pre-distill
+#   - Conflict paths post-distill but NOT pre-distill
 #       → NEW (agent-induced) → failed:markers-after-agent-exit
-#   - Files marker-bearing pre-distill AND post-distill
+#   - Conflict paths pre-distill AND post-distill
 #       → pre-existing (NOT agent-induced) → failed:pre-existing-markers
 #
-# Without this snapshot, every post-agent marker classified as
-# agent-induced — misleading users when the markers came from a prior
-# failed run, a botched manual merge, or user editing.
+# `git ls-files -u` is the authoritative "is this file in a conflicted
+# merge state" signal: it lists index entries with stages 1/2/3, which
+# git only writes during an unresolved merge. Documented conflict-marker
+# EXAMPLES inside fenced code blocks are ordinary committed content, not
+# unmerged index entries — they never appear here, so they can never
+# false-positive a distill (issue #95). This replaces the old
+# marker-text scan (which grepped file contents and needed fence-aware
+# parsing to avoid flagging documentation).
 #
-# Best-effort: if mktemp fails (very rare), set PRE_DISTILL_MARKER_FILES_FILE
-# to /dev/null so the call site always passes a concrete pre-snapshot
-# path. validate_no_markers treats /dev/null as "no pre-existing markers
-# observed", collapsing every post-agent marker to NEW (agent-induced)
-# and routing to failed:markers-after-agent-exit. The wrapper does NOT
-# hard-fail on snapshot failure — the worst-case is the pre-PR-12-Pass-2B
-# behaviour.
-PRE_DISTILL_MARKER_FILES_FILE="$(mktemp -t napkin-distill-pre-marker.XXXXXX 2>/dev/null || true)"
-if [ -n "$PRE_DISTILL_MARKER_FILES_FILE" ]; then
-  list_marker_files "$VAULT" "$PRE_DISTILL_MARKER_FILES_FILE"
+# Best-effort: if the command fails, the variable is empty and any
+# post-agent conflict routes to markers-after-agent-exit (treating the
+# state as unobserved rather than pre-existing). Capture git's exit
+# status before the pipe masks it (same load-bearing pattern as the
+# post-distill validator).
+PRE_DISTILL_CONFLICT_FILES_RAW="$(git -C "$VAULT" ls-files -u 2>/dev/null)"
+if [ $? -ne 0 ]; then
+  log_error "pre-distill conflict snapshot: git ls-files failed; treating vault as conflict-free (any post-agent conflict will route to markers-after-agent-exit)"
+  PRE_DISTILL_CONFLICT_FILES=""
 else
-  log_error "pre-distill marker snapshot: mktemp failed; passing /dev/null to validate_no_markers (any post-agent markers will route to failed:markers-after-agent-exit)"
-  PRE_DISTILL_MARKER_FILES_FILE="/dev/null"
+  PRE_DISTILL_CONFLICT_FILES="$(printf '%s\n' "$PRE_DISTILL_CONFLICT_FILES_RAW" | cut -f2 | sort -u)"
 fi
+unset PRE_DISTILL_CONFLICT_FILES_RAW
 
 # --- Step: run the agent under a hard timeout (PR #12 architecture) --------
 #
@@ -1295,11 +1209,13 @@ fi
 #
 # Validates the agent's output and writes the appropriate outcome class.
 # A3 wires:
-#   - validate_no_markers       (markers-after-agent-exit when NEW markers
-#                                 post-agent; pre-existing-markers when
-#                                 only pre-existing markers — CORR-1;
-#                                 internal-validator-error when post-
-#                                 distill mktemp fails — CORR-1 R3 /
+#   - validate_no_unresolved_conflicts
+#                                 (markers-after-agent-exit when NEW
+#                                 conflict paths post-agent;
+#                                 pre-existing-markers when only
+#                                 pre-existing conflicts — CORR-1;
+#                                 internal-validator-error when the
+#                                 validator cannot run — CORR-1 R3 /
 #                                 SEC-1 R3)
 #   - validate_head_on_default  (head-not-on-default on fail)
 #   - validate_commit_count     (no-content when 0 commits since startSha)
@@ -1312,14 +1228,16 @@ fi
 # outcome sidecar.
 #
 # Reason codes (from the V3 verification report):
-#   markers-after-agent-exit   — V1 fail, NEW conflict markers in vault
-#                                 *.md introduced by the agent's run
-#   pre-existing-markers       — V1 fail, ONLY pre-existing markers in
-#                                 vault *.md (present before agent ran;
-#                                 not the agent's fault — CORR-1)
-#   internal-validator-error   — V1 fail, post-distill mktemp failed so
-#                                 the marker validator could NOT scan
-#                                 the vault. Distinct from
+#   markers-after-agent-exit   — V1 fail, NEW unresolved merge conflicts
+#                                 in the vault introduced by the agent's
+#                                 run (git ls-files -u)
+#   pre-existing-markers       — V1 fail, ONLY pre-existing unresolved
+#                                 conflicts in the vault (present before
+#                                 agent ran; not the agent's fault —
+#                                 CORR-1)
+#   internal-validator-error   — V1 fail, the conflict validator could
+#                                 NOT scan the vault (git ls-files
+#                                 failed). Distinct from
 #                                 markers-after-agent-exit so the user
 #                                 isn't blamed-via-agent for state
 #                                 nobody observed (CORR-1 R3 / SEC-1 R3)
@@ -1371,23 +1289,22 @@ if ! validate_head_on_default "$VAULT" "$DEFAULT_BRANCH"; then
   exit 1
 fi
 
-# Marker validation (CORR-A-1, SEC-A-7, CORR-1, CORR-1 R3 / SEC-1 R3).
-# Four rc paths:
-#   0 → no markers post-distill, pass
-#   1 → NEW marker-bearing files (agent-induced) → markers-after-agent-exit
-#   2 → only pre-existing marker files → pre-existing-markers (NOT
-#       agent-induced; user must fix manually before next distill)
-#   3 → post-distill mktemp failed; validator could not scan →
+# Conflict validation (CORR-A-1, SEC-A-7, CORR-1, CORR-1 R3 / SEC-1 R3).
+# Three rc paths (plus rc 3 for validator failure):
+#   0 → no unresolved conflicts post-distill, pass
+#   1 → NEW conflict paths (agent-induced) → markers-after-agent-exit
+#   2 → only pre-existing conflict paths → pre-existing-markers (NOT
+#       agent-induced; user must resolve the merge manually before next
+#       distill)
+#   3 → git ls-files failed; validator could not scan →
 #       internal-validator-error (graceful degradation; do NOT
 #       blame the agent for state nobody observed — CORR-1 R3 /
 #       SEC-1 R3)
 #
-# Pass the pre-distill snapshot file so validate_no_markers can do the
-# diff. PRE_DISTILL_MARKER_FILES_FILE is set to /dev/null upstream when
-# mktemp failed; validate_no_markers treats /dev/null as "no pre-existing
-# markers observed" and routes every post-agent marker to
-# failed:markers-after-agent-exit.
-validate_no_markers "$VAULT" "$PRE_DISTILL_MARKER_FILES_FILE"
+# Pass the pre-distill snapshot (newline-separated conflict paths, empty
+# when none were captured) so validate_no_unresolved_conflicts can do
+# the diff.
+validate_no_unresolved_conflicts "$VAULT" "$PRE_DISTILL_CONFLICT_FILES"
 MARKER_RC=$?
 if [ "$MARKER_RC" -eq 1 ]; then
   record_dangling_sha

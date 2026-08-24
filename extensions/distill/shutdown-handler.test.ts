@@ -5,7 +5,12 @@ import * as path from "node:path";
 import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { cleanupDistillWorktrees, withNapkinOnPath } from "./_test-helpers";
+import {
+  cleanupDistillWorktrees,
+  makeFakeUI,
+  makeUICtx,
+  withNapkinOnPath,
+} from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
 
@@ -587,13 +592,9 @@ describe("session_shutdown handler — interval-fires-before-shutdown race (G5)"
 
     const { api, captured } = makeMockAPI();
     distillExtension(api as never);
-    // biome-ignore lint/suspicious/noExplicitAny: partial ctx
-    const ctx: any = {
-      cwd: vault,
-      sessionManager: sm,
-      hasUI: false,
-      ui: null,
-    };
+    // Issue #100 arm gate: the interval-fires-before-shutdown race needs the
+    // captured auto interval, which only interactive persisted sessions arm.
+    const ctx = makeUICtx(sm, vault, makeFakeUI().ui);
     await captured.handlers.session_start({ reason: "new" }, ctx);
 
     // Locate the auto-distill interval. intervalMinutes=1 → ms=60_000.
@@ -633,13 +634,8 @@ describe("session_shutdown handler — interval-fires-before-shutdown race (G5)"
 
     const { api, captured } = makeMockAPI();
     distillExtension(api as never);
-    // biome-ignore lint/suspicious/noExplicitAny: partial ctx
-    const ctx: any = {
-      cwd: vault,
-      sessionManager: sm,
-      hasUI: false,
-      ui: null,
-    };
+    // Issue #100 arm gate: a hasUI=false ctx no longer arms the auto interval.
+    const ctx = makeUICtx(sm, vault, makeFakeUI().ui);
     await captured.handlers.session_start({ reason: "new" }, ctx);
 
     const autoInterval = capturedIntervals.find((i) => i.ms === 60_000);

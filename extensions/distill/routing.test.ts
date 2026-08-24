@@ -9,6 +9,7 @@ import {
   cleanupDistillWorktrees,
   makeFakeUI,
   makeMockExtensionAPI,
+  makeUICtx,
   retryRmSync,
   TIMEOUT_BIN_DIR,
   withNapkinOnPath,
@@ -384,7 +385,9 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
     distillExtension(api as never);
     expect(captured.handlers.session_start).toBeDefined();
 
-    const ctx = makeCtx();
+    // Issue #100 arm gate: firing the captured auto interval requires an
+    // interactive, persisted session — a hasUI=false ctx arms nothing now.
+    const ctx = makeUICtx(sm, vault, makeFakeUI().ui);
     await captured.handlers.session_start({ reason: "new" }, ctx);
     expect(capturedInterval).not.toBeNull();
 
