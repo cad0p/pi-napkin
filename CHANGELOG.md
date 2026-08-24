@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [calver-released]
+## [0.7.3] - 2026-08-24
 
 <!-- USER-EDITABLE SECTION START -->
 **Auto-distill arms only for interactive sessions — stale-ctx tick log eliminated:**
