@@ -485,7 +485,7 @@ export default function (pi: ExtensionAPI) {
   // session. Path (b) is closed upstream by the arm gate in session_start;
   // this guard remains the backstop for queued ticks around either path.
   let sessionGeneration = 0;
-  // Stale-ctx lockdown (issue #95): if a tick ever catches the stale-ctx
+  // Stale-ctx lockdown (issue #96): if a tick ever catches the stale-ctx
   // error (the session_start's ctx was invalidated without the matching
   // session_shutdown clearing this closure's timers — e.g. a raw
   // AgentSession.dispose() from an SDK/host consumer skips the shutdown
@@ -547,7 +547,7 @@ export default function (pi: ExtensionAPI) {
   }
 
   /**
-   * One-time stale-ctx lockdown (issue #95). If a tick catches the
+   * One-time stale-ctx lockdown (issue #96). If a tick catches the
    * stale-ctx error, the closure's session_start ctx is dead and the
    * #84/#93 event-keyed guards can't see it (the matching
    * session_shutdown never reached this closure — most commonly because
@@ -586,7 +586,7 @@ export default function (pi: ExtensionAPI) {
     autoDistillSuppressed = false;
     // A fresh session_start means this closure has a live session again —
     // clear the stale-ctx lockdown so the new session's timers can run
-    // (issue #95).
+    // (issue #96).
     staleCtxDisarmed = false;
 
     const napkinVault = resolveDistillVault(ctx.cwd);
@@ -797,7 +797,7 @@ export default function (pi: ExtensionAPI) {
           // auto-distill interval tick): any unexpected render error logs
           // and is retried on the next countdown repaint. A stale-ctx
           // error means the session was replaced under us — disarm once
-          // instead of spamming (issue #95).
+          // instead of spamming (issue #96).
           if (isStaleCtxError(err)) {
             handleStaleCtxInTick("countdown");
           } else {
@@ -823,7 +823,7 @@ export default function (pi: ExtensionAPI) {
         // shutdown reaching us — a replacement/reload racing the handler,
         // or a raw AgentSession.dispose() from an SDK/host consumer, which
         // never emits session_shutdown at all (issue #100). Disarm once
-        // instead of throwing+logging on every tick (issue #95).
+        // instead of throwing+logging on every tick (issue #96).
         if (isStaleCtxError(err)) {
           handleStaleCtxInTick("auto");
         } else {
@@ -1413,7 +1413,7 @@ export default function (pi: ExtensionAPI) {
         // interval tick): in the cached-module reload window an old-session
         // tick can pass the re-armed guard and hit the stale ctx — log and
         // drop (the next session owns all poll state). A stale-ctx error
-        // disarms the auto interval once instead of spamming (issue #95).
+        // disarms the auto interval once instead of spamming (issue #96).
         if (isStaleCtxError(err)) {
           handleStaleCtxInTick("poll");
         } else {

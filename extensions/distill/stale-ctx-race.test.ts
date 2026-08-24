@@ -20,7 +20,7 @@
  * `session_shutdown`. Those sidechain sessions bind no UI (`ctx.hasUI ===
  * false`) yet session_start used to arm the 60-min auto-distill interval
  * unconditionally — so every subagent closure leaked a timer whose orphaned
- * tick later hit the #95 lockdown log ("stale session ctx ... disarmed").
+ * tick later hit the #96 lockdown log ("stale session ctx ... disarmed").
  * The fix closes the hole upstream: session_start arms nothing (and paints
  * nothing) unless the session is interactive AND has a forkable session
  * file — `!ctx.hasUI || !getSessionFile()` returns early before `uiRef`, the
@@ -38,7 +38,7 @@
  *   OLD-session tick that fires after the next session_start re-armed the
  *   flag a clean no-op too — it returns before touching its invalidated ctx,
  *   so no throw and no `tick failed` log.
- * - one-time stale-ctx lockdown (issue #95): if a tick still catches the
+ * - one-time stale-ctx lockdown (issue #96): if a tick still catches the
  *   stale-ctx error (the event-keyed guards above are blind to it), disarm
  *   the auto interval once and log once.
  * - arm gate (issue #100, tested in the nested describe at the bottom):
@@ -66,7 +66,7 @@
  *      (pre-#93 it redundantly repainted the status bar through the refreshed
  *      uiRef; the unit under test is the render, not the log).
  *   8. Stale-ctx error inside a live-guarded tick disarms the auto interval
- *      and logs exactly once (issue #95 lockdown).
+ *      and logs exactly once (issue #96 lockdown).
  *   9. Arm gate (issue #100): hasUI=false ctx → ZERO intervals armed, ZERO
  *      setStatus calls (SDK/subagent sidechains must stay timer-free).
  *  10. Arm gate (issue #100): hasUI=true + in-memory SessionManager (no
@@ -553,8 +553,8 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     expect(ui2.setStatusCalls.length).toBe(callsAfterSession2);
   });
 
-  test("stale-ctx error inside a tick disarms the auto interval and logs once (issue #95)", async () => {
-    // Issue #95 residual window: a tick can pass BOTH the sessionActive and
+  test("stale-ctx error inside a tick disarms the auto interval and logs once (issue #96)", async () => {
+    // Issue #96 residual window: a tick can pass BOTH the sessionActive and
     // generation guards yet still hold a ctx whose runner was invalidated
     // WITHOUT the matching session_shutdown reaching this closure (a pi-core
     // edge the event-keyed guards cannot see). Pre-fix the interval threw +
@@ -609,7 +609,7 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
   // (--no-session) runs have no forkable session file, yet session_start used
   // to arm the 60-min auto-distill interval unconditionally. When the host
   // tears such a session down via raw AgentSession.dispose() (which NEVER
-  // emits session_shutdown), the orphaned tick hit the #95 lockdown. The fix:
+  // emits session_shutdown), the orphaned tick hit the #96 lockdown. The fix:
   // arm nothing, paint nothing, unless `ctx.hasUI && getSessionFile()`.
   // ---------------------------------------------------------------------------
   describe("arm gate for non-interactive / ephemeral sessions (issue #100)", () => {
