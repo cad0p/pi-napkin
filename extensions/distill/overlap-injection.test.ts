@@ -142,4 +142,11 @@ describe("formatOverlapNotice", () => {
     // they accumulate over many days.
     expect(Math.ceil(fifty.length / 4)).toBeLessThan(400);
   });
+
+  test("past-tense wording: distill has edited, not is editing (issue #104)", () => {
+    const notice = formatOverlapNotice(["notes/foo.md"]);
+    expect(notice).toContain("has edited files you've also touched");
+    expect(notice).not.toContain("is editing");
+    expect(notice).toContain("may have been overwritten");
+  });
 });

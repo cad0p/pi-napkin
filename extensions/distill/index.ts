@@ -1949,15 +1949,20 @@ export function intersectFiles(
  * session history and forks cleanly into distill subprocess sessions.
  * Cache parity is preserved unconditionally vs the previous per-turn
  * `appendSystemPrompt` mechanism.
+ *
+ * Wording is past tense ("has edited … may have been overwritten"): this
+ * notice is only posted from `onComplete`, after the wrapper's squash-merge
+ * has landed and the worktree is gone (see `postOverlapNoticeOnCompletion`).
+ * Present tense previously misled agents into waiting on an already-finished
+ * distill (issue #104).
  */
 export function formatOverlapNotice(overlapFiles: string[]): string {
   if (overlapFiles.length === 0) return "";
   const list = overlapFiles.join(", ");
   return (
-    "\n\n\u26a0\ufe0f Background napkin distill is editing files you've also " +
-    `touched: ${list}. Recent writes to these files may be overwritten or ` +
-    "merged automatically at distill completion; consider re-reading before " +
-    "further edits."
+    "\n\n\u26a0\ufe0f Background napkin distill has edited files you've also " +
+    `touched: ${list}. Recent writes to these files may have been overwritten ` +
+    "or merged; re-read before further edits."
   );
 }
 

@@ -333,9 +333,9 @@ Successful distill lifecycles produce exactly one squash commit on `main`, with 
 When a background distill completes a squash-merge that touches files you've also written this session, pi-napkin posts a one-line notice into the conversation as a custom session message so the agent knows its recent writes may have been merged or overwritten:
 
 ```
-⚠️ Background napkin distill is editing files you've also touched: notes/foo.md.
-Recent writes to these files may be overwritten or merged automatically at distill
-completion; consider re-reading before further edits.
+⚠️ Background napkin distill has edited files you've also touched: notes/foo.md.
+Recent writes to these files may have been overwritten or merged; re-read before
+further edits.
 ```
 
 Key properties:
@@ -523,6 +523,8 @@ The gate also accepts `--variant <name>` (or `--all`) to exercise the full-level
 Exits 0 on PASS, 1 on FAIL. Manual-only — not in CI; cost is roughly $0.50 per LLM-driven variant.
 
 This replaces the earlier prompt-only gate. The strict superset matters because the wrapper↔JS-poller seam — where worktree-teardown and outcome-write race — is invisible to a prompt-only harness.
+
+For the full change-class checklist — including the session forge/replay procedure for LLM-facing text changes — see [`docs/verification.md`](docs/verification.md).
 
 ## Future: builder-deleter
 
