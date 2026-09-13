@@ -524,6 +524,8 @@ Exits 0 on PASS, 1 on FAIL. Manual-only — not in CI; cost is roughly $0.50 per
 
 This replaces the earlier prompt-only gate. The strict superset matters because the wrapper↔JS-poller seam — where worktree-teardown and outcome-write race — is invisible to a prompt-only harness.
 
+For the full change-class checklist — including the session forge/replay procedure for LLM-facing text changes — see [`docs/verification.md`](docs/verification.md).
+
 ## Future: builder-deleter
 
 Next major feature: a "builder-deleter" janitor that acts on the `supersedes:` frontmatter convention that auto-distill already writes. When a note lists `supersedes: ["old/note.md"]`, the janitor archives the superseded file. Threshold-triggered to avoid running on every distill, git gc as the safety net. Design pending.
