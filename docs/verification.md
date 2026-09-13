@@ -28,7 +28,7 @@ PR instead of "fixing" unrelated code.
 | --- | --- | --- |
 | Pure logic (parsers, gates, bookkeeping) | Targeted unit tests + full suite | Behavior is fully captured by tests |
 | LLM-facing text (prompts, notices, tool descriptions) | Unit pin + session forge/replay (below) | The contract is model behavior, not just bytes |
-| Distill lifecycle / wrapper | Unit tests + `pnpm run verify:e2e` (README Maintenance; real LLM, ~$0.50) | Only the real wrapper + subprocess + sidecar path proves it |
+| Distill lifecycle / wrapper | Unit tests + `pnpm run verify:e2e` (README Maintenance; real LLM, ~$0.50 per LLM-driven variant) | Only the real wrapper + subprocess + sidecar path proves it |
 | Extension / session lifecycle | tmux smoke run in a scratch vault | Load/unload, status paint, no stray worktrees/branches |
 
 ## Session forge / replay — for LLM-facing changes
@@ -70,9 +70,18 @@ waiting for it to recur in production.
 
 2. Forge a session JSONL in the temp directory: session header (with the
    fixture vault as `cwd`), `model_change`, a user message, an assistant
-   reply, then a `custom_message` entry whose `customType` matches the notice
-   and whose `content` is the wording under test. Entry schema: pi's
-   `session-format` docs.
+   reply, then the notice entry. For the overlap notice that entry is:
+
+   ```json
+   {"type":"custom_message","id":"e5f6a7b8","parentId":"d4e5f6a7",
+    "timestamp":"2026-09-13T12:01:00.000Z",
+    "customType":"napkin-distill-overlap",
+    "content":"\n\n⚠️ Background napkin distill has edited …","display":true}
+   ```
+
+   Entry schema: pi's `session-format` docs (Session File Format → Extended
+   Message Types → `CustomMessage`); `id`/`parentId` chain through the
+   preceding entries, and `display:true` surfaces the notice in the TUI.
 3. Run 3 times per wording — the old wording as the control, the new wording
    as the candidate (otherwise you cannot show the change caused the
    difference):
@@ -85,10 +94,14 @@ waiting for it to recur in production.
        --model <provider>/<model> --session <tmp>/run.jsonl "<probe>"
    ```
 
-4. Score the transcripts: in-progress/waiting markers ("still running",
-   "let the distill finish", "when it finishes", "check its status") = the
-   old confusion; completed/re-read markers ("has edited", "may have been
-   overwritten", "re-read before editing") = fixed.
+4. Score the transcripts by what the agent *does with the state*, not by
+   echoed words (the candidate wording itself contains "has edited"):
+   - confused (old): waits for or checks on an in-progress distill
+     ("still running", "let the distill finish", "when it finishes",
+     "check its status")
+   - fixed (new): treats the distill as already completed and bases the next
+     action on fresh content ("may have been overwritten", re-reads the file
+     before editing, no waiting)
 5. Paste abridged old-vs-new transcripts into the PR under Verification.
 
 ### Worked example — #104 (past-tense overlap notice)
