@@ -333,9 +333,9 @@ Successful distill lifecycles produce exactly one squash commit on `main`, with 
 When a background distill completes a squash-merge that touches files you've also written this session, pi-napkin posts a one-line notice into the conversation as a custom session message so the agent knows its recent writes may have been merged or overwritten:
 
 ```
-⚠️ Background napkin distill is editing files you've also touched: notes/foo.md.
-Recent writes to these files may be overwritten or merged automatically at distill
-completion; consider re-reading before further edits.
+⚠️ Background napkin distill has edited files you've also touched: notes/foo.md.
+Recent writes to these files may have been overwritten or merged; re-read before
+further edits.
 ```
 
 Key properties:
