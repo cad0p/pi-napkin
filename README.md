@@ -374,6 +374,8 @@ If your vault IS already a git repo (common for "vault as project"), pi-napkin j
 
 Every time pi starts a session in an auto-distill-enabled vault, pi-napkin runs a **health check** that confirms the vault is in a state the worktree-based distill can actually run against. The check is layered into two cadences so the cost of routine checks stays near-zero while the rare expensive checks only fire on the manual `/distill` path.
 
+The full check also verifies that the [`napkin` CLI](#install) is resolvable and runnable on PATH, because the worktree wrapper installs a per-distill shim that shells out to it. If the CLI is missing, session start injects a `<napkin-distill-setup>` notice into the agent context (alongside the vault-context block) with the exact install command, so an agent can repair the prerequisite on its next turn; every full-level health check (interval tick, shutdown, manual `/distill`) additionally smoke-tests the binary with `napkin --version` and, if it is missing or broken, surfaces a loud error and refuses to spawn the wrapper.
+
 ### The managed `.gitignore` block
 
 pi-napkin owns a single contiguous block in the vault's `.gitignore`, delimited by these exact marker lines:

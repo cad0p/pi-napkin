@@ -11,7 +11,6 @@ import {
   makeMockExtensionAPI,
   makeUICtx,
   retryRmSync,
-  TIMEOUT_BIN_DIR,
   withNapkinOnPath,
 } from "./_test-helpers";
 import { resolveCacheRoot, resolveDistillErrorDir } from "./distill-workspace";
@@ -561,9 +560,12 @@ describe("runAutoDistill vs runDistill routing (Item 7)", () => {
 // and short-circuits BEFORE `onComplete` (so the per-completion overlap
 // notice doesn't fire on a failed run).
 //
-// Trigger the wrapper failure naturally: don't augment PATH (no napkin),
-// don't stub pi. The wrapper hits the missing-napkin guard, writes a
-// `*.log`, exits 1, cleanup trap removes the worktree.
+// Trigger the wrapper failure with the NAPKIN_DISTILL_FORCE_CLEANUP hook
+// (exit 1 from the documented post-shim-install point, writing a fatal
+// error log and no outcome sidecar). The earlier revision relied on the
+// wrapper's missing-napkin guard firing; the napkin-cli-available
+// preflight now aborts the spawn before the wrapper starts, so a
+// stripped PATH can no longer exercise this JS-side surfacing path.
 // ---------------------------------------------------------------------------
 
 describe("runDistillWith failure surfacing (R8-SC-7)", () => {
@@ -575,23 +577,23 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
   let savedRecurse: string | undefined;
   let savedXdgCache: string | undefined;
   let savedPath: string | undefined;
+  let savedForceCleanup: string | undefined;
 
   beforeEach(() => {
     savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
     savedXdgCache = process.env.XDG_CACHE_HOME;
     savedPath = process.env.PATH;
+    savedForceCleanup = process.env.NAPKIN_DISTILL_FORCE_CLEANUP;
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "failsurface-xdg-"));
     process.env.XDG_CACHE_HOME = xdgCacheDir;
-    // Strip PATH to a system minimum so the wrapper's `command -v napkin`
-    // returns empty and the missing-napkin guard fires — producing a
-    // real fatal-error log we can verify the JS-side surfacing on.
-    // /usr/bin:/bin doesn't contain napkin (verified during test setup).
-    // Keep `TIMEOUT_BIN_DIR` so the wrapper's coreutils-timeout(1)
-    // startup check passes on macOS (where `gtimeout` lives outside
-    // /usr/bin); without it the wrapper exits 2 before reaching the
-    // missing-napkin guard this test pins (CI-A-1 startup check).
-    process.env.PATH = `${TIMEOUT_BIN_DIR}:/usr/bin:/bin`;
+    // Ensure `napkin` resolves so the full-level health check passes and
+    // the wrapper actually runs (node must resolve too — the CLI smoke
+    // test shells out to it). The wrapper failure is injected below via
+    // NAPKIN_DISTILL_FORCE_CLEANUP; `savedPath` restoration in afterEach
+    // undoes the prepend.
+    withNapkinOnPath();
+    process.env.NAPKIN_DISTILL_FORCE_CLEANUP = "1";
     vault = createEnabledGitVault(60);
     sm = createSeededSession(vault);
 
@@ -616,6 +618,9 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     if (savedPath === undefined) delete process.env.PATH;
     else process.env.PATH = savedPath;
+    if (savedForceCleanup === undefined)
+      delete process.env.NAPKIN_DISTILL_FORCE_CLEANUP;
+    else process.env.NAPKIN_DISTILL_FORCE_CLEANUP = savedForceCleanup;
     globalThis.setInterval = originalSetInterval;
     const worktreesDir = resolveCacheRoot(vault);
     if (fs.existsSync(worktreesDir)) {
@@ -660,17 +665,16 @@ describe("runDistillWith failure surfacing (R8-SC-7)", () => {
     await captured.handlers.session_start({ reason: "new" }, ctx);
     expect(capturedInterval).not.toBeNull();
 
-    // Fire interval → spawn detached wrapper. With napkin NOT on PATH
-    // (we deliberately skipped withNapkinOnPath), the wrapper hits the
-    // missing-napkin guard, writes its `*.log`, exits 1, cleanup trap
-    // removes the worktree.
+    // Fire interval → spawn detached wrapper. The FORCE_CLEANUP hook set
+    // in beforeEach makes the wrapper write its fatal-error log and exit
+    // 1 without an outcome sidecar; the cleanup trap removes the worktree.
     capturedInterval?.();
 
     // Wait for the worktree directory to disappear AND for the JS-side
     // poller to have run at least once (poll interval is 2000ms in
     // production; in this test we'd have to advance fake timers, but
     // here we let real time elapse since the wrapper completes
-    // quickly with the missing-napkin guard).
+    // quickly after the FORCE_CLEANUP hook fires).
     const worktreesDir = resolveCacheRoot(vault);
     const start = Date.now();
     // Cap the polling loop just under the vitest per-test deadline

@@ -11,7 +11,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { sendCustomMessageWithFallback } from "../shared/custom-message";
+import { sendCustomMessageOnce } from "../shared/custom-message";
 
 function loadShowStatus(vaultPath: string): boolean {
   const configPath = path.join(vaultPath, "config.json");
@@ -170,16 +170,6 @@ function getNapkin(cwd: string): Napkin {
   return new Napkin(cwd);
 }
 
-function hasInjectedContext(sm: Pick<SessionManager, "getEntries">): boolean {
-  return sm
-    .getEntries()
-    .some(
-      (e) =>
-        e.type === "custom_message" &&
-        (e as { customType?: string }).customType === "napkin-context",
-    );
-}
-
 function getOverview(n: Napkin): { text: string; root: string } | null {
   try {
     // napkin >= 0.12.3 ships the fork's defaults (collapseDepth 2, maxRows
@@ -291,24 +281,22 @@ export default function (pi: ExtensionAPI) {
       // that never calls them never learns a vault is expected or how to
       // create/configure one.
       if (e instanceof Error && e.name === "VaultNotFoundError") {
-        if (!hasInjectedContext(ctx.sessionManager)) {
-          sendCustomMessageWithFallback({
-            poster: pi,
-            sm: ctx.sessionManager as Partial<SessionManager>,
-            customType: "napkin-context",
-            content: e.message,
-            onFallbackFailure: (err) => {
-              if (ctx.hasUI) {
-                ctx.ui.notify(
-                  `napkin-context: could not surface no-vault guidance (${
-                    err instanceof Error ? err.message : String(err)
-                  })`,
-                  "warning",
-                );
-              }
-            },
-          });
-        }
+        sendCustomMessageOnce({
+          poster: pi,
+          sm: ctx.sessionManager as Partial<SessionManager>,
+          customType: "napkin-context",
+          content: e.message,
+          onFallbackFailure: (err) => {
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                `napkin-context: could not surface no-vault guidance (${
+                  err instanceof Error ? err.message : String(err)
+                })`,
+                "warning",
+              );
+            }
+          },
+        });
         if (ctx.hasUI) {
           // Unconditional on purpose — unlike the success path it cannot
           // consult loadShowStatus(): no vault exists, so there is no vault
@@ -329,38 +317,37 @@ export default function (pi: ExtensionAPI) {
     vaultRoot = overview?.root ?? null;
 
     if (overview) {
-      // Check if we already injected context in this session
-      const alreadyInjected = hasInjectedContext(ctx.sessionManager);
-
-      if (!alreadyInjected) {
-        // Send via the public message event path (message_start) so the TUI
-        // renders the custom message live. A direct sessionManager append is
-        // only picked up by the next full chat rebuild — on /new the chat is
-        // rebuilt BEFORE session_start handlers run, so a direct append would
-        // leave the vault overview invisible in the new session's chat (the
-        // stale line survives as terminal pixels until the next repaint).
-        // pi.sendMessage is fire-and-forget (void). In the idle path it
-        // appends the entry to the session manager synchronously AND pushes
-        // the message into agent state — the overview participates in LLM
-        // context by design, even where the TUI event is not subscribed yet
-        // (startup path).
-        sendCustomMessageWithFallback({
-          poster: pi,
-          sm: ctx.sessionManager as Partial<SessionManager>,
-          customType: "napkin-context",
-          content: overview.text,
-          onFallbackFailure: (err) => {
-            if (ctx.hasUI) {
-              ctx.ui.notify(
-                `napkin-context: could not inject vault overview (${
-                  err instanceof Error ? err.message : String(err)
-                })`,
-                "warning",
-              );
-            }
-          },
-        });
-      }
+      // Send via the public message event path (message_start) so the TUI
+      // renders the custom message live. A direct sessionManager append is
+      // only picked up by the next full chat rebuild — on /new the chat is
+      // rebuilt BEFORE session_start handlers run, so a direct append would
+      // leave the vault overview invisible in the new session's chat (the
+      // stale line survives as terminal pixels until the next repaint).
+      // pi.sendMessage is fire-and-forget (void). In the idle path it
+      // appends the entry to the session manager synchronously AND pushes
+      // the message into agent state — the overview participates in LLM
+      // context by design, even where the TUI event is not subscribed yet
+      // (startup path).
+      //
+      // `sendCustomMessageOnce` dedupes by customType: a resumed session
+      // already replays the prior overview in its history, so re-injecting
+      // would only duplicate it.
+      sendCustomMessageOnce({
+        poster: pi,
+        sm: ctx.sessionManager as Partial<SessionManager>,
+        customType: "napkin-context",
+        content: overview.text,
+        onFallbackFailure: (err) => {
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              `napkin-context: could not inject vault overview (${
+                err instanceof Error ? err.message : String(err)
+              })`,
+              "warning",
+            );
+          }
+        },
+      });
     }
 
     if (ctx.hasUI && loadShowStatus(n.vault.configPath)) {

@@ -87,6 +87,7 @@ import {
   cleanupDistillWorktrees,
   makeFakeUI,
   makeUICtx,
+  withNapkinOnPath,
 } from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
@@ -234,6 +235,13 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
   };
 
   /**
+   * PATH augmentation restoring `napkin` for the full-level health check.
+   * CI runs `./node_modules/.bin/vitest` directly (no pnpm PATH
+   * augmentation), so the suite must add node_modules/.bin itself.
+   */
+  let _napkinPath: { restore: () => void } | null = null;
+
+  /**
    * Every `setInterval(cb, ms)` call made during extension registration +
    * session_start + runAutoDistill lands here. The auto-distill tick has
    * `ms === intervalMinutes*60_000`, the pollHandle has `ms === 2000`.
@@ -252,9 +260,12 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     // distill. HALT_AFTER_META makes the wrapper halt right after the
     // meta.json pid rewrite (clears the EXIT trap, exits 0), keeping the
     // worktree on disk and skipping the napkin shim install — so the tests
-    // never race the wrapper and need no napkin on PATH. Harmless for the
-    // no-spawn tests (1, 5, 6); keeping it set everywhere is simpler.
+    // never race the wrapper. The full-level health check still probes
+    // `napkin` BEFORE the spawn, so PATH must resolve it regardless.
+    // Harmless for the no-spawn tests (1, 5, 6); keeping it set everywhere
+    // is simpler.
     process.env.NAPKIN_DISTILL_HALT_AFTER_META = "1";
+    _napkinPath = withNapkinOnPath();
 
     capturedIntervals = [];
     originalSetInterval = globalThis.setInterval;
@@ -288,6 +299,8 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
       else process.env[key] = val;
     }
     globalThis.setInterval = originalSetInterval;
+    _napkinPath?.restore();
+    _napkinPath = null;
     if (vault) {
       cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });

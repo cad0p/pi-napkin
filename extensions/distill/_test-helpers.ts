@@ -235,6 +235,52 @@ export function withNapkinOnPath(): { restore: () => void } {
   };
 }
 
+/**
+ * Hide the `napkin` binary from PATH so tests can exercise the
+ * missing-CLI paths (session-start LLM notice, full-level
+ * `napkin-cli-available` loud error) without uninstalling anything.
+ *
+ * Drops no PATH entries: a directory containing a `napkin` entry is
+ * replaced by a temp shadow directory with symlinks to every other
+ * entry in it. This keeps co-located binaries resolvable (e.g. `git`
+ * in a Homebrew prefix that also carries a user-installed `napkin`).
+ * Other binaries (notably `git`) keep resolving from the remaining
+ * entries. Returns a restore handle; call in a `try/finally`.
+ */
+export function withoutNapkinOnPath(): { restore: () => void } {
+  const saved = process.env.PATH;
+  const shadowRoot = fs.mkdtempSync(path.join(os.tmpdir(), "no-napkin-path-"));
+  const rebuilt = (process.env.PATH ?? "").split(path.delimiter).map((dir) => {
+    if (dir.length === 0) return dir;
+    if (!fs.existsSync(path.join(dir, "napkin"))) return dir;
+    let names: string[];
+    try {
+      names = fs.readdirSync(dir);
+    } catch {
+      return dir;
+    }
+    const shadow = fs.mkdtempSync(path.join(shadowRoot, "entry-"));
+    for (const name of names) {
+      if (name === "napkin") continue;
+      try {
+        fs.symlinkSync(path.join(dir, name), path.join(shadow, name));
+      } catch {
+        // Best-effort: an unlinkable entry just stays absent from the
+        // shadow; the tests only assert that `napkin` is hidden.
+      }
+    }
+    return shadow;
+  });
+  process.env.PATH = rebuilt.join(path.delimiter);
+  return {
+    restore() {
+      if (saved === undefined) delete process.env.PATH;
+      else process.env.PATH = saved;
+      fs.rmSync(shadowRoot, { recursive: true, force: true });
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Wrapper-spawning test scaffolding (CLEAN-A-6)
 //
@@ -572,6 +618,16 @@ export interface CapturedExtensionAPI {
     // biome-ignore lint/suspicious/noExplicitAny: opaque command handlers
     { handler: (args: string, ctx: any) => Promise<void> | void }
   >;
+  /**
+   * Custom messages delivered through `pi.sendMessage` — used by tests
+   * that assert on context injections (setup notice, vault overview,
+   * overlap notices).
+   */
+  messages: Array<{
+    customType?: string;
+    content?: unknown;
+    display?: boolean;
+  }>;
 }
 
 /**
@@ -584,7 +640,11 @@ export function makeMockExtensionAPI(): {
   api: unknown;
   captured: CapturedExtensionAPI;
 } {
-  const captured: CapturedExtensionAPI = { handlers: {}, commands: {} };
+  const captured: CapturedExtensionAPI = {
+    handlers: {},
+    commands: {},
+    messages: [],
+  };
   const api = {
     // biome-ignore lint/suspicious/noExplicitAny: match ExtensionAPI shape loosely
     on(event: string, handler: any) {
@@ -601,7 +661,13 @@ export function makeMockExtensionAPI(): {
       return undefined;
     },
     registerMessageRenderer() {},
-    sendMessage() {},
+    sendMessage(message: {
+      customType?: string;
+      content?: unknown;
+      display?: boolean;
+    }) {
+      captured.messages.push(message);
+    },
     sendUserMessage() {},
     appendEntry() {},
     setSessionName() {},

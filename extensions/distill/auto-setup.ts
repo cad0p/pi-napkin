@@ -283,6 +283,13 @@ export interface SetupOptions {
    * race the real `Date.now()`.
    */
   now?: () => number;
+  /**
+   * Probe whether the `napkin` CLI is resolvable and runnable on PATH.
+   * Defaults to {@link probeNapkinCli}. Tests inject a stub to pin the
+   * `napkin-cli-available` loud-error path without depending on the
+   * ambient PATH (which contains a real `napkin` under `pnpm`).
+   */
+  probeNapkin?: (options: { smokeTest: boolean }) => NapkinCliProbeResult;
 }
 
 /**
@@ -381,6 +388,15 @@ const INVARIANT_NAPKIN_DISTILL_NOT_TRACKED = "napkin-distill-not-tracked";
  * false-error — the probe lands on `~/.cache` instead).
  */
 const INVARIANT_CACHE_ROOT_WRITABLE = "cache-root-writable";
+
+/**
+ * Stable invariant ID for the `napkin` CLI availability check. The
+ * worktree wrapper installs a per-distill napkin shim and smoke-tests
+ * `napkin --version` before the agent runs; a missing or unrunnable
+ * CLI fails every distill before any content is produced. Loud-error:
+ * the user must install the CLI (no safe auto-recovery here).
+ */
+const INVARIANT_NAPKIN_CLI_AVAILABLE = "napkin-cli-available";
 
 /**
  * Stable invariant ID for the vault HEAD pointing at a real commit.
@@ -671,6 +687,116 @@ export function probeWritable(dir: string): WritableProbeResult {
 }
 
 /**
+ * Result of {@link probeNapkinCli}.
+ *
+ * `ok: true` is the healthy path; `ok: false` carries a short
+ * human-readable `error` suitable for embedding in a loud-error
+ * finding. `path` is the resolved binary path whenever PATH resolution
+ * succeeded, even if the smoke test then failed — so diagnostics can
+ * tell "not installed" apart from "installed but broken".
+ */
+export interface NapkinCliProbeResult {
+  ok: boolean;
+  path?: string;
+  version?: string;
+  error?: string;
+}
+
+/**
+ * Timeout for the `napkin --version` smoke test. The CLI is a Node
+ * program; a healthy cold start is well under a second. A longer
+ * budget would stall the full-level health check (and therefore the
+ * distill spawn) on a hung binary without trading for real
+ * reliability. The timeout escalates straight to SIGKILL because
+ * `spawnSync` only sends `killSignal` once and waits — the default
+ * SIGTERM is trappable, which would let a hung binary block pi's main
+ * thread indefinitely.
+ */
+const NAPKIN_CLI_PROBE_TIMEOUT_MS = 5_000;
+
+/**
+ * Resolve `name` against the PATH in `env` without spawning a child
+ * process. Returns the first candidate that is an executable regular
+ * file, or `null`.
+ *
+ * `fs.accessSync(X_OK)` also succeeds for directories, so the
+ * `isFile()` guard is load-bearing: a `node_modules/.bin`-style
+ * directory named `napkin` must not shadow a real binary later in
+ * PATH. Symlinks are followed (`statSync` semantics) — the same
+ * behavior a POSIX shell's path search has. Empty PATH entries (which
+ * a POSIX shell treats as the current directory) are skipped: a
+ * vault-controlled `./napkin` is not a supported install layout.
+ */
+export function resolveExecutableOnPath(
+  name: string,
+  env: NodeJS.ProcessEnv = process.env,
+): string | null {
+  const pathValue = env.PATH ?? "";
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (dir.length === 0) continue;
+    const candidate = path.join(dir, name);
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(candidate);
+    } catch {
+      continue;
+    }
+    if (!stat.isFile()) continue;
+    try {
+      fs.accessSync(candidate, fs.constants.X_OK);
+    } catch {
+      continue;
+    }
+    return candidate;
+  }
+  return null;
+}
+
+/**
+ * Probe that the `napkin` CLI is available to the distill wrapper.
+ *
+ * `smokeTest: false` only resolves the binary on PATH (sub-millisecond;
+ * used by the session-start LLM notice). The default `smokeTest: true`
+ * additionally spawns `napkin --version`, mirroring the wrapper's own
+ * smoke test so the full-level health check agrees with what the
+ * wrapper will do.
+ *
+ * Never throws: spawn failures are translated into `ok: false` +
+ * `error` so callers can surface a structured finding.
+ */
+export function probeNapkinCli(
+  options: { smokeTest?: boolean; env?: NodeJS.ProcessEnv } = {},
+): NapkinCliProbeResult {
+  const env = options.env ?? process.env;
+  const resolved = resolveExecutableOnPath("napkin", env);
+  if (!resolved) {
+    return { ok: false, error: "not found on PATH" };
+  }
+  if (options.smokeTest === false) {
+    return { ok: true, path: resolved };
+  }
+  const r = spawnSync("napkin", ["--version"], {
+    encoding: "utf-8",
+    timeout: NAPKIN_CLI_PROBE_TIMEOUT_MS,
+    killSignal: "SIGKILL",
+    env,
+  });
+  if (r.error) {
+    return { ok: false, path: resolved, error: r.error.message };
+  }
+  if (r.status !== 0) {
+    const detail = (r.stderr || "").trim();
+    return {
+      ok: false,
+      path: resolved,
+      error:
+        detail.length > 0 ? detail : `\`napkin --version\` exited ${r.status}`,
+    };
+  }
+  return { ok: true, path: resolved, version: (r.stdout || "").trim() };
+}
+
+/**
  * Internal result of {@link mergeManagedBlock}.
  *
  * - `changed`: whether the file was created or modified. Callers append
@@ -921,12 +1047,19 @@ function mergeManagedBlock(
  *      read-only cache root would fail the worktree spawn at
  *      `mkdir -p`; surfacing here gives the user a fixable error
  *      before any git work commits to a worktree.
- *   7. fast + full: if anything in steps 1–3 changed:
+ *   7. full only: probe that the `napkin` CLI is resolvable AND
+ *      runnable on PATH via {@link probeNapkinCli}
+ *      (`napkin-cli-available`, loud-error). The worktree wrapper
+ *      installs a per-distill napkin shim and smoke-tests
+ *      `napkin --version` before the agent runs; failing here gives
+ *      the user one actionable install command instead of a stream
+ *      of failed distill logs.
+ *   8. fast + full: if anything in steps 1–3 changed:
  *      - fresh init -> `git add .` + commit `"napkin: initial vault
  *        commit (auto-distill setup)"`
  *      - existing repo with scaffolded changes -> `git add ...scaffolded`
  *        + commit `"napkin: scaffold auto-distill git config"`
- *   8. full only: ensure HEAD resolves to a commit; seed an empty
+ *   9. full only: ensure HEAD resolves to a commit; seed an empty
  *      initial commit when an existing-but-empty repo would leave
  *      `git worktree add HEAD` unable to pin a ref
  *      (`vault-head-on-branch`, auto-recovered). Fast-level skips
@@ -934,12 +1067,12 @@ function mergeManagedBlock(
  *      seed an unsolicited commit; the next full-level call (tick,
  *      shutdown, or manual `/distill`) seeds lazily when a worktree
  *      spawn is imminent.
- *   9. full only: prune orphaned distill worktree registry entries
+ *  10. full only: prune orphaned distill worktree registry entries
  *      via `git worktree prune --expire=now`
  *      (`no-orphaned-distill-worktrees`, auto-recovered). Cleans up
  *      registry entries whose worktree directories were removed
  *      (typically a crashed pi session) so they don't accumulate.
- *  10. full only: delete `distill/*` branches whose committerdate is
+ *  11. full only: delete `distill/*` branches whose committerdate is
  *      older than {@link STALE_DISTILL_BRANCH_GRACE_MS} AND have no
  *      live worktree (`no-stale-distill-branches-over-grace`,
  *      auto-recovered). The grace gives the user a `git reflog`
@@ -1138,6 +1271,24 @@ export function ensureVaultReadyForDistill(
         kind: "error",
         invariant: INVARIANT_CACHE_ROOT_WRITABLE,
         message: `Cache root parent ${probeDir} is not writable: ${probeResult.error ?? "unknown error"}. Set XDG_CACHE_HOME to a writable directory or fix the permissions.`,
+      });
+    }
+
+    // The worktree wrapper installs a per-distill `napkin` shim and
+    // smoke-tests the binary with `napkin --version` before the agent
+    // runs; a missing or unrunnable CLI fails every distill before any
+    // content is produced. Surface it as a hard error here so the user
+    // gets one actionable install command instead of a stream of
+    // failed distill logs. The session-start path additionally injects
+    // the same failure into LLM context via `setup-notice.ts` so an
+    // agent can self-heal on its next turn.
+    const probeNapkin = options.probeNapkin ?? probeNapkinCli;
+    const napkinProbe = probeNapkin({ smokeTest: true });
+    if (!napkinProbe.ok) {
+      findings.push({
+        kind: "error",
+        invariant: INVARIANT_NAPKIN_CLI_AVAILABLE,
+        message: `The \`napkin\` CLI is required for auto-distill but is not runnable: ${napkinProbe.error ?? "unknown error"}. Install it with \`npm install -g @cad0p/napkin\` (or \`pnpm add -g @cad0p/napkin\`), then re-run the distill.`,
       });
     }
   }

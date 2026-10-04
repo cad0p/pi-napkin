@@ -77,3 +77,48 @@ export function sendCustomMessageWithFallback(
     }
   }
 }
+
+/**
+ * Whether the session history already contains a custom message of
+ * `customType`. Session-start injections replay on resumed sessions (the
+ * prior message is already in LLM context), so callers use this to dedupe
+ * rather than injecting a duplicate copy of the same guidance.
+ *
+ * Unreadable histories (`getEntries` absent or throwing) report `false`:
+ * the caller proceeds with the send and at worst produces one duplicate.
+ */
+export function hasCustomMessage(
+  sm: Partial<SessionManager> | undefined,
+  customType: string,
+): boolean {
+  if (!sm || typeof sm.getEntries !== "function") return false;
+  try {
+    return sm
+      .getEntries()
+      .some(
+        (e) =>
+          e.type === "custom_message" &&
+          (e as { customType?: string }).customType === customType,
+      );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * {@link sendCustomMessageWithFallback}, deduped against session history:
+ * sends only when no custom message of `customType` is present yet, so a
+ * resumed session does not accumulate duplicate session-start guidance.
+ *
+ * Returns whether delivery was attempted (`false` = already present).
+ * Best-effort like the underlying helper: a failed primary path falls
+ * back to a direct append, and a double failure is reported through
+ * `onFallbackFailure` without throwing.
+ */
+export function sendCustomMessageOnce(
+  options: SendCustomMessageWithFallbackOptions,
+): boolean {
+  if (hasCustomMessage(options.sm, options.customType)) return false;
+  sendCustomMessageWithFallback(options);
+  return true;
+}
