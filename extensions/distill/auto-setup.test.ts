@@ -18,7 +18,9 @@ import {
   parseLiveWorktreeBranches,
   parseManagedBlockRange,
   parsePorcelainWorktreeBranches,
+  probeNapkinCli,
   probeWritable,
+  resolveExecutableOnPath,
   type SetupOptions,
   STALE_DISTILL_BRANCH_GRACE_MS,
   walkToFirstExistingAncestor,
@@ -88,13 +90,22 @@ describe("ensureVaultReadyForDistill", () => {
     try {
       // Subdir layout: configPath is a distinct path from contentPath.
       // The path doesn't need to exist on disk for the happy-path tests.
+      //
+      // Default-inject a passing napkin CLI probe: unit tests must not
+      // depend on whether the ambient PATH happens to contain the real
+      // binary (it does under `pnpm test`, but not under a bare `vitest`
+      // invocation). Tests exercising the failing probe pass their own
+      // `probeNapkin` override, which wins below.
       return ensureVaultReadyForDistill(
         {
           contentPath: vault,
           configPath: path.join(vault, NAPKIN_MARKER),
         },
         level,
-        options,
+        {
+          probeNapkin: () => ({ ok: true, version: "test" }),
+          ...options,
+        },
       );
     } finally {
       if (saved.name === undefined) delete process.env.GIT_AUTHOR_NAME;
@@ -1301,6 +1312,70 @@ describe("ensureVaultReadyForDistill", () => {
     }
   });
 
+  // --- napkin-cli-available (full-level only) -----------------------------
+  //
+  // The worktree wrapper installs a per-distill `napkin` shim and
+  // smoke-tests `napkin --version` before the agent runs, so a missing
+  // or unrunnable CLI fails every distill before any content is
+  // produced. The full-level check surfaces that as a loud error
+  // carrying the exact install command; the session-start LLM notice
+  // uses the cheap resolution-only probe separately (setup-notice.ts).
+
+  test("injected failing probeNapkin at full level: error finding with install commands", () => {
+    setupExistingRepoWithBlock();
+    const r = runSetup("full", {
+      probeNapkin: (_options) => ({
+        ok: false,
+        error: "spawnSync napkin ENOENT",
+      }),
+    });
+    const finding = r.findings.find(
+      (f) => f.invariant === "napkin-cli-available",
+    );
+    expect(finding).toBeDefined();
+    expect(finding?.kind).toBe("error");
+    expect(finding?.message).toContain("spawnSync napkin ENOENT");
+    expect(finding?.message).toContain("npm install -g @cad0p/napkin");
+    expect(finding?.message).toContain("pnpm add -g @cad0p/napkin");
+  });
+
+  test("passing probeNapkin at full level: no napkin-cli-available finding", () => {
+    setupExistingRepoWithBlock();
+    const r = runSetup("full", {
+      probeNapkin: (_options) => ({ ok: true, version: "0.14.0" }),
+    });
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("napkin-cli-available");
+    }
+  });
+
+  test("full-level invokes probeNapkin with smokeTest=true", () => {
+    setupExistingRepoWithBlock();
+    let observed: { smokeTest: boolean } | undefined;
+    runSetup("full", {
+      probeNapkin: (options) => {
+        observed = options;
+        return { ok: true, version: "0.14.0" };
+      },
+    });
+    expect(observed).toEqual({ smokeTest: true });
+  });
+
+  test("fast-level does NOT run the napkin-cli-available check", () => {
+    setupExistingRepoWithBlock();
+    let calls = 0;
+    const r = runSetup("fast", {
+      probeNapkin: (_options) => {
+        calls += 1;
+        return { ok: false, error: "must not be called at fast level" };
+      },
+    });
+    expect(calls).toBe(0);
+    for (const f of r.findings) {
+      expect(f.invariant).not.toBe("napkin-cli-available");
+    }
+  });
+
   // --- no-orphaned-distill-worktrees + no-stale-distill-branches-over-grace
   //
   // The worktree-and-branch lifecycle accumulates two kinds of debris
@@ -1708,6 +1783,104 @@ describe("probeWritable", () => {
     expect(r.writable).toBe(false);
     expect(r.error).toBeDefined();
     expect(r.error?.length).toBeGreaterThan(0);
+  });
+});
+
+describe("resolveExecutableOnPath", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "path-probe-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("finds an executable file in a PATH entry", () => {
+    const bin = path.join(dir, "mybin");
+    fs.writeFileSync(bin, "#!/bin/sh\nexit 0\n");
+    fs.chmodSync(bin, 0o755);
+    expect(resolveExecutableOnPath("mybin", { PATH: dir })).toBe(bin);
+  });
+
+  test("skips directories that would pass X_OK", () => {
+    fs.mkdirSync(path.join(dir, "mybin"));
+    expect(resolveExecutableOnPath("mybin", { PATH: dir })).toBeNull();
+  });
+
+  test("skips non-executable files", () => {
+    const bin = path.join(dir, "mybin");
+    fs.writeFileSync(bin, "not executable\n");
+    fs.chmodSync(bin, 0o644);
+    expect(resolveExecutableOnPath("mybin", { PATH: dir })).toBeNull();
+  });
+
+  test("returns null when PATH has no match", () => {
+    expect(resolveExecutableOnPath("mybin", { PATH: dir })).toBeNull();
+  });
+
+  test("tolerates empty PATH segments and a missing PATH", () => {
+    expect(
+      resolveExecutableOnPath("mybin", { PATH: `${path.delimiter}${dir}` }),
+    ).toBeNull();
+    expect(resolveExecutableOnPath("mybin", {})).toBeNull();
+  });
+});
+
+describe("probeNapkinCli", () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-probe-"));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  /** Write a runnable `napkin` fixture whose body is `script`. */
+  function writeFixture(script: string): void {
+    const bin = path.join(dir, "napkin");
+    fs.writeFileSync(bin, `#!/bin/sh\n${script}\n`);
+    fs.chmodSync(bin, 0o755);
+  }
+
+  test("missing binary: ok=false, not found on PATH", () => {
+    const r = probeNapkinCli({ env: { PATH: dir } });
+    expect(r.ok).toBe(false);
+    expect(r.error).toContain("not found on PATH");
+    expect(r.path).toBeUndefined();
+  });
+
+  test("smokeTest=false resolves without executing the binary", () => {
+    // `: > file` is a shell builtin redirection — the marker appears only
+    // if the fixture body actually ran (external commands like `touch`
+    // would fail under the fixture-only PATH).
+    const marker = path.join(dir, "executed");
+    writeFixture(`: > "${marker}"`);
+    const r = probeNapkinCli({ smokeTest: false, env: { PATH: dir } });
+    expect(r.ok).toBe(true);
+    expect(r.path).toBe(path.join(dir, "napkin"));
+    expect(fs.existsSync(marker)).toBe(false);
+  });
+
+  test("smokeTest=true returns the version output for a runnable binary", () => {
+    writeFixture('echo "napkin 9.9.9-test"');
+    const r = probeNapkinCli({ smokeTest: true, env: { PATH: dir } });
+    expect(r.ok).toBe(true);
+    expect(r.version).toBe("napkin 9.9.9-test");
+  });
+
+  test("smokeTest=true surfaces stderr for a non-zero exit", () => {
+    writeFixture('echo "boom: not runnable" >&2; exit 3');
+    const r = probeNapkinCli({ smokeTest: true, env: { PATH: dir } });
+    expect(r.ok).toBe(false);
+    expect(r.path).toBe(path.join(dir, "napkin"));
+    expect(r.error).toContain("boom: not runnable");
+  });
+
+  test("defaults to the smoke test", () => {
+    writeFixture('echo "napkin default-test"');
+    const r = probeNapkinCli({ env: { PATH: dir } });
+    expect(r.ok).toBe(true);
+    expect(r.version).toBe("napkin default-test");
   });
 });
 

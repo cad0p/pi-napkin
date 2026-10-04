@@ -11,6 +11,7 @@ import {
   makeFakeUI,
   makeMockExtensionAPI,
   withNapkinOnPath,
+  withoutNapkinOnPath,
 } from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
@@ -552,6 +553,73 @@ describe("per-spawn health-check wiring", () => {
       expect(notifyCalls.filter((n) => n.severity === "error")).toEqual([]);
       expect(notifyCalls.filter((n) => n.severity === "info")).toEqual([]);
       expect(worktreeCount(vault)).toBe(1);
+    } finally {
+      cleanupDistillWorktrees(vault);
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  test("session_start without napkin on PATH: injects the LLM-visible setup notice", async () => {
+    const vault = createSubdirVault();
+    try {
+      const sm = createSession(vault);
+      const { ui } = makeFakeUI();
+      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+
+      const { api, captured } = makeMockExtensionAPI();
+      distillExtension(api as never);
+
+      const restorePath = withoutNapkinOnPath();
+      try {
+        // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+        await captured.handlers.session_start({ reason: "new" }, ctx as any);
+      } finally {
+        restorePath.restore();
+      }
+
+      const notices = captured.messages.filter(
+        (m) => m.customType === "napkin-distill-setup",
+      );
+      expect(notices).toHaveLength(1);
+      expect(String(notices[0].content)).toContain("not found on PATH");
+      expect(String(notices[0].content)).toContain(
+        "npm install -g @cad0p/napkin",
+      );
+    } finally {
+      cleanupDistillWorktrees(vault);
+      fs.rmSync(vault, { recursive: true, force: true });
+    }
+  });
+
+  test("runAutoDistill without napkin on PATH: loud error notify, no worktree", async () => {
+    const vault = createSubdirVault();
+    try {
+      const sm = createSession(vault);
+      const { ui, notifyCalls } = makeFakeUI();
+      const ctx = { cwd: vault, sessionManager: sm, hasUI: true, ui };
+
+      const { api, captured } = makeMockExtensionAPI();
+      distillExtension(api as never);
+      // biome-ignore lint/suspicious/noExplicitAny: mock ctx
+      await captured.handlers.session_start({ reason: "new" }, ctx as any);
+      expect(capturedInterval).not.toBeNull();
+      notifyCalls.length = 0;
+
+      const restorePath = withoutNapkinOnPath();
+      try {
+        capturedInterval?.();
+      } finally {
+        restorePath.restore();
+      }
+
+      const errors = notifyCalls.filter((n) => n.severity === "error");
+      expect(errors).toHaveLength(1);
+      expect(errors[0].msg.startsWith("Auto-distill cannot proceed: ")).toBe(
+        true,
+      );
+      expect(errors[0].msg).toContain("napkin");
+      expect(errors[0].msg).toContain("npm install -g @cad0p/napkin");
+      expect(worktreeCount(vault)).toBe(0);
     } finally {
       cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });

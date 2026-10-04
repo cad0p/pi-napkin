@@ -13,7 +13,11 @@ import type {
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import type { AutocompleteItem } from "@earendil-works/pi-tui";
 import { sendCustomMessageWithFallback } from "../shared/custom-message";
-import { countTrackedFiles, ensureVaultReadyForDistill } from "./auto-setup";
+import {
+  countTrackedFiles,
+  ensureVaultReadyForDistill,
+  probeNapkinCli,
+} from "./auto-setup";
 import {
   type ActiveDistill,
   cleanupDistillWorkspace,
@@ -30,6 +34,7 @@ import {
 } from "./distill-workspace";
 import { surfaceHealthFindings, surfaceSetupError } from "./health-notify";
 import { getSessionTouchedFiles } from "./session-touched-files";
+import { maybeInjectNapkinSetupNotice } from "./setup-notice";
 import { shouldDistillOnShutdown } from "./should-distill-on-shutdown";
 
 /**
@@ -702,6 +707,30 @@ export default function (pi: ExtensionAPI) {
       // throw). Log + continue, worst case later operations fail gracefully.
       console.error("[napkin-distill] auto-setup threw:", err);
     }
+
+    // LLM-visible prerequisite notice: `surfaceHealthFindings` above is
+    // TUI-only. When the `napkin` CLI is missing, also inject a custom
+    // message into session context so the agent can repair it on its next
+    // turn (the full-level gate blocks the wrapper spawn until then).
+    // The resolution-only probe keeps session_start latency low, and the
+    // notice is deliberately NOT folded into `setupFailed` — auto-distill
+    // stays armed, so installing the CLI mid-session repairs the next
+    // tick without a pi restart.
+    maybeInjectNapkinSetupNotice({
+      poster: pi,
+      sm: ctx.sessionManager as Partial<SessionManager>,
+      probe: probeNapkinCli({ smokeTest: false }),
+      onFallbackFailure: (err) => {
+        if (ctx.hasUI) {
+          ctx.ui.notify(
+            `napkin-distill: could not inject the missing-napkin setup notice (${
+              err instanceof Error ? err.message : String(err)
+            })`,
+            "warning",
+          );
+        }
+      },
+    });
 
     // Sweep out stale distill worktrees left behind by crashed pi sessions.
     // Idempotent, best-effort — never throws, never blocks session_start.
