@@ -666,10 +666,19 @@ describe("session_start handler — legacy-embedded vault is refused (silent ski
   const _savedRecurse = process.env.NAPKIN_DISTILL_NO_RECURSE;
   const _savedXdgCache = process.env.XDG_CACHE_HOME;
 
+  /**
+   * PATH augmentation restoring `napkin` for the full-level health check
+   * (the subdir regression test spawns on shutdown). CI runs
+   * `./node_modules/.bin/vitest` directly, so the suite must add
+   * node_modules/.bin itself.
+   */
+  let _napkinPath: { restore: () => void } | null = null;
+
   beforeEach(() => {
     delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "legacy-xdg-"));
     process.env.XDG_CACHE_HOME = xdgCacheDir;
+    _napkinPath = withNapkinOnPath();
     originalSetInterval = globalThis.setInterval;
     globalThis.setInterval = ((
       _cb: () => void,
@@ -687,6 +696,8 @@ describe("session_start handler — legacy-embedded vault is refused (silent ski
       process.env.NAPKIN_DISTILL_NO_RECURSE = _savedRecurse;
     else delete process.env.NAPKIN_DISTILL_NO_RECURSE;
     globalThis.setInterval = originalSetInterval;
+    _napkinPath?.restore();
+    _napkinPath = null;
     if (vault) {
       cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });

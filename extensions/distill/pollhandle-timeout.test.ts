@@ -38,6 +38,7 @@ import {
   cleanupDistillWorktrees,
   makeFakeUI,
   makeUICtx,
+  withNapkinOnPath,
 } from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
 import distillExtension from "./index";
@@ -157,6 +158,13 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
   };
 
   /**
+   * PATH augmentation restoring `napkin` for the full-level health check.
+   * CI runs `./node_modules/.bin/vitest` directly (no pnpm PATH
+   * augmentation), so the suite must add node_modules/.bin itself.
+   */
+  let _napkinPath: { restore: () => void } | null = null;
+
+  /**
    * Every `setInterval(cb, ms)` call made during extension registration +
    * session_start + runAutoDistill lands here. The auto-distill tick has
    * `ms === intervalMinutes*60_000`, the pollHandle has `ms === 2000`.
@@ -180,8 +188,12 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
     // with the test's clock (e.g. the POST-R6-CACHE `napkin --version`
     // smoke test alone is ~155ms vs the test's 100ms timeout window),
     // leading to a half-cleaned worktree the next auto-tick can't
-    // overwrite cleanly.
+    // overwrite cleanly. The full-level health check still probes
+    // `napkin` BEFORE the spawn, so PATH must resolve it even with
+    // HALT_AFTER_META set (CI runs vitest without pnpm's PATH
+    // augmentation).
     process.env.NAPKIN_DISTILL_HALT_AFTER_META = "1";
+    _napkinPath = withNapkinOnPath();
 
     capturedIntervals = [];
     originalSetInterval = globalThis.setInterval;
@@ -213,6 +225,8 @@ describe("runDistillWith pollHandle timeout (G8)", () => {
       else process.env[key] = val;
     }
     globalThis.setInterval = originalSetInterval;
+    _napkinPath?.restore();
+    _napkinPath = null;
     if (vault) {
       cleanupDistillWorktrees(vault);
       fs.rmSync(vault, { recursive: true, force: true });
