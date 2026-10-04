@@ -14,19 +14,18 @@
  * does not repair it, the full-level gate blocks the wrapper spawn and
  * keeps surfacing the loud error.
  *
- * Delivery uses the shared `sendCustomMessageWithFallback` helper
- * (`pi.sendMessage` primary, direct session append fallback) so the
- * custom message participates in LLM context exactly like the
- * `<napkin-context>` overview block. The message is deduped per session:
- * resumed sessions already carry the prior notice in their history, so
- * re-injecting would only add noise.
+ * Delivery uses the shared `sendCustomMessageOnce` helper
+ * (`pi.sendMessage` primary, direct session append fallback, deduped by
+ * customType) so the custom message participates in LLM context exactly
+ * like the `<napkin-context>` overview block, and a resumed session does
+ * not accumulate duplicate notices.
  */
 
 import type {
   ExtensionAPI,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { sendCustomMessageWithFallback } from "../shared/custom-message";
+import { sendCustomMessageOnce } from "../shared/custom-message";
 import type { NapkinCliProbeResult } from "./auto-setup";
 
 /** customType identifying the session-start setup notice message. */
@@ -59,46 +58,20 @@ export interface MaybeInjectNapkinSetupNoticeOptions {
 }
 
 /**
- * Inject {@link formatNapkinSetupNotice} when the probe failed AND the
- * session does not already contain a notice. No-op on the healthy path
- * and on deduped resumes. Never throws.
+ * Inject {@link formatNapkinSetupNotice} when the probe failed.
+ * `sendCustomMessageOnce` handles the resume dedupe (one notice per
+ * session). No-op on the healthy path. Never throws.
  */
 export function maybeInjectNapkinSetupNotice(
   options: MaybeInjectNapkinSetupNoticeOptions,
 ): void {
   const { poster, sm, probe, onFallbackFailure } = options;
   if (probe.ok) return;
-  if (hasNapkinSetupNotice(sm)) return;
-  sendCustomMessageWithFallback({
+  sendCustomMessageOnce({
     poster,
     sm,
     customType: NAPKIN_SETUP_NOTICE_CUSTOM_TYPE,
     content: formatNapkinSetupNotice(probe.error),
     onFallbackFailure,
   });
-}
-
-/**
- * Whether the current session already carries the setup notice. A
- * resumed session replays its history, so the notice is already in LLM
- * context; injecting a second copy would only duplicate it.
- */
-function hasNapkinSetupNotice(
-  sm: Partial<SessionManager> | undefined,
-): boolean {
-  if (!sm || typeof sm.getEntries !== "function") return false;
-  try {
-    return sm
-      .getEntries()
-      .some(
-        (e) =>
-          e.type === "custom_message" &&
-          (e as { customType?: string }).customType ===
-            NAPKIN_SETUP_NOTICE_CUSTOM_TYPE,
-      );
-  } catch {
-    // Unreadable history: assume absent and let the send attempt proceed
-    // (worst case one duplicate notice).
-    return false;
-  }
 }
