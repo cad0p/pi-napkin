@@ -157,4 +157,45 @@ describe("sendCustomMessageOnce", () => {
     expect(sent).toBe(false);
     expect(sendMessage).not.toHaveBeenCalled();
   });
+
+  test("dedupe suppresses the fallback append as well", () => {
+    const sendMessage = vi.fn(() => {
+      throw new Error("stale runtime");
+    });
+    const appendCustomMessageEntry = vi.fn();
+    const sm = {
+      getEntries: () => [
+        { type: "custom_message", customType: "napkin-context" },
+      ],
+      appendCustomMessageEntry,
+    };
+    const sent = sendCustomMessageOnce({
+      poster: { sendMessage },
+      sm: sm as never,
+      customType: "napkin-context",
+      content: "notice-text",
+    });
+    expect(sent).toBe(false);
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(appendCustomMessageEntry).not.toHaveBeenCalled();
+  });
+
+  test("falls back to a direct append when the primary path throws (not deduped)", () => {
+    const sendMessage = vi.fn(() => {
+      throw new Error("stale runtime");
+    });
+    const appendCustomMessageEntry = vi.fn();
+    const sent = sendCustomMessageOnce({
+      poster: { sendMessage },
+      sm: { getEntries: () => [], appendCustomMessageEntry } as never,
+      customType: "napkin-context",
+      content: "notice-text",
+    });
+    expect(sent).toBe(true);
+    expect(appendCustomMessageEntry).toHaveBeenCalledWith(
+      "napkin-context",
+      "notice-text",
+      true,
+    );
+  });
 });
