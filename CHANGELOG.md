@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🐛 Bug Fixes
+
+- *(distill)* Past-tense overlap-notice wording (closes #104)
+- *(distill)* Preflight the napkin CLI and surface a repair notice when missing (closes #109)
+
+
 ## [0.7.3] - 2026-08-24
 
 <!-- USER-EDITABLE SECTION START -->
