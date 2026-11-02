@@ -44,6 +44,7 @@
     "dist/steering",
     "skills",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "pi": {
