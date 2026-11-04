@@ -104,7 +104,13 @@ Active distill worktrees are placed under
 `$XDG_CACHE_HOME/napkin-distill/<vault-hash>/<id>/` (typically
 `~/.cache/napkin-distill/…`), outside your vault. `<vault-hash>` is
 `sha256(contentPath).slice(0, 16)` so worktrees from multiple vaults never
-collide. External placement avoids:
+collide. To relocate the whole tree (small `$HOME`, a separate volume),
+set `NAPKIN_DISTILL_WORKTREES_ROOT` to an **absolute** path: it replaces
+the `$XDG_CACHE_HOME/napkin-distill` base, and the per-vault
+`<vault-hash>` level is still appended (multiple vaults stay isolated). A
+relative value is a configuration error and fails loudly rather than
+scattering one vault's worktrees across whatever cwd each caller had.
+External placement avoids:
 
 - **Cloud-sync pollution** — OneDrive/Dropbox don't respect `.gitignore`;
   in-vault worktrees would upload tens of MB per distill spawn.
@@ -112,6 +118,16 @@ collide. External placement avoids:
   into worktrees and see N full vault copies for N concurrent distills.
 - **Autocommit-cron noise** — gitlinks can surface in `git status` under
   some command sequences; external placement eliminates the surface.
+
+Debris from a pi process that was hard-killed mid-distill (SIGKILL, OOM)
+is reclaimed automatically: the sweep in `cleanupStaleWorktrees` runs at
+session start, at session shutdown, and hourly while a session is live,
+and it also removes `<id>/` directories that `git worktree list` no
+longer reports — provided the directory has no `.git` entry, nothing in
+it was modified in the last 6 hours, and its `meta.json` (if any) names a
+dead pid. A live distill is never touched. Each orphan is roughly one
+full copy of the vault, so this is the difference between “GBs leak” and
+“bounded by the last 6 hours of crashes”.
 
 Inspect active distills with `/distill-status`. If you ever need to nuke
 all distill state for a vault (stuck lock, etc.):

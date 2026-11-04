@@ -11,12 +11,14 @@ import {
   createDistillWorkspace,
   createDistillWorktree,
   DISTILL_SUBDIR,
+  DISTILL_WORKTREES_ROOT_ENV,
   DistillError,
   type DistillMeta,
   generateDistillBranchName,
   getActiveDistills,
   getDistillState,
   getUnmergedDistillBranches,
+  ORPHAN_MIN_AGE_MS,
   parseWorktreeList,
   readDistillMeta,
   removeDistillWorktree,
@@ -208,6 +210,76 @@ describe("resolveCacheRoot (XDG cache placement)", () => {
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+describe("resolveCacheRoot — NAPKIN_DISTILL_WORKTREES_ROOT override", () => {
+  // Both env vars are guarded: a leaked override would silently redirect
+  // every later test's worktrees, and a leaked XDG value would defeat the
+  // fallback assertions.
+  let savedOverride: string | undefined;
+  let savedXdg: string | undefined;
+  beforeEach(() => {
+    savedOverride = process.env[DISTILL_WORKTREES_ROOT_ENV];
+    savedXdg = process.env.XDG_CACHE_HOME;
+    delete process.env[DISTILL_WORKTREES_ROOT_ENV];
+  });
+  afterEach(() => {
+    if (savedOverride === undefined)
+      delete process.env[DISTILL_WORKTREES_ROOT_ENV];
+    else process.env[DISTILL_WORKTREES_ROOT_ENV] = savedOverride;
+    if (savedXdg === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = savedXdg;
+  });
+
+  test("replaces the XDG base directory while keeping the per-vault hash", () => {
+    const overrideRoot = fs.mkdtempSync(path.join(os.tmpdir(), "wt-root-"));
+    try {
+      process.env[DISTILL_WORKTREES_ROOT_ENV] = overrideRoot;
+      process.env.XDG_CACHE_HOME = "/tmp/xdg-must-be-ignored";
+      const root = resolveCacheRoot("/home/user/my-vault");
+      expect(path.dirname(root)).toBe(overrideRoot);
+      const hash = path.basename(root);
+      expect(hash).toMatch(/^[0-9a-f]{16}$/);
+      // Only the base moves: the hash must stay byte-identical to the
+      // XDG-resolved one so /distill-status, the wrapper's path-safety
+      // guard, and the sweeps all keep agreeing on the per-vault dir.
+      delete process.env[DISTILL_WORKTREES_ROOT_ENV];
+      expect(resolveCacheRoot("/home/user/my-vault")).toBe(
+        path.join("/tmp/xdg-must-be-ignored", "napkin-distill", hash),
+      );
+    } finally {
+      fs.rmSync(overrideRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("keeps vaults isolated by hash under one shared override root", () => {
+    process.env[DISTILL_WORKTREES_ROOT_ENV] = "/mnt/fast/napkin-distill";
+    process.env.XDG_CACHE_HOME = "/tmp/xdg";
+    const a = resolveCacheRoot("/home/user/vault-a");
+    const b = resolveCacheRoot("/home/user/vault-b");
+    expect(path.dirname(a)).toBe("/mnt/fast/napkin-distill");
+    expect(path.dirname(b)).toBe("/mnt/fast/napkin-distill");
+    expect(a).not.toBe(b);
+  });
+
+  test("empty value is treated as unset — falls back to the XDG base", () => {
+    process.env[DISTILL_WORKTREES_ROOT_ENV] = "";
+    process.env.XDG_CACHE_HOME = "/tmp/xdg";
+    expect(path.dirname(resolveCacheRoot("/home/user/vault"))).toBe(
+      path.join("/tmp/xdg", "napkin-distill"),
+    );
+  });
+
+  test("relative value is a configuration error (DistillError naming var + value)", () => {
+    process.env[DISTILL_WORKTREES_ROOT_ENV] = "relative/root";
+    expect(() => resolveCacheRoot("/home/user/vault")).toThrow(DistillError);
+    expect(() => resolveCacheRoot("/home/user/vault")).toThrow(
+      /NAPKIN_DISTILL_WORKTREES_ROOT/,
+    );
+    expect(() => resolveCacheRoot("/home/user/vault")).toThrow(
+      /relative\/root/,
+    );
   });
 });
 
@@ -832,6 +904,164 @@ describe("cleanupStaleWorktrees", () => {
       spawnSync("git", ["-C", vault, "worktree", "remove", "--force", feat]);
       spawnSync("git", ["-C", vault, "branch", "-D", "feature/unrelated"]);
     }
+  });
+});
+
+describe("cleanupStaleWorktrees — cache-root orphan sweep", () => {
+  // Orphans are directories git no longer lists AND that no longer carry a
+  // `.git` gitfile (see ORPHAN_MIN_AGE_MS for the safety rationale). Every
+  // test here drives the sweep through the public entry point, with
+  // XDG_CACHE_HOME pinned to a tmpdir so the cache root under test is the
+  // one this suite created.
+  let vault: string;
+  let sessionDir: string;
+  let sourceSession: string;
+  let cacheRoot: string;
+  let xdgCacheDir: string;
+  let savedXdg: string | undefined;
+  let savedOverride: string | undefined;
+
+  /** Anything older than the 6 h floor is sweep-eligible. */
+  const OLD = ORPHAN_MIN_AGE_MS + 2 * 60 * 60 * 1000;
+  /** Comfortably inside the 6 h window. */
+  const YOUNG = 60 * 60 * 1000;
+
+  beforeEach(() => {
+    savedXdg = process.env.XDG_CACHE_HOME;
+    savedOverride = process.env[DISTILL_WORKTREES_ROOT_ENV];
+    delete process.env[DISTILL_WORKTREES_ROOT_ENV];
+    xdgCacheDir = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-xdg-"));
+    process.env.XDG_CACHE_HOME = xdgCacheDir;
+    vault = createGitVault();
+    sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "orphan-src-"));
+    sourceSession = createSeededSessionFile(sessionDir, sessionDir);
+    cacheRoot = resolveCacheRoot(vault);
+    fs.mkdirSync(cacheRoot, { recursive: true });
+  });
+
+  afterEach(() => {
+    if (savedXdg === undefined) delete process.env.XDG_CACHE_HOME;
+    else process.env.XDG_CACHE_HOME = savedXdg;
+    if (savedOverride === undefined)
+      delete process.env[DISTILL_WORKTREES_ROOT_ENV];
+    else process.env[DISTILL_WORKTREES_ROOT_ENV] = savedOverride;
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+    fs.rmSync(vault, { recursive: true, force: true });
+    fs.rmSync(xdgCacheDir, { recursive: true, force: true });
+  });
+
+  /** Backdate a path's atime+mtime by `ageMs`. */
+  function backdate(target: string, ageMs: number): void {
+    const t = (Date.now() - ageMs) / 1000;
+    fs.utimesSync(target, t, t);
+  }
+
+  /**
+   * Backdate every entry under `root` (root included). The recency leg of
+   * the sweep looks at the whole subtree, so a single fresh intermediate
+   * directory (`.napkin`) is enough to keep a candidate alive — exactly
+   * what a half-written real tree must not accidentally do here.
+   */
+  function backdateTree(root: string, ageMs: number): void {
+    for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
+      const child = path.join(root, entry.name);
+      if (entry.isDirectory()) backdateTree(child, ageMs);
+      backdate(child, ageMs);
+    }
+    backdate(root, ageMs);
+  }
+
+  /**
+   * Seed `<cacheRoot>/<name>` with a vault-shaped tree (a tracked file plus
+   * the `.napkin/distill/` subdir). Directories are backdated after the
+   * writes — creating an entry bumps the parent's mtime, so the order
+   * matters for the recency check.
+   */
+  function makeCacheDir(name: string, ageMs: number): string {
+    const dir = path.join(cacheRoot, name);
+    fs.mkdirSync(path.join(dir, DISTILL_SUBDIR), { recursive: true });
+    fs.writeFileSync(path.join(dir, "seed.md"), "# seed\n");
+    backdateTree(dir, ageMs);
+    return dir;
+  }
+
+  /**
+   * Write a valid meta.json (the shape `readDistillMeta` accepts) and
+   * re-age the whole tree: writing inside `.napkin/distill/` refreshes
+   * that directory's mtime, which would otherwise keep the candidate alive
+   * through the recency leg and make the pid leg untested.
+   */
+  function writeMeta(dir: string, pid: number, ageMs: number): void {
+    const meta: DistillMeta = {
+      pid,
+      vault,
+      branch: "distill/abc123-1700000000",
+      startedAt: new Date().toISOString(),
+      parentSession: "/tmp/parent.jsonl",
+    };
+    const metaPath = path.join(dir, DISTILL_SUBDIR, "meta.json");
+    fs.writeFileSync(metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+    backdateTree(dir, ageMs);
+  }
+
+  test("removes an unregistered .git-less directory older than ORPHAN_MIN_AGE_MS", () => {
+    const orphan = makeCacheDir("abc123-1700000000", OLD);
+    expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(1);
+    expect(fs.existsSync(orphan)).toBe(false);
+  });
+
+  test("keeps a registered live worktree (pid = self), even unaged", () => {
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
+    try {
+      // createDistillWorkspace writes meta.pid = process.pid, so the
+      // registered loop and the pid leg of the orphan sweep both keep it.
+      expect(path.dirname(w.worktreePath)).toBe(cacheRoot);
+      expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(0);
+      expect(fs.existsSync(w.worktreePath)).toBe(true);
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+
+  test("keeps an unregistered directory whose newest file is only 1 h old", () => {
+    const young = makeCacheDir("abc124-1700000001", YOUNG);
+    expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(0);
+    expect(fs.existsSync(young)).toBe(true);
+  });
+
+  test("keeps an unregistered directory whose meta.json names a live pid", () => {
+    // Both candidates are old, unregistered, and .git-less; the ONLY
+    // difference is the pid in meta.json. The dead-pid twin proves the
+    // live one is kept by leg (f) and not by an accidental fresh mtime.
+    const live = makeCacheDir("abc125-1700000002", OLD);
+    writeMeta(live, process.pid, OLD);
+    const dead = makeCacheDir("abc127-1700000004", OLD);
+    writeMeta(dead, findDeadPid(), OLD);
+
+    expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(1);
+    expect(fs.existsSync(live)).toBe(true);
+    expect(fs.existsSync(dead)).toBe(false);
+  });
+
+  test("never removes a cache-root directory whose name is not a distill suffix", () => {
+    const foreign = makeCacheDir("some-other-tool", OLD);
+    // Shape-adjacent names must not match either: 5 hex chars and a
+    // non-numeric epoch are both outside ^[0-9a-f]{6}-[0-9]+$.
+    const shortHex = makeCacheDir("abc12-1700000000", OLD);
+    const badEpoch = makeCacheDir("abcdef-notanepoch", OLD);
+    expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(0);
+    expect(fs.existsSync(foreign)).toBe(true);
+    expect(fs.existsSync(shortHex)).toBe(true);
+    expect(fs.existsSync(badEpoch)).toBe(true);
+  });
+
+  test("keeps an unregistered but still-.git-bearing directory (git can reach it)", () => {
+    const halfTom = makeCacheDir("abc126-1700000003", OLD);
+    fs.writeFileSync(path.join(halfTom, ".git"), "gitdir: /nowhere\n");
+    backdate(path.join(halfTom, ".git"), OLD);
+    backdate(halfTom, OLD);
+    expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(0);
+    expect(fs.existsSync(halfTom)).toBe(true);
   });
 });
 
