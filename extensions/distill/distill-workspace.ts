@@ -154,9 +154,25 @@ export const DISTILL_SUBDIR = path.join(NAPKIN_MARKER, "distill");
 export const DISTILL_PROMPT_CACHE_KEY_ENV = "NAPKIN_DISTILL_PROMPT_CACHE_KEY";
 
 /**
+ * Environment variable that relocates the distill worktree base directory.
+ * Exported so tests and docs can reference the literal name without
+ * re-typing it (and so a rename here surfaces as a compile error at every
+ * call site instead of a silent no-op).
+ */
+export const DISTILL_WORKTREES_ROOT_ENV = "NAPKIN_DISTILL_WORKTREES_ROOT";
+
+/**
  * Resolve the root directory where this vault's distill worktrees live.
  * Follows XDG Base Directory Spec: `~/.cache/napkin-distill/<hash>/` by
  * default, `$XDG_CACHE_HOME/napkin-distill/<hash>/` when set.
+ *
+ * `$NAPKIN_DISTILL_WORKTREES_ROOT` REPLACES that base directory when set
+ * and non-empty (`$NAPKIN_DISTILL_WORKTREES_ROOT/<hash>/`), so worktrees can
+ * be pinned to a roomier or differently-scoped volume without displacing
+ * the rest of the XDG cache. The per-vault `<hash>` level is deliberately
+ * preserved in both modes: one base directory commonly hosts several
+ * vaults, and dropping the hash would make their worktrees (and the sweeps
+ * that enumerate them) collide.
  *
  * `<hash>` is the first 16 hex chars of sha256(vaultContentPath) — stable
  * per vault, unique across vaults. Prevents worktrees from two different
@@ -181,6 +197,13 @@ export const DISTILL_PROMPT_CACHE_KEY_ENV = "NAPKIN_DISTILL_PROMPT_CACHE_KEY";
  *   (`napkin.vault.contentPath`, NOT configPath — they're distinct in
  *   subdir layout and we want one hash per vault, not per config dir).
  *
+ * @throws DistillError if `$NAPKIN_DISTILL_WORKTREES_ROOT` is set to a
+ *   non-absolute path. A relative value would resolve against whatever cwd
+ *   each caller happens to have (session cwd, worktree cwd, `/distill`
+ *   command cwd) and silently scatter one vault's worktrees across several
+ *   directories — so it is a configuration error, not something to
+ *   best-effort reinterpret.
+ *
  * The path is canonicalised through `fs.realpathSync` before hashing so
  * equivalent paths that differ only in symlink presence (e.g.
  * `~/workplace` → `/workplace/pcad`) resolve to the same cache dir. A
@@ -188,8 +211,20 @@ export const DISTILL_PROMPT_CACHE_KEY_ENV = "NAPKIN_DISTILL_PROMPT_CACHE_KEY";
  * a deterministic hash rather than an unrelated throw.
  */
 export function resolveCacheRoot(vaultContentPath: string): string {
-  const cacheHome =
-    process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
+  const overrideRoot = process.env[DISTILL_WORKTREES_ROOT_ENV];
+  let baseDir: string;
+  if (overrideRoot) {
+    if (!path.isAbsolute(overrideRoot)) {
+      throw new DistillError(
+        `${DISTILL_WORKTREES_ROOT_ENV} must be an absolute path, got: ${overrideRoot}`,
+      );
+    }
+    baseDir = overrideRoot;
+  } else {
+    const cacheHome =
+      process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
+    baseDir = path.join(cacheHome, "napkin-distill");
+  }
   let canonical: string;
   try {
     canonical = fs.realpathSync(vaultContentPath);
@@ -205,7 +240,7 @@ export function resolveCacheRoot(vaultContentPath: string): string {
     .update(canonical)
     .digest("hex")
     .slice(0, 16);
-  return path.join(cacheHome, "napkin-distill", vaultHash);
+  return path.join(baseDir, vaultHash);
 }
 
 /**
@@ -596,6 +631,179 @@ export const STALE_WORKTREE_MINUTES = 60;
 export const STALE_META_AGE_MS = STALE_WORKTREE_MINUTES * 60 * 1000;
 
 /**
+ * Minimum age an UNREGISTERED cache-root directory must exceed before the
+ * cache-root sweep will delete it — measured against the newest mtime found
+ * anywhere in its subtree (the directory itself included).
+ *
+ * Why 6 hours: the sweep's only job is reclaiming debris from pi processes
+ * that died without their cleanup trap running (SIGKILL, OOM, VM power-off,
+ * container teardown). A distill's whole lifecycle is bounded by
+ * `distill.maxDurationMinutes` (10 min default) plus wrapper validation, so
+ * anything still being written 6 h after its newest write is definitionally
+ * abandoned. The window is deliberately far larger than the distill budget
+ * because the cost asymmetry is lopsided: deleting a slow-but-live worktree
+ * destroys in-flight merged content, whereas leaving an orphan on disk for
+ * another few hours only delays reclaiming its ~580 MB.
+ *
+ * Why "not in `git worktree list` AND no `.git` entry" is the safety
+ * condition: either signal alone is unreliable. A registered worktree whose
+ * directory is mid-teardown can briefly lack `.git`; an unregistered
+ * directory can be a half-created worktree whose `.git` write raced the kill.
+ * Requiring BOTH means git can no longer enumerate, repair, or reap the
+ * directory, so no live process can be using it as a worktree anymore.
+ * A hard-killed pi lands exactly here: either `git worktree add` died
+ * before registering the path, or a later `git worktree prune` dropped
+ * the registry entry while the directory (and a `.git` that no longer
+ * resolves) stayed on disk. Either way the registered-worktree loop above
+ * can never see it again — which is how vaults accumulate GBs of
+ * unreferenced full-vault copies.
+ */
+export const ORPHAN_MIN_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * Directory-name shape of a distill worktree: the branch suffix of
+ * `distill/<6-hex-nonce>-<epoch-seconds>` (see
+ * `generateDistillBranchName`). Anything else under the cache root is not
+ * ours — a user's `tmp/`, a future layout, another tool's directory — and is
+ * never removed.
+ */
+const DISTILL_DIR_NAME_RE = /^[0-9a-f]{6}-[0-9]+$/;
+
+/**
+ * Cap on directory entries the orphan walk will stat before giving up and
+ * treating the candidate as "possibly live" (i.e. keeping it). The walk is
+ * only ever run on unregistered, `.git`-less candidates — a handful of
+ * entries in practice — but the cap keeps a pathological tree (a vault that
+ * is also a node_modules/ monorepo) from turning a janitor pass into a
+ * multi-second stall at session start or shutdown.
+ */
+const ORPHAN_WALK_MAX_ENTRIES = 20_000;
+
+/**
+ * True if any entry in `root`'s subtree (or `root` itself) was modified
+ * after `cutoffMs`. Symlinks are skipped rather than followed: the cache
+ * root is a shared, user-visible directory, and a symlink planted there must
+ * never widen a recursive sweep (or its stat walk) outside the per-vault
+ * subtree. Unreadable subdirectories are skipped for the same reason a
+ * permission error must not abort a sweep.
+ */
+function hasEntryNewerThan(root: string, cutoffMs: number): boolean {
+  let visited = 0;
+  const stack: string[] = [root];
+  while (stack.length > 0) {
+    const dir = stack.pop() as string;
+    try {
+      if (fs.lstatSync(dir).mtimeMs > cutoffMs) return true;
+    } catch {
+      continue;
+    }
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      visited += 1;
+      // Bail out conservatively: an unenumerable tree is treated as live so
+      // the sweep can never remove something it failed to inspect.
+      if (visited > ORPHAN_WALK_MAX_ENTRIES) return true;
+      // `withFileTypes` reports a symlink as a symlink (not as the type it
+      // points at), so this also keeps the walk from descending through one.
+      if (entry.isSymbolicLink()) continue;
+      const entryPath = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(entryPath);
+        continue;
+      }
+      try {
+        if (fs.lstatSync(entryPath).mtimeMs > cutoffMs) return true;
+      } catch {
+        // Stat race (entry vanished mid-walk) — ignore, other entries decide.
+      }
+    }
+  }
+  return false;
+}
+
+/**
+ * Remove stale distill worktrees from this vault's cache root that
+ * `git worktree list` no longer reports.
+ *
+ * `registeredPaths` holds every path git currently knows about (not just the
+ * `distill/*` branches) — a directory git still lists is left to the
+ * registered-worktree loop above, which has the meta.json / pid / mtime
+ * signal needed to decide.
+ *
+ * A candidate is removed only when ALL of these hold:
+ *   (a) it is a real directory — symlinks are skipped, never followed, so a
+ *       planted link can't make the sweep delete anything outside the root;
+ *   (b) its name matches the distill branch-suffix shape;
+ *   (c) git does not list it (`registeredPaths`);
+ *   (d) it has no `.git` entry (see ORPHAN_MIN_AGE_MS for why (c) and (d)
+ *       are both required);
+ *   (e) nothing in its subtree was modified within ORPHAN_MIN_AGE_MS;
+ *   (f) it either has no readable `meta.json` or that meta.json's pid is
+ *       dead — a readable live pid means a distill may still be writing.
+ *
+ * Best-effort per entry: a failure while inspecting or removing one
+ * candidate never throws out of the sweep (a janitor pass must not be able
+ * to break session start or shutdown) and never aborts the remaining
+ * candidates.
+ *
+ * @returns number of directories actually removed from disk.
+ */
+function sweepOrphanWorktreeDirs(
+  vaultPath: string,
+  registeredPaths: ReadonlySet<string>,
+): number {
+  const cacheRoot = resolveCacheRoot(vaultPath);
+  let names: string[];
+  try {
+    names = fs.readdirSync(cacheRoot);
+  } catch {
+    // Root doesn't exist yet (first distill) or isn't readable — nothing to
+    // sweep. Not an error: an absent cache root is the steady state of a
+    // vault that never distilled.
+    return 0;
+  }
+
+  const cutoffMs = Date.now() - ORPHAN_MIN_AGE_MS;
+  let removed = 0;
+  for (const name of names) {
+    if (!DISTILL_DIR_NAME_RE.test(name)) continue;
+    const dirPath = path.join(cacheRoot, name);
+    try {
+      // (a) `lstatSync`: a symlink named like a distill dir is NOT a
+      // directory (isDirectory() is false for the link itself) and is
+      // skipped, so no removal can escape the cache root.
+      if (!fs.lstatSync(dirPath).isDirectory()) continue;
+      // (c) Still registered with git — the loop above owns that decision.
+      if (registeredPaths.has(dirPath)) continue;
+      // (d) A leftover worktree gitfile means git may still reach it.
+      try {
+        fs.lstatSync(path.join(dirPath, ".git"));
+        continue;
+      } catch {
+        // No `.git` entry at all — the orphan signature.
+      }
+      // (e) Anything recently written means someone may still be working.
+      if (hasEntryNewerThan(dirPath, cutoffMs)) continue;
+      // (f) A readable live pid keeps it, even unregistered.
+      const meta = readDistillMeta(dirPath);
+      if (meta && isPidAlive(meta.pid)) continue;
+
+      fs.rmSync(dirPath, { recursive: true, force: true });
+      removed += 1;
+    } catch {
+      // Per-entry failure (EACCES, ENOTEMPTY, stat race) is non-fatal; keep
+      // sweeping the remaining candidates.
+    }
+  }
+  return removed;
+}
+
+/**
  * VaultInfo-shaped handle this module accepts. We rely only on `contentPath`
  * (the vault root = the git main worktree root) — kept minimal so tests and
  * callers don't have to construct a full Napkin instance.
@@ -616,7 +824,18 @@ export interface StaleCleanupVault {
  *
  * Removal is best-effort: failures on one worktree don't abort the sweep.
  *
- * @returns number of worktrees removed.
+ * Registered entries are only half the debris. When a pi process is
+ * hard-killed (SIGKILL, OOM) mid-distill, the worktree's `.git` gitfile can
+ * vanish along with the registry entry, and the directory — a full ~580 MB
+ * copy of the vault — becomes invisible to `git worktree list` forever. So
+ * after the registered loop this function also sweeps the per-vault cache
+ * root for unregistered directories; see `sweepOrphanWorktreeDirs` (and
+ * `ORPHAN_MIN_AGE_MS`) for the exact conditions.
+ *
+ * @returns number of entries removed from disk — registered worktrees AND
+ *   orphaned cache-root directories, summed. Callers that want a precise
+ *   breakdown must enumerate the cache root themselves; the contract is
+ *   "how much debris did this pass reclaim".
  */
 export function cleanupStaleWorktrees(vault: StaleCleanupVault): number {
   const vaultPath = vault.contentPath;
@@ -627,9 +846,9 @@ export function cleanupStaleWorktrees(vault: StaleCleanupVault): number {
   const listRes = runGit(vaultPath, ["worktree", "list", "--porcelain"]);
   if (listRes.status !== 0) return 0;
 
-  const entries = parseWorktreeList(listRes.stdout).filter((e) =>
-    e.branch.startsWith("distill/"),
-  );
+  const registered = parseWorktreeList(listRes.stdout);
+  const registeredPaths = new Set(registered.map((e) => e.path));
+  const entries = registered.filter((e) => e.branch.startsWith("distill/"));
 
   let removed = 0;
   for (const entry of entries) {
@@ -666,6 +885,11 @@ export function cleanupStaleWorktrees(vault: StaleCleanupVault): number {
       // Per-worktree failure is non-fatal; keep sweeping.
     }
   }
+
+  // Cache-root sweep: reclaim directories git has already forgotten.
+  // Runs after the registered loop so a worktree that git CAN still enumerate
+  // is always judged by that loop's richer signal, never by this one.
+  removed += sweepOrphanWorktreeDirs(vaultPath, registeredPaths);
 
   return removed;
 }

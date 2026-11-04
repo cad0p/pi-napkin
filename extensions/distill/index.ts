@@ -133,6 +133,24 @@ const IDLE_STATUS_REPAINT_INTERVAL_MS = 1000;
 const DISTILL_POLL_TICK_MS = 2000;
 
 /**
+ * Cadence for the background distill-worktree janitor pass.
+ *
+ * Sweeping debris is not urgent — an orphan only costs disk — but it is
+ * not once-per-process either: `session_start` and `session_shutdown` only
+ * cover processes that survive their own lifecycle, and the long-lived
+ * sessions that DO survive are exactly the ones that spawn the most
+ * worktrees. Hourly bounds a live session's debris to at most one hour's
+ * worth of hard-killed siblings without adding measurable cost: a pass is
+ * one `git worktree list` plus a readdir of a handful of entries.
+ *
+ * One hour is also comfortably below `ORPHAN_MIN_AGE_MS` (6 h), so a
+ * running session retries each young orphan several times before it
+ * becomes eligible and never has to wait for a process restart to
+ * reclaim one.
+ */
+export const ORPHAN_SWEEP_INTERVAL_MS = 60 * 60 * 1000;
+
+/**
  * Custom entry type used to persist `/distill-auto-this-session` state into the
  * session file. CustomEntry (unlike CustomMessageEntry) does not participate in
  * LLM context, so we can write freely without affecting the agent.
@@ -406,6 +424,7 @@ export default function (pi: ExtensionAPI) {
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
   let countdownHandle: ReturnType<typeof setInterval> | null = null;
   let pollHandle: ReturnType<typeof setInterval> | null = null;
+  let sweepHandle: ReturnType<typeof setInterval> | null = null;
   let lastDistillTimestamp = Date.now();
   let lastSessionSize = 0;
   /**
@@ -860,6 +879,30 @@ export default function (pi: ExtensionAPI) {
         }
       }
     }, intervalMs);
+
+    // Periodic janitor pass over this vault's worktree cache root. A
+    // long-lived session is exactly the one that outlives its hard-killed
+    // siblings' debris, so the sweep has to run on a timer and not only at
+    // this process's own start/end (see ORPHAN_SWEEP_INTERVAL_MS).
+    //
+    // Same liveness + generation guards as the other ticks: a queued tick
+    // from a dead session must not do stale work in this closure. The sweep
+    // only reads `vaultContentPath` (a plain string captured above) and the
+    // filesystem, so it can't itself hit a stale ctx — the guards are here
+    // for uniformity with the other timers and to keep dead sessions from
+    // sweeping a vault nobody is watching.
+    sweepHandle = setInterval(() => {
+      if (!sessionActive) return;
+      if (armedGeneration !== sessionGeneration) return; // old-session tick → clean no-op (#93)
+      try {
+        cleanupStaleWorktrees({ contentPath: vaultContentPath });
+      } catch (err) {
+        // A janitor pass must never take down pi. Failures here are
+        // transient by nature (a race with a concurrent sweep, a permission
+        // blip) and the next tick retries an hour later.
+        console.error("[napkin-distill] orphan sweep tick failed:", err);
+      }
+    }, ORPHAN_SWEEP_INTERVAL_MS);
   });
 
   pi.on("session_shutdown", async (event, ctx) => {
@@ -881,10 +924,35 @@ export default function (pi: ExtensionAPI) {
       clearInterval(pollHandle);
       pollHandle = null;
     }
+    if (sweepHandle) {
+      clearInterval(sweepHandle);
+      sweepHandle = null;
+    }
     // Reset `isRunning` so a distill that was mid-flight at shutdown doesn't
     // stick as `true` across an in-process session switch and suppress the
     // next session's status-bar rendering.
     isRunning = false;
+
+    // ------- Janitor pass (best-effort, synchronous) -------------------------
+    //
+    // Sweep again on the way out. A session that ran for hours may have
+    // accumulated debris from hard-killed siblings that the hourly tick
+    // never saw, and the NEXT pi process may not start for days — closing
+    // the terminal is often the last sweep opportunity for a while.
+    //
+    // Deliberately BEFORE the shutdown distill spawn below, so the worktree
+    // that spawn is about to create can never be a candidate for this pass.
+    //
+    // Never blocks shutdown and never throws; skipped only when no vault
+    // resolves from cwd (nothing to sweep toward).
+    try {
+      const sweepVault = resolveDistillVault(ctx.cwd);
+      if (sweepVault) {
+        cleanupStaleWorktrees({ contentPath: sweepVault.contentPath });
+      }
+    } catch {
+      // Swallow — a janitor failure must never affect shutdown.
+    }
 
     // ------- Final shutdown distill (Phase B Item 8) -------------------------
     //
