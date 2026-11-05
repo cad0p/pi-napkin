@@ -19,3 +19,10 @@ export const DISTILL_WRAPPER_SCRIPT: string = path.join(
   SCRIPTS_DIR,
   "distill-wrapper.sh",
 );
+
+/** Absolute path to the optional vault main-guard hook installer (sh). */
+export const VAULT_MAIN_GUARD_INSTALLER: string = path.join(
+  SCRIPTS_DIR,
+  "vault-main-guard",
+  "install.sh",
+);

@@ -2075,8 +2075,8 @@ export function formatOutcomeNotification(args: {
       // PR #12: `failed:<reason>` carries a reason code identifying
       // which validator tripped (markers-after-agent-exit,
       // pre-existing-markers, head-not-on-default, agent-exit-nonzero,
-      // agent-timeout, divergent-history). Surface as `error` with the
-      // reason in
+      // agent-timeout, divergent-history, history-rewrite). Surface as
+      // `error` with the reason in
       // the message so the user can diagnose without opening the
       // error log first.
       //

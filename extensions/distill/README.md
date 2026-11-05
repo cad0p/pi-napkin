@@ -84,3 +84,14 @@ Persistent vault-wide opt-out still lives in `.napkin/config.json` (`distill.ena
 - `/distill-auto-this-session off` does **not** interrupt a distillation already in flight. It only suppresses future scheduled runs.
 - If `distill.enabled` is `false` in the vault config, the command warns that the session flag has no effect — enable distill in the vault config first.
 - Forking a session with auto-distill off carries the state forward (the CustomEntry is copied with the rest of the session). Run `/distill-auto-this-session on` in the fork to turn it back on.
+- The wrapper writes `failed:history-rewrite` (an error, never `merged-content`) when the vault's default branch post-run tip does not descend from the tip recorded before the agent ran. That means the branch was rewritten rather than fast-forwarded or merged, which can orphan another session's unpushed commits; the outcome's recovery hint names the reflog and cherry-pick path.
+
+## Vault main guard (optional)
+
+Distill lands work on the vault's default branch by fast-forwarding or merging only. The optional `reference-transaction` hook turns that into a git-level invariant: it refuses deleting `refs/heads/main` and refuses any new tip that does not descend from the current tip, for every tool and every session (a steering rule only sees pi's own tool calls).
+
+```bash
+sh extensions/distill/scripts/vault-main-guard/install.sh --repo ~/your-vault
+```
+
+The installer resolves `core.hooksPath` (otherwise the common git dir's `hooks/`, so linked worktrees share it), leaves git-lfs hooks alone, and chains an existing `reference-transaction` hook by replaying its stdin from a buffer. Fast-forwards, merges and the initial creation of `main` pass. To remove it, delete the installed `reference-transaction` file (and restore `reference-transaction.pre-vault-main-guard` if the installer reported chaining).

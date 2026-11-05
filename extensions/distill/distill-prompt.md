@@ -34,6 +34,8 @@ Be selective. Only capture knowledge useful to someone working on this project l
 
    If `git -C {{worktreePath}} merge --no-edit {{defaultBranch}}` reports "Already up to date" (no merge commit), that's fine — proceed.
 
+   The only branch you may create or move is `{{branchName}}`. Do not create landing branches (no `distill-land/*`, no per-attempt variants) and never point `{{defaultBranch}}` at a branch tip with plumbing. The step 8 commands are the only way your content reaches `{{defaultBranch}}`.
+
 8. Squash to main. From the main vault at {{vaultPath}}, switch to the default branch and squash-merge your branch:
 
        git -C {{vaultPath}} checkout {{defaultBranch}}
@@ -41,6 +43,8 @@ Be selective. Only capture knowledge useful to someone working on this project l
        git -C {{vaultPath}} commit -m "distill: <one-line summary of what you captured>"
 
    Use `--squash` to keep main's history linear (one commit per distill). If `git merge --squash` produces no staged changes (e.g. your distill content was already on main), skip the commit step — there's nothing new to land.
+
+   Those three commands are the only way to land your work. Never write or rewrite the `{{defaultBranch}}` ref directly: `git update-ref`, `git branch -f`, `git checkout -B` / `git switch -C`, `git reset`, `git rebase`, `git commit --amend` and `git fetch . <src>:{{defaultBranch}}` are forbidden on `{{defaultBranch}}` even when a push or merge fails. A plumbing write ignores fast-forward-ness, leaves the worktree untouched, and can drop another session's unpushed commits. If the squash cannot land with the commands above, stop and report the failure — do not improvise a workaround.
 
 9. Push if origin exists. Check `git -C {{vaultPath}} remote -v`. If `origin/{{defaultBranch}}` is configured, push your changes:
 
