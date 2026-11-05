@@ -211,6 +211,87 @@ git -C "${s.vault}" merge conflict-side >/dev/null 2>&1 || true
   });
 
   // -------------------------------------------------------------------------
+  // validate_start_sha_ancestor
+  // -------------------------------------------------------------------------
+  //
+  // The pre-run tip of the default branch (`startSha` in meta.json) must
+  // remain an ancestor of the post-run tip. The prompt's only landing path
+  // (`checkout <default>` + `merge --squash` + `commit`) always produces a
+  // descendant; a non-descendant means the branch was rewritten with
+  // plumbing (the 2026-11-05 incident: a bare
+  // `git update-ref refs/heads/main <landing-tip>` dropped another
+  // session's unpushed commit). Such a run must not be classified as
+  // `merged-content` just because the reflog shows commits.
+
+  test("validate_start_sha_ancestor FAIL: agent rewrites main with update-ref → failed:history-rewrite", () => {
+    const s = makeScaffold();
+    try {
+      writeStubPi(
+        s,
+        `
+git -C "${s.vault}" config user.email test@example.com
+git -C "${s.vault}" config user.name test
+alien="$(git -C "${s.vault}" commit-tree 'HEAD^{tree}' -m alien)"
+git -C "${s.vault}" update-ref refs/heads/main "$alien"
+`,
+      );
+      const r = runWrapper(s);
+      expect(r.exitCode).toBe(1);
+      expect(r.outcome).toBe("failed:history-rewrite");
+      // Recovery hint on line 2+ names the merge recovery, not a reset.
+      const sidecar = fs.readFileSync(String(r.outcomePath), "utf-8");
+      expect(sidecar).toMatch(/reflog/);
+      expect(sidecar).toMatch(/cherry-pick/);
+    } finally {
+      fs.rmSync(s.root, { recursive: true, force: true });
+    }
+  });
+
+  test("validate_start_sha_ancestor FAIL: agent amends the pre-run tip → failed:history-rewrite", () => {
+    // Not an update-ref: `commit --amend` on the seed commit rewrites the
+    // pre-run tip itself, so startSha is no longer reachable from the new
+    // tip. The check must catch rewrites regardless of the verb that
+    // produced them.
+    const s = makeScaffold();
+    try {
+      writeStubPi(
+        s,
+        `
+git -C "${s.vault}" config user.email test@example.com
+git -C "${s.vault}" config user.name test
+git -C "${s.vault}" commit -q --amend -m "rewritten seed"
+`,
+      );
+      const r = runWrapper(s);
+      expect(r.exitCode).toBe(1);
+      expect(r.outcome).toBe("failed:history-rewrite");
+    } finally {
+      fs.rmSync(s.root, { recursive: true, force: true });
+    }
+  });
+
+  test("validate_start_sha_ancestor PASS: a squash commit beyond startSha stays merged-content", () => {
+    const s = makeScaffold();
+    try {
+      writeStubPi(
+        s,
+        `
+git -C "${s.vault}" config user.email test@example.com
+git -C "${s.vault}" config user.name test
+echo "# distilled" > "${s.vault}/distilled.md"
+git -C "${s.vault}" add .
+git -C "${s.vault}" commit -q -m "distill: test"
+`,
+      );
+      const r = runWrapper(s);
+      expect(r.exitCode).toBe(0);
+      expect(r.outcome).toBe("merged-content");
+    } finally {
+      fs.rmSync(s.root, { recursive: true, force: true });
+    }
+  });
+
+  // -------------------------------------------------------------------------
   // validate_no_unresolved_conflicts
   // -------------------------------------------------------------------------
   //

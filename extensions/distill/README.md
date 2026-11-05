@@ -84,3 +84,4 @@ Persistent vault-wide opt-out still lives in `.napkin/config.json` (`distill.ena
 - `/distill-auto-this-session off` does **not** interrupt a distillation already in flight. It only suppresses future scheduled runs.
 - If `distill.enabled` is `false` in the vault config, the command warns that the session flag has no effect — enable distill in the vault config first.
 - Forking a session with auto-distill off carries the state forward (the CustomEntry is copied with the rest of the session). Run `/distill-auto-this-session on` in the fork to turn it back on.
+- The wrapper writes `failed:history-rewrite` (an error, never `merged-content`) when the vault's default branch post-run tip does not descend from the tip recorded before the agent ran. That means the branch was rewritten rather than fast-forwarded or merged, which can orphan another session's unpushed commits; the outcome's recovery hint names the reflog and cherry-pick path.

@@ -514,6 +514,7 @@ safe_rm_worktree() {
 #   agent-exit-nonzero
 #   agent-timeout
 #   divergent-history
+#   history-rewrite
 #
 # Cleanup operations are best-effort: a failed `worktree remove` or
 # `branch -D` does NOT prevent the outcome write — the JS-side
@@ -567,6 +568,9 @@ salvage() {
       ;;
     divergent-history)
       hint="origin/$DEFAULT_BRANCH and local $DEFAULT_BRANCH have diverged — typically because someone (you or a teammate) pushed to origin from another clone before this distill ran. Less commonly, someone force-pushed there. Inspect with 'git -C $vault log origin/$DEFAULT_BRANCH..$DEFAULT_BRANCH' (your local commits not on origin) and 'git -C $vault log $DEFAULT_BRANCH..origin/$DEFAULT_BRANCH' (origin commits not local), then resolve by pulling-and-merging or by inspecting the divergence and choosing the right recovery (revert, manual merge, etc.). Distill content is recoverable from 'git -C $vault reflog' for ~90 days."
+      ;;
+    history-rewrite)
+      hint="$DEFAULT_BRANCH did not fast-forward across this distill: its post-run tip does not descend from the pre-run tip $START_SHA, so commits that existed only on the local branch were orphaned. This is the signature of a plumbing ref write (e.g. 'git update-ref refs/heads/$DEFAULT_BRANCH <landing-tip>') that rewrote the branch instead of merging into it. Inspect 'git -C $vault reflog $DEFAULT_BRANCH' and 'git -C $vault fsck --lost-found' (or 'git -C $vault cat-file -p <sha>'), restore orphaned commits with 'git -C $vault cherry-pick <sha>', and land this distill's content by merging its commit. Distill content is recoverable from 'git -C $vault reflog' for ~90 days."
       ;;
     *)
       hint="Distill failed with an unrecognised reason. See the error log for diagnostics. Distill content (if any) is recoverable from 'git -C $vault reflog'."
@@ -779,6 +783,49 @@ validate_commit_count() {
   fi
   printf '%s\n' "$count"
   return 0
+}
+
+# validate_start_sha_ancestor <vault> <start_sha> <default_branch>
+#
+# Confirms the vault's default branch still descends from the tip it had
+# when this distill started (`startSha` in meta.json). The agent-driven
+# prompt lands work as `checkout <default>` + `merge --squash` + `commit`,
+# which always produces a descendant. A non-descendant tip means the
+# default branch was rewritten instead of advanced - typically a plumbing
+# write such as `git update-ref refs/heads/<default> <landing-tip>`, which
+# ignores fast-forward-ness and leaves the worktree untouched. Commits that
+# existed only on the local branch (another session's unpushed work) are
+# orphaned by such a write, so the wrapper must NOT accept the run as
+# `merged-content` / `merged-local`.
+#
+# Return codes:
+#   0 - startSha is an ancestor of the default branch tip (normal)
+#   1 - startSha is NOT an ancestor: history was rewritten
+#       -> caller writes `failed:history-rewrite`
+#   2 - the check could not run (missing arg, bad startSha, git failure)
+#       -> caller writes `failed:internal-validator-error` (do not blame
+#          the agent for state nobody observed)
+validate_start_sha_ancestor() {
+  local vault="$1"
+  local start_sha="$2"
+  local default="$3"
+  if [ -z "$vault" ] || [ -z "$start_sha" ] || [ -z "$default" ]; then
+    log_error "validate_start_sha_ancestor: <vault>, <start_sha> and <default_branch> are required"
+    return 2
+  fi
+  git -C "$vault" merge-base --is-ancestor "$start_sha" "$default" 2>/dev/null
+  local rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  if [ "$rc" -eq 1 ]; then
+    local new_tip
+    new_tip="$(git -C "$vault" rev-parse "$default" 2>/dev/null || true)"
+    log_error "validate_start_sha_ancestor: $default at ${new_tip:-unknown} does not descend from the pre-distill tip $start_sha; the default branch was rewritten instead of fast-forwarded or merged"
+    return 1
+  fi
+  log_error "validate_start_sha_ancestor: git merge-base --is-ancestor failed (rc $rc) for $start_sha..$default in $vault"
+  return 2
 }
 
 # detect_local_only <vault> <default_branch>
@@ -1242,6 +1289,16 @@ fi
 #                                 isn't blamed-via-agent for state
 #                                 nobody observed (CORR-1 R3 / SEC-1 R3)
 #   head-not-on-default        — V2 fail, vault HEAD not on default branch
+#   history-rewrite            — default branch post-run tip does not descend
+#                                 from the pre-run tip (startSha). The branch
+#                                 was rewritten (typically a bare
+#                                 `git update-ref refs/heads/<default> <sha>`)
+#                                 rather than fast-forwarded/merged, which
+#                                 orphans local-only commits. Wrapper-side
+#                                 hard control for the prompt's
+#                                 "no plumbing ref writes" prohibition.
+#                                 internal-validator-error when the ancestry
+#                                 check itself cannot run.
 #   agent-exit-nonzero         — pi exited non-zero with no other diagnostic
 #   agent-timeout              — timeout(1) killed the agent (rc 124 or 137)
 #   divergent-history          — origin/<default> diverges from local <default>
@@ -1286,6 +1343,24 @@ fi
 if ! validate_head_on_default "$VAULT" "$DEFAULT_BRANCH"; then
   record_dangling_sha
   salvage "$VAULT" "$WORKTREE" "$BRANCH" "head-not-on-default"
+  exit 1
+fi
+
+# Default-branch ancestry validation. Runs before the conflict scan and the
+# commit count: both of those only observe the post-run tip, so a rewritten
+# default branch (non-descendant) would otherwise be classified as
+# `merged-content` as soon as the reflog shows commits. `startSha` is the
+# pre-run tip recorded in meta.json, so this needs no new state.
+validate_start_sha_ancestor "$VAULT" "$START_SHA" "$DEFAULT_BRANCH"
+ANCESTRY_RC=$?
+if [ "$ANCESTRY_RC" -eq 1 ]; then
+  record_dangling_sha
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "history-rewrite"
+  exit 1
+fi
+if [ "$ANCESTRY_RC" -eq 2 ]; then
+  record_dangling_sha
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "internal-validator-error"
   exit 1
 fi
 
