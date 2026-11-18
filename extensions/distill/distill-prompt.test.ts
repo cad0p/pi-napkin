@@ -6,8 +6,8 @@
  *   - happy path: returns string with placeholders substituted
  *   - empty input: throws (non-empty contract)
  *   - missing placeholder: throws when .md doesn't contain a required token
- *   - .md content invariants: 9 step markers + key prohibitive directives
- *     ("never use --force", "pull-merge", "do not loop indefinitely")
+ *   - .md content invariants: 7 step markers + the wrapper-owned-integration
+ *     contract (no git against the live vault, read-only advisory line)
  *
  * Test isolation (CI-A-5): tests that exercise template error paths
  * (missing placeholder, empty file) write a degraded copy into a
@@ -270,14 +270,14 @@ describe("distill-prompt.md — content invariants", () => {
     expect(template).toContain("{{defaultBranch}}");
   });
 
-  test("template contains all 9 numbered step markers", () => {
+  test("template contains all 7 numbered step markers", () => {
     // We assert on `<n>.` at line-start (Markdown ordered-list shape) so
     // that a stray `1.` inside a sentence doesn't false-positive. The
     // 6th step is the frontmatter convention paragraph (numbered to
-    // keep step counts aligned with the design spec). Worktree cleanup
-    // is owned by the wrapper, not the agent, so the prompt has 9 steps
-    // (commit→merge→squash→push), not 10.
-    for (let n = 1; n <= 9; n++) {
+    // keep step counts aligned with the design spec). Issue #122 moved
+    // squash + push + cleanup out of the agent's contract and into the
+    // wrapper, so the prompt ends at step 7 (commit + catch-up merge).
+    for (let n = 1; n <= 7; n++) {
       const stepHeader = new RegExp(`^${n}\\.`, "m");
       expect(template).toMatch(stepHeader);
     }
@@ -296,24 +296,20 @@ describe("distill-prompt.md — content invariants", () => {
     expect(template).not.toMatch(/git -C \{\{vaultPath\}\} branch -D/);
   });
 
-  test("template prohibits force-push", () => {
-    // Per design.md "Push behavior: never force". The .md must contain
-    // explicit prohibitive language so the agent doesn't invent a
-    // recovery path that calls `--force` or `--force-with-lease`.
-    expect(template).toMatch(/--force/);
-    expect(template).toMatch(/--force-with-lease|NEVER use `--force`/);
-  });
-
-  test("template prefers pull-merge over pull-rebase on push contention", () => {
-    // Per design.md "Pull-merge, not pull-rebase". The .md must mention
-    // pull-merge as the recovery path; "rebase" should appear only in
-    // the prohibitive context (or not at all).
-    expect(template).toMatch(/pull-merge/i);
-  });
-
-  test("template tells the agent not to loop indefinitely on push failure", () => {
-    // Per design.md "Push behavior" agent-policy section.
-    expect(template).toMatch(/do not loop indefinitely/i);
+  test("template never asks the agent to land, push or clean up (issue #122)", () => {
+    // Issue #122: the wrapper owns catch-up, squash, push and cleanup.
+    // The agent must not be told (or allowed) to run any landing verb,
+    // because the wrapper's read-only + marker + preflight gates only
+    // bind when the wrapper owns the landing path.
+    expect(template).not.toMatch(/\{\{vaultPath\}\} push/);
+    expect(template).not.toMatch(/\{\{vaultPath\}\} merge --squash/);
+    expect(template).not.toMatch(/pull --no-rebase/);
+    expect(template).not.toMatch(/worktree remove/);
+    expect(template).not.toMatch(/branch -D/);
+    // The only remaining defensible landing mention is the explicit
+    // prohibition list in step 7.
+    expect(template).toMatch(/forbidden on any branch/);
+    expect(template).toMatch(/The wrapper is the only thing that lands/);
   });
 
   test("template contains the worktree-isolation cwd contract from POST-R6-CACHE", () => {
@@ -337,10 +333,10 @@ describe("distill-prompt.md — content invariants", () => {
     const lines = template.split("\n");
     const start = lines.findIndex((l) => /^7\. /.test(l));
     expect(start).toBeGreaterThan(-1);
-    // Step 7 ends where step 8 begins.
-    const end = lines.findIndex((l, i) => i > start && /^8\. /.test(l));
-    expect(end).toBeGreaterThan(start);
-    const step7 = lines.slice(start, end).join("\n");
+    // Step 7 is the last step: issue #122 dropped steps 8-9 (squash and
+    // push are wrapper-owned), so step 7 runs to the end of the file.
+    const step7 = lines.slice(start).join("\n");
+    expect(step7.length).toBeGreaterThan(0);
 
     // Each git operation in step 7 must use `git -C {{worktreePath}}`.
     expect(step7).toMatch(/git -C \{\{worktreePath\}\} add -A/);
@@ -390,43 +386,34 @@ describe("distill-prompt.md — content invariants", () => {
     // (a warning, not a failure).
     const lines = template.split("\n");
     const start = lines.findIndex((l) => /^7\. /.test(l));
-    const end = lines.findIndex((l, i) => i > start && /^8\. /.test(l));
-    const step7 = lines.slice(start, end).join("\n");
+    const step7 = lines.slice(start).join("\n");
     expect(step7).toMatch(/nothing in this conversation merits capturing/i);
-    expect(step7).toMatch(/skip steps 7-9/i);
+    expect(step7).toMatch(/skip step 7/i);
     expect(step7).toMatch(/exit/i);
   });
 
-  test("prefix scopes the vault-path prohibition to file-edit phase (CLEAN-4)", () => {
-    // Round 2 regression: Pass 1A's CLEAN-A-2 fix introduced an opening
-    // paragraph that read "Do NOT mix worktree files with the main
-    // vault path" without scope, which contradicts steps 8-9's
-    // explicit `git -C {{vaultPath}}` operations. A literalist agent
-    // could refuse to run step 8's squash-merge against `{{vaultPath}}`.
-    // The prefix must distinguish (1) the distill-content phase
-    // (steps 1-6, edits go to the worktree only) from (2) the
-    // integration phase (steps 7-9, git commands against
-    // `{{vaultPath}}` are correct and required).
-    expect(template).toMatch(/steps 1-6/);
-    expect(template).toMatch(/steps 7-9/);
-    // The integration-phase clause must explicitly call out
-    // `git -C {{vaultPath}}` as legitimate, not a violation.
-    expect(template).toMatch(/git -C \{\{vaultPath\}\}/);
+  test("prefix tells the agent the wrapper lands the branch (issue #122)", () => {
+    // Issue #122 moved integration into the wrapper: the agent no longer
+    // owns squash/push/cleanup, so the prefix must say so and must not
+    // carve out an "integration phase" that legitimises
+    // `git -C {{vaultPath}}` commands. The old CLEAN-4 contradiction
+    // (prefix forbids vault writes, steps 8-9 require them) is resolved
+    // by removing the steps, not by qualifying the prohibition.
+    expect(template).toMatch(/The wrapper that invoked you lands your branch/);
+    expect(template).toMatch(/Your job ends at step 7/);
+    expect(template).toMatch(/do not edit files under `\{\{vaultPath\}\}`/);
+    expect(template).not.toMatch(/git -C \{\{vaultPath\}\}/);
+    expect(template).not.toMatch(/steps 7-9/);
   });
 
-  test("step 9 pull recovery uses --no-rebase (SEC-A-6)", () => {
-    // The agent's pull recovery must override any global
-    // `pull.rebase=true` config the user may have set. Without
-    // `--no-rebase`, a rebase silently rewrites the recovery commit
-    // shape and breaks the design's "linear forensic record" promise.
-    expect(template).toMatch(
-      /git -C \{\{vaultPath\}\} pull --no-rebase origin \{\{defaultBranch\}\}/,
-    );
-    // No bare `git pull origin` (without --no-rebase) anywhere in the
-    // template, so the agent can't be tempted to copy a flagless variant.
-    expect(template).not.toMatch(
-      /git -C \{\{vaultPath\}\} pull origin \{\{defaultBranch\}\}(?!.*--no-rebase)/m,
-    );
+  test("no git command in the prompt targets the live vault (issue #122)", () => {
+    // The vault-path subset of the #117 tool_call gate blocks the agent's
+    // own `git -C <vault>` anyway; the prompt must not invite one, so a
+    // literalist agent never plans around a gate it cannot pass. Any
+    // `git -C {{vaultPath}}` occurrence is a defect: it is either a
+    // landing command or a rule the agent cannot follow.
+    expect(template).not.toMatch(/git -C \{\{vaultPath\}\}/);
+    expect(template).not.toMatch(/\{\{vaultPath\}\} (checkout|merge|commit|push|pull|reset|rebase|update-ref)/);
   });
 
   test("step 7 forbids landing branches", () => {
@@ -436,29 +423,19 @@ describe("distill-prompt.md — content invariants", () => {
     // branch it was given.
     const lines = template.split("\n");
     const start = lines.findIndex((l) => /^7\. /.test(l));
-    const end = lines.findIndex((l, i) => i > start && /^8\. /.test(l));
-    const step7 = lines.slice(start, end).join("\n");
+    const step7 = lines.slice(start).join("\n");
     expect(step7).toMatch(/Do not create landing branches/);
     expect(step7).toMatch(/The only branch you may create or move is/);
   });
 
-  test("step 8 forbids plumbing ref writes on the default branch", () => {
-    // The only sanctioned landing path stays checkout + merge --squash +
-    // commit. Every ref-writing verb that can rewrite main must be named
-    // so a literalist agent cannot infer that a plumbing write is an
-    // acceptable "recovery" when the squash or push fails.
+  test("step 7 forbids plumbing ref writes and every landing verb", () => {
+    // Issue #121 pinned the plumbing-ref prohibitions in step 8; issue
+    // #122 moved landing into the wrapper, so the same prohibitions now
+    // live in step 7 (the last step) together with the landing verbs the
+    // agent must never run. A literalist agent needs every verb named.
     const lines = template.split("\n");
-    const start = lines.findIndex((l) => /^8\. /.test(l));
-    const end = lines.findIndex((l, i) => i > start && /^9\. /.test(l));
-    const step8 = lines.slice(start, end).join("\n");
-
-    expect(step8).toMatch(
-      /git -C \{\{vaultPath\}\} checkout \{\{defaultBranch\}\}/,
-    );
-    expect(step8).toMatch(
-      /git -C \{\{vaultPath\}\} merge --squash \{\{branchName\}\}/,
-    );
-    expect(step8).toMatch(/git -C \{\{vaultPath\}\} commit -m/);
+    const start = lines.findIndex((l) => /^7\. /.test(l));
+    const step7 = lines.slice(start).join("\n");
 
     for (const verb of [
       "git update-ref",
@@ -468,13 +445,26 @@ describe("distill-prompt.md — content invariants", () => {
       "git reset",
       "git rebase",
       "git commit --amend",
+      "git merge --squash",
+      "git push",
       "git fetch .",
     ]) {
-      expect(step8).toContain(verb);
+      expect(step7).toContain(verb);
     }
-    expect(step8).toMatch(/are forbidden on/);
-    expect(step8).toMatch(/drop another session's unpushed commits/);
-    expect(step8).toMatch(/stop and report the failure/);
+    expect(step7).toMatch(/forbidden on any branch/);
+    expect(step7).toMatch(/stop and report the failure/);
+  });
+
+  test("the read-only advisory line is present (issue #122, Q1)", () => {
+    // The gate is the tree-diff check in the wrapper; the prompt line is
+    // advisory only, but it must be present so the agent does not spend
+    // the run editing notes the wrapper will drop (and so a human
+    // reading the prompt sees the rule).
+    expect(template).toMatch(/read-only list \(PR and issue notes\)/);
+    expect(template).toMatch(/projection sources/);
+    expect(template).toMatch(/do not edit, create or delete them/);
+    expect(template).toMatch(/changelog, reflections or daily note/);
+    expect(template).toMatch(/link the PR note/);
   });
 });
 

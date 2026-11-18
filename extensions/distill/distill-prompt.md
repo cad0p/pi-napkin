@@ -1,8 +1,8 @@
 Your distill content lives in the git worktree at {{worktreePath}}. Use `git -C {{worktreePath}}` for all git operations there — your shell cwd is NOT the worktree. Edit files in the worktree by absolute path under `{{worktreePath}}/...` (or `cd {{worktreePath}}` first if your tool supports it).
 
-For the distill-content phase (steps 1-6), edit files only inside `{{worktreePath}}`; do not edit files under `{{vaultPath}}`. Writing distill content to `{{vaultPath}}` directly bypasses the worktree's isolation and causes the merge in steps 7-8 to silently include none of your changes. The integration phase (steps 7-9) explicitly runs `git -C {{vaultPath}}` commands to squash and push — those are correct and required, not a violation of this rule.
+Edit files only inside `{{worktreePath}}`, and do not edit files under `{{vaultPath}}` or run git against `{{vaultPath}}` at all. The wrapper that invoked you lands your branch on `{{defaultBranch}}` itself: it catches the branch up, drops changes to the vault's read-only notes, squashes, pushes and cleans up. Your job ends at step 7 with a committed distill branch.
 
-Distill this conversation into the napkin vault, then integrate your changes back into the main vault yourself. The wrapper that invoked you will only validate the result; it will NOT run merge, squash, push, or cleanup on your behalf.
+Distill this conversation into the napkin vault.
 
 1. `napkin overview` — learn the vault structure and what exists. Read `_about.md` files to understand what each folder is for. These are short folder descriptions (1-2 paragraphs) explaining what kinds of notes belong there — see existing ones for style.
 2. `napkin template list` and `napkin template read` — learn the note formats.
@@ -16,7 +16,9 @@ Distill this conversation into the napkin vault, then integrate your changes bac
 
 Be selective. Only capture knowledge useful to someone working on this project later. Skip meta-discussion, tool output, and chatter.
 
-7. Integrate with main. If you decided nothing in this conversation merits capturing (per "Be selective" above), skip steps 7-9 entirely and exit — the wrapper will classify this as `no-content` and surface a warning to the user. Otherwise, from the worktree at {{worktreePath}}, commit your distilled content first if you haven't already:
+Notes matching the vault's read-only list (PR and issue notes) are projection sources, maintained by the tools that own them: do not edit, create or delete them, and do not work around that by editing the file in place. When you have a finding about a PR or an issue, put it in the namespace's changelog, reflections or daily note and link the PR note instead.
+
+7. Commit and merge in the worktree. If you decided nothing in this conversation merits capturing (per "Be selective" above), skip step 7 entirely and exit — the wrapper will classify this as `no-content` and surface a warning to the user. Otherwise, from the worktree at {{worktreePath}}, commit your distilled content first if you haven't already:
 
        git -C {{worktreePath}} add -A
        git -C {{worktreePath}} commit -m "distill: <one-line summary>"
@@ -32,31 +34,8 @@ Be selective. Only capture knowledge useful to someone working on this project l
        git -C {{worktreePath}} add .
        git -C {{worktreePath}} commit --no-edit
 
-   If `git -C {{worktreePath}} merge --no-edit {{defaultBranch}}` reports "Already up to date" (no merge commit), that's fine — proceed.
+   If `git -C {{worktreePath}} merge --no-edit {{defaultBranch}}` reports "Already up to date" (no merge commit), that's fine — proceed. Never commit a file that still contains conflict markers: the wrapper refuses any run whose branch adds marker lines, and keeps the branch for a human to inspect.
 
-   The only branch you may create or move is `{{branchName}}`. Do not create landing branches (no `distill-land/*`, no per-attempt variants) and never point `{{defaultBranch}}` at a branch tip with plumbing. The step 8 commands are the only way your content reaches `{{defaultBranch}}`.
+   The only branch you may create or move is `{{branchName}}`. Do not create landing branches (no `distill-land/*`, no per-attempt variants) and never write or rewrite any ref with plumbing: `git update-ref`, `git branch -f`, `git checkout -B` / `git switch -C`, `git reset`, `git rebase`, `git commit --amend`, `git merge --squash`, `git push` and `git fetch . <src>:<dst>` are forbidden on any branch. The wrapper is the only thing that lands your content on `{{defaultBranch}}`. If the merge cannot be completed with the commands above, stop and report the failure — do not improvise a workaround.
 
-8. Squash to main. From the main vault at {{vaultPath}}, switch to the default branch and squash-merge your branch:
-
-       git -C {{vaultPath}} checkout {{defaultBranch}}
-       git -C {{vaultPath}} merge --squash {{branchName}}
-       git -C {{vaultPath}} commit -m "distill: <one-line summary of what you captured>"
-
-   Use `--squash` to keep main's history linear (one commit per distill). If `git merge --squash` produces no staged changes (e.g. your distill content was already on main), skip the commit step — there's nothing new to land.
-
-   Those three commands are the only way to land your work. Never write or rewrite the `{{defaultBranch}}` ref directly: `git update-ref`, `git branch -f`, `git checkout -B` / `git switch -C`, `git reset`, `git rebase`, `git commit --amend` and `git fetch . <src>:{{defaultBranch}}` are forbidden on `{{defaultBranch}}` even when a push or merge fails. A plumbing write ignores fast-forward-ness, leaves the worktree untouched, and can drop another session's unpushed commits. If the squash cannot land with the commands above, stop and report the failure — do not improvise a workaround.
-
-9. Push if origin exists. Check `git -C {{vaultPath}} remote -v`. If `origin/{{defaultBranch}}` is configured, push your changes:
-
-       git -C {{vaultPath}} push origin {{defaultBranch}}
-
-   If push fails because the remote moved, recover with pull-merge-push (NOT pull-rebase):
-
-       git -C {{vaultPath}} pull --no-rebase origin {{defaultBranch}}
-       git -C {{vaultPath}} push origin {{defaultBranch}}
-
-   `--no-rebase` forces merge semantics regardless of any global `pull.rebase` config the user may have set.
-
-   NEVER use `--force` or `--force-with-lease`. If push fails for any reason and you cannot recover, stop — do not loop indefinitely. The wrapper will detect local-only state and surface a warning to the user.
-
-Report progress concisely as you go. Stop when steps 1-9 are complete.
+Report progress concisely as you go. Stop after step 7 — the wrapper lands your branch.
