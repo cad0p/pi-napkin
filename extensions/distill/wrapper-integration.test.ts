@@ -147,6 +147,10 @@ describe("wrapper-owned integration (issue #122)", () => {
       expect(warned).toContain("read-only path changed by the distill");
       expect(warned).toContain("area/prs/pr-1.md");
       const refusedDir = path.join(s.vault, ".napkin/distill/refused");
+      // The wrapper made exactly one squash commit for the run.
+      expect(git(s.vault, ["rev-list", "--count", `${r.preSha}..HEAD`])).toBe(
+        "1",
+      );
       const patches = fs.existsSync(refusedDir)
         ? fs.readdirSync(refusedDir)
         : [];
@@ -214,6 +218,15 @@ describe("wrapper-owned integration (issue #122)", () => {
       // Main concurrent lane line survives; the distill line does not.
       expect(landed).toContain("main: lane kept this line");
       expect(landed).not.toContain("distill rewrote this note");
+      // And the run really landed: the wrapper squash commit carries the
+      // agent first non-merge subject. Without this, the assertions above
+      // pass on a wrapper that lands nothing (the pre-#122 behaviour).
+      const subjects = git(s.vault, [
+        "log",
+        "--format=%s",
+        `${r.preSha}..HEAD`,
+      ]);
+      expect(subjects).toContain("distill: pr note edit");
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }

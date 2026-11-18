@@ -57,7 +57,7 @@ describe("resolveDistillScope", () => {
     expect(
       resolveDistillScope({
         NAPKIN_DISTILL_VAULT: VAULT,
-        NAPKIN_DISTILL_WORKTREE: VAULT + "/.napkin/wt",
+        NAPKIN_DISTILL_WORKTREE: `${VAULT}/.napkin/wt`,
       }),
     ).toBeNull();
   });
@@ -66,41 +66,37 @@ describe("resolveDistillScope", () => {
 describe("isPathInside", () => {
   test("matches the directory itself and descendants", () => {
     expect(isPathInside(VAULT, VAULT)).toBe(true);
-    expect(isPathInside(VAULT + "/notes/a.md", VAULT)).toBe(true);
+    expect(isPathInside(`${VAULT}/notes/a.md`, VAULT)).toBe(true);
   });
 
   test("does not match a sibling whose name shares the prefix", () => {
     // /home/user/Goldmine-evil must not count as inside /home/user/Goldmine.
-    expect(isPathInside(VAULT + "-evil/a.md", VAULT)).toBe(false);
+    expect(isPathInside(`${VAULT}-evil/a.md`, VAULT)).toBe(false);
     expect(isPathInside("/home/user", VAULT)).toBe(false);
   });
 });
 
 describe("shellWords", () => {
   test("splits on whitespace and keeps quoted paths whole", () => {
-    expect(
-      shellWords("git -C " + JSON.stringify(VAULT + "/x") + " status"),
-    ).toEqual(["git", "-C", VAULT + "/x", "status"]);
+    expect(shellWords(`git -C ${JSON.stringify(`${VAULT}/x`)} status`)).toEqual(
+      ["git", "-C", `${VAULT}/x`, "status"],
+    );
   });
 });
 
 describe("liveVaultGitTarget", () => {
   test("finds git -C <vault>", () => {
-    expect(
-      liveVaultGitTarget("git -C " + VAULT + " commit -m x", "/p", VAULT),
-    ).toBe(VAULT);
+    expect(liveVaultGitTarget(`git -C ${VAULT} commit -m x`, "/p", VAULT)).toBe(
+      VAULT,
+    );
   });
 
   test("finds --git-dir= and --work-tree= pointed at the vault", () => {
     expect(
-      liveVaultGitTarget(
-        "git --git-dir=" + VAULT + "/.git status",
-        "/p",
-        VAULT,
-      ),
-    ).toBe(VAULT + "/.git");
+      liveVaultGitTarget(`git --git-dir=${VAULT}/.git status`, "/p", VAULT),
+    ).toBe(`${VAULT}/.git`);
     expect(
-      liveVaultGitTarget("git --work-tree " + VAULT + " status", "/p", VAULT),
+      liveVaultGitTarget(`git --work-tree ${VAULT} status`, "/p", VAULT),
     ).toBe(VAULT);
   });
 
@@ -113,7 +109,7 @@ describe("liveVaultGitTarget", () => {
 
   test("allows git against the worktree or an unrelated repo", () => {
     expect(
-      liveVaultGitTarget("git -C " + WORKTREE + " commit -m x", "/p", VAULT),
+      liveVaultGitTarget(`git -C ${WORKTREE} commit -m x`, "/p", VAULT),
     ).toBeNull();
     expect(
       liveVaultGitTarget("git -C /tmp/other status", "/p", VAULT),
@@ -128,32 +124,32 @@ describe("liveVaultGitTarget", () => {
     expect(
       liveVaultGitTarget("napkin append notes/a.md x", "/p", VAULT),
     ).toBeNull();
-    expect(liveVaultGitTarget("ls " + VAULT, "/p", VAULT)).toBeNull();
+    expect(liveVaultGitTarget(`ls ${VAULT}`, "/p", VAULT)).toBeNull();
   });
 });
 
 describe("distillToolGate - the design case-9 matrix", () => {
   test("with the distill env set: vault write/edit blocked", () => {
-    expect(gate("write", { path: VAULT + "/x.md" }).block).toBe(true);
-    expect(gate("edit", { path: VAULT + "/notes/x.md" }).block).toBe(true);
+    expect(gate("write", { path: `${VAULT}/x.md` }).block).toBe(true);
+    expect(gate("edit", { path: `${VAULT}/notes/x.md` }).block).toBe(true);
     // A relative path that resolves into the vault is the same write.
     expect(gate("write", { path: "notes/x.md" }, VAULT).block).toBe(true);
     // The reason names the vault and points at the worktree.
-    expect(gate("write", { path: VAULT + "/x.md" }).reason).toContain(VAULT);
-    expect(gate("write", { path: VAULT + "/x.md" }).reason).toContain(WORKTREE);
+    expect(gate("write", { path: `${VAULT}/x.md` }).reason).toContain(VAULT);
+    expect(gate("write", { path: `${VAULT}/x.md` }).reason).toContain(WORKTREE);
   });
 
   test("with the distill env set: worktree write allowed", () => {
-    expect(gate("write", { path: WORKTREE + "/notes/x.md" }).block).toBe(false);
-    expect(gate("edit", { path: WORKTREE + "/note.md" }).block).toBe(false);
+    expect(gate("write", { path: `${WORKTREE}/notes/x.md` }).block).toBe(false);
+    expect(gate("edit", { path: `${WORKTREE}/note.md` }).block).toBe(false);
   });
 
   test("with the distill env set: git against the vault is blocked", () => {
+    expect(gate("bash", { command: `git -C ${VAULT} commit -m x` }).block).toBe(
+      true,
+    );
     expect(
-      gate("bash", { command: "git -C " + VAULT + " commit -m x" }).block,
-    ).toBe(true);
-    expect(
-      gate("bash", { command: "cd /p && git --git-dir=" + VAULT + "/.git log" })
+      gate("bash", { command: `cd /p && git --git-dir=${VAULT}/.git log` })
         .block,
     ).toBe(true);
     // Bare git when the agent cwd is the vault.
@@ -167,7 +163,7 @@ describe("distillToolGate - the design case-9 matrix", () => {
       gate("bash", { command: "napkin append notes/a.md hello" }).block,
     ).toBe(false);
     expect(
-      gate("bash", { command: "git -C " + WORKTREE + " commit -m x" }).block,
+      gate("bash", { command: `git -C ${WORKTREE} commit -m x` }).block,
     ).toBe(false);
     expect(
       gate("bash", { command: "git status" }, "/home/user/project").block,
@@ -175,17 +171,17 @@ describe("distillToolGate - the design case-9 matrix", () => {
   });
 
   test("with the env unset nothing is blocked", () => {
-    expect(gate("write", { path: VAULT + "/x.md" }, "/p", null).block).toBe(
+    expect(gate("write", { path: `${VAULT}/x.md` }, "/p", null).block).toBe(
       false,
     );
     expect(
-      gate("bash", { command: "git -C " + VAULT + " commit -m x" }, "/p", null)
+      gate("bash", { command: `git -C ${VAULT} commit -m x` }, "/p", null)
         .block,
     ).toBe(false);
   });
 
   test("read is not gated: the agent may read the vault", () => {
-    expect(gate("read", { path: VAULT + "/x.md" }).block).toBe(false);
+    expect(gate("read", { path: `${VAULT}/x.md` }).block).toBe(false);
   });
 });
 
@@ -210,7 +206,7 @@ describe("extension wiring (issue #122)", () => {
       const handler = inner.captured.handlers.tool_call;
       expect(handler).toBeDefined();
       const decision = await handler?.(
-        { toolName: "write", input: { path: VAULT + "/x.md" } },
+        { toolName: "write", input: { path: `${VAULT}/x.md` } },
         {},
       );
       expect(decision?.block).toBe(true);
