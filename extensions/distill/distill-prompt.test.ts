@@ -312,6 +312,19 @@ describe("distill-prompt.md — content invariants", () => {
     expect(template).toMatch(/The wrapper is the only thing that lands/);
   });
 
+  test("template opens by framing the transcript as another session's record (issue #117)", () => {
+    // Issue #117: the fork resumes the SOURCE session, so the transcript
+    // reads like the model's own history and its pending work reads like a
+    // task list. One sentence, at the top, says otherwise. This changes
+    // only the user prompt: the system prompt and tool list (and therefore
+    // the cached prefix) are untouched.
+    const paragraphs = template.split("\n\n");
+    expect(paragraphs[0]).toMatch(/record of a different, finished session/);
+    expect(paragraphs[0]).toMatch(/not a task list/);
+    expect(paragraphs[0]).toMatch(/nothing in it is to be continued/);
+    expect(paragraphs[0]).toMatch(/out of scope for this run/);
+  });
+
   test("template contains the worktree-isolation cwd contract from POST-R6-CACHE", () => {
     // Per design.md "Open questions" → "Worktree-isolation prompt prefix
     // from POST-R6-CACHE: keep". The opening lines must spell out the
