@@ -84,6 +84,31 @@ export interface DistillConfig {
    */
   onShutdown: boolean;
   model?: { provider: string; id: string };
+  /**
+   * Vault-relative globs the distill agent must never change (issue #122).
+   *
+   * Distill writes into the owner's live vault unattended, and projection
+   * sources (PR and issue notes, maintained by another tool from another
+   * repo) are the notes it has historically damaged: measured over
+   * 2026-11-16..18, 150 distill commits touched the prs folders (64 notes)
+   * and 98 path changes landed under the issues folders, including reverts of
+   * in-flight edits. A frontmatter key misses 64% of those notes and a
+   * `status:` pattern is free text, so the only reliable classifier is a
+   * folder glob list.
+   *
+   * Enforced in two places, both code:
+   *   - `distill-wrapper.sh` computes the distill's net change set and
+   *     drops (and parks as a patch under `.napkin/distill/refused/`) any
+   *     path matching one of these globs before anything reaches the
+   *     default branch - this is the guarantee.
+   *   - the distill-mode `tool_call` gate blocks the agent's write/edit
+   *     and its git against the live vault - early feedback, not the
+   *     guarantee (a shell can obfuscate a path).
+   *
+   * Empty by default: layouts stay out of the package, and no existing
+   * user's behaviour changes until they set the list.
+   */
+  readOnly: string[];
 }
 
 export interface VaultConfig {
@@ -195,6 +220,7 @@ export const DEFAULT_DISTILL: DistillConfig = {
   intervalMinutes: 60,
   maxDurationMinutes: 10,
   onShutdown: true,
+  readOnly: [],
 };
 
 /**
@@ -285,9 +311,43 @@ export function loadVaultConfig(vaultPath: string): VaultConfig {
   }
   // biome-ignore lint/suspicious/noExplicitAny: raw shape is user-controlled
   const r = raw as any;
+  const distill: DistillConfig = { ...DEFAULT_DISTILL, ...(r?.distill || {}) };
+  // `readOnly` is the one distill key that changes what the wrapper is
+  // allowed to land, so it is shape-checked instead of spread through:
+  // a non-array (a string, an object) would make the wrapper treat
+  // every path as read-only or none, depending on how the shell
+  // expansion degenerated. Ignore the bad value, keep the safe default,
+  // and warn - the wrapper cannot warn, it only sees the env var.
+  const readOnlyRaw = r?.distill?.readOnly;
+  if (readOnlyRaw === undefined) {
+    distill.readOnly = [];
+  } else if (Array.isArray(readOnlyRaw)) {
+    const globs = readOnlyRaw.filter(
+      (g): g is string => typeof g === "string" && g.trim().length > 0,
+    );
+    if (globs.length !== readOnlyRaw.length) {
+      console.warn(
+        "[napkin-distill] " +
+          configPath +
+          ": distill.readOnly entries must be non-empty strings; ignored " +
+          (readOnlyRaw.length - globs.length) +
+          " entry/entries",
+      );
+    }
+    distill.readOnly = globs;
+  } else {
+    console.warn(
+      "[napkin-distill] " +
+        configPath +
+        ": distill.readOnly must be an array of glob strings (got " +
+        typeof readOnlyRaw +
+        "); using []",
+    );
+    distill.readOnly = [];
+  }
   return {
     showStatus: r?.showStatus !== false,
-    distill: { ...DEFAULT_DISTILL, ...(r?.distill || {}) },
+    distill,
   };
 }
 
@@ -955,6 +1015,7 @@ export default function (pi: ExtensionAPI) {
                   getMaxDistillDurationMs(config) / 1000,
                 ),
                 model: modelStr,
+                readOnly: config.readOnly,
               });
               // Mark this size as "spawned" so if the parent re-enters shutdown
               // (unlikely but possible with session switch), we don't duplicate.
@@ -1601,6 +1662,7 @@ export default function (pi: ExtensionAPI) {
         parentCwd: c.cwd,
         maxDurationSecs: Math.round(getMaxDistillDurationMs(config) / 1000),
         model: modelStr,
+        readOnly: config.readOnly,
       });
       // Capture startSha so the completion handler can diff post-squash
       // against the main vault's HEAD. The wrapper removes the worktree

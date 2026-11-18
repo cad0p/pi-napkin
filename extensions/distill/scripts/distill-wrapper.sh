@@ -828,6 +828,552 @@ validate_start_sha_ancestor() {
   return 2
 }
 
+# --- Issue #122: wrapper-owned integration -------------------------------
+#
+# Until #122 the AGENT landed its own work: it squashed the distill branch
+# into the live vault, pushed, and cleaned up. Nothing in the wrapper looked
+# at WHICH paths changed or WHAT text was added, so a model error landed
+# PR-notes edits (150 commits / 64 notes measured 2026-11-16..18) and
+# committed conflict markers (54 commits / 40 files). The prompt is not a
+# control: the same measurements come from a prompt that already said to
+# be careful.
+#
+# The wrapper now owns steps 8-9 of the old contract. After the agent exits
+# it:
+#   1. serialises per vault (flock, when available);
+#   2. catches the distill branch up to the default branch INSIDE the
+#      worktree (union merge for daily notes; at most one agent re-prompt
+#      to resolve conflicts);
+#   3. computes the net change set and REVERTS every path matching
+#      NAPKIN_DISTILL_READONLY, parking the dropped hunks as a patch under
+#      <vault>/.napkin/distill/refused/ and warning per path;
+#   4. refuses a branch whose ADDED lines carry conflict markers;
+#   5. preflights the live vault (HEAD on default, empty index, none of
+#      the touched paths dirty or untracked, merge-tree clean) and defers
+#      instead of ever stashing another lane work;
+#   6. squash-merges <default> + commits with the agent first subject;
+#   7. pushes, pulling --no-rebase only on a fully clean tracked tree.
+#
+# Deferral/refusal classes (integration-conflict, markers-in-content,
+# deferred-dirty) keep the distill BRANCH and remove the worktree: the
+# branch is the forensic breadcrumb, and the worktree must go because the
+# JS-side poller treats worktree disappearance as the completion signal.
+#
+# Legacy shape: if the branch has no net changes but the live default
+# branch moved since startSha, the agent landed its own commits (the shape
+# the tool_call gate now blocks). The wrapper must never rewrite commits
+# already on the default branch, so it keeps the old commit-count/
+# local-only dispatch, warns, and leaves main alone.
+
+# Seconds to wait for the per-vault integration lock before deferring.
+# Two distills squashing onto the same live checkout interleave otherwise:
+# the second one index would be read by the first one commit.
+INTEGRATE_LOCK_WAIT_SECS=120
+
+# 1 while a deferral/refusal outcome is being written: cleanup() then
+# keeps the distill branch (see keep_branch_and_report).
+KEEP_BRANCH=0
+
+# keep_branch_and_report <outcome-class> <hint>
+#
+# Writes a deferral/refusal outcome and exits. The worktree is removed by
+# the EXIT trap (the JS poller needs that), the branch survives.
+keep_branch_and_report() {
+  local class="$1"
+  local hint="$2"
+  KEEP_BRANCH=1
+  write_outcome "$class" "$hint"
+  exit 1
+}
+
+# serialize_integration <vault>
+#
+# Best-effort per-vault lock held for the whole integrate block. flock(1)
+# is Linux-only; on macOS it is absent, so we warn and proceed (the
+# preflight still catches the damage, it just defers more often).
+#
+# rc 0 = lock held (or unavailable), rc 1 = could not acquire in time.
+serialize_integration() {
+  local vault="$1"
+  local lock_dir="$vault/.napkin/distill"
+  if ! command -v flock >/dev/null 2>&1; then
+    log_warning "flock(1) not on PATH; distill integrations against this vault are not serialised"
+    return 0
+  fi
+  if ! mkdir -p "$lock_dir" 2>/dev/null; then
+    log_warning "could not create $lock_dir; integrations are not serialised"
+    return 0
+  fi
+  if ! exec 9>"$lock_dir/integrate.lock"; then
+    log_warning "could not open $lock_dir/integrate.lock; integrations are not serialised"
+    return 0
+  fi
+  if ! flock -w "$INTEGRATE_LOCK_WAIT_SECS" 9; then
+    exec 9>&-
+    log_warning "waited ${INTEGRATE_LOCK_WAIT_SECS}s for the vault integration lock and gave up"
+    return 1
+  fi
+  return 0
+}
+
+# net_change_set <worktree> <default> <branch>
+#
+# Prints the distill net change set: the paths this branch changes
+# relative to its merge base with the default branch. --no-renames keeps
+# a rename as a delete + an add, so a read-only note moved away still
+# shows up as a touched path. --diff-filter=d would hide deletions; every
+# change class matters here (measured: 5 deleted issue notes).
+#
+# rc 0 = printed, rc 1 = git failed.
+net_change_set() {
+  local wt="$1" default="$2" branch="$3"
+  local out rc
+  out="$(git -C "$wt" diff --name-only --no-renames "$default...$branch" 2>/dev/null)"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log_error "net_change_set: git diff failed (rc $rc) for $default...$branch in $wt"
+    return 1
+  fi
+  printf "%s\n" "$out" | sed "/^$/d"
+  return 0
+}
+
+# prepare_union_attributes <worktree>
+#
+# Writes a throwaway attributes file declaring `merge=union` for daily
+# notes and prints its path. Daily notes are append logs, and 28 of the
+# 40 files measured with committed markers were dailies: a union merge
+# removes that whole class of conflict without letting the agent resolve
+# a file it should not touch.
+#
+# The file lives under the worktree gitignored .napkin/distill/ dir, so
+# it disappears with the worktree and never needs a TMPDIR write.
+#
+# rc 0 = printed, rc 1 = could not write (caller merges without union).
+prepare_union_attributes() {
+  local wt="$1"
+  local dir="$wt/.napkin/distill"
+  local attr="$dir/union.attributes"
+  if ! mkdir -p "$dir" 2>/dev/null; then
+    return 1
+  fi
+  if ! {
+    printf "%s\n" "# Generated by distill-wrapper (issue #122). Daily notes are append";
+    printf "%s\n" "# logs: union both sides instead of leaving markers for a model to";
+    printf "%s\n" "# resolve. Patterns match relative to the repo root.";
+    printf "%s\n" "**/daily/*.md merge=union"
+  } > "$attr" 2>/dev/null; then
+    return 1
+  fi
+  printf "%s\n" "$attr"
+  return 0
+}
+
+# catch_up_branch <worktree> <default>
+#
+# Merges the default branch into the distill branch inside the worktree.
+# This is the ONLY place a merge with conflicts may happen: the live
+# vault only ever receives a squash that the preflight proved clean.
+#
+# rc 0 = up to date or merged cleanly
+# rc 1 = merge left conflicts in the worktree (caller re-prompts once)
+# rc 2 = git failed for another reason
+catch_up_branch() {
+  local wt="$1" default="$2"
+  local attrs attr_args=()
+  attrs="$(prepare_union_attributes "$wt" 2>/dev/null || true)"
+  if [ -n "$attrs" ]; then
+    attr_args=(-c "core.attributesFile=$attrs")
+  fi
+  local out rc
+  out="$(git "${attr_args[@]}" -C "$wt" merge --no-edit "$default" 2>&1)"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    return 0
+  fi
+  if git -C "$wt" ls-files -u 2>/dev/null | grep -q .; then
+    log_warning "catch-up merge left conflicts in the worktree: $(printf "%s" "$out" | head -3 | tr "\n" " ")"
+    return 1
+  fi
+  log_error "catch-up merge failed (rc $rc): $out"
+  return 2
+}
+
+# resolve_conflicts_with_agent <worktree> <default>
+#
+# One bounded re-run of the SAME agent on the SAME session fork, told to
+# resolve the conflicted files and touch nothing else. Same session means
+# the prompt cache still pays off; "once" means a bad resolver cannot loop.
+#
+# rc 0 = conflicts resolved and committed, rc 1 = still conflicted.
+resolve_conflicts_with_agent() {
+  local wt="$1" default="$2"
+  if [ "${NAPKIN_DISTILL_SKIP_PI:-}" = "1" ]; then
+    log_warning "NAPKIN_DISTILL_SKIP_PI=1; not re-prompting the agent to resolve conflicts"
+    return 1
+  fi
+  local prompt
+  prompt="Your distill branch has unresolved merge conflicts after merging $default. Resolve every conflicted file in the worktree at $wt in place: remove all <<<<<<<, =======, >>>>>>> and ||||||| marker lines and keep the correct merged content. Then run: git -C $wt add -A && git -C $wt commit --no-edit. Touch nothing else: do not squash, merge, push, reset, rebase or amend, and do not edit files outside the worktree. If a file cannot be resolved, leave it and say so."
+  local pi_bin="${NAPKIN_DISTILL_PI_BIN:-pi}"
+  local err rc=0
+  err="$(mktemp -t napkin-distill-resolve_stderr.XXXXXX)"
+  NAPKIN_DISTILL_NO_RECURSE=1 \
+    "$TIMEOUT_BIN" --foreground -k "$TIMEOUT_KILL_GRACE_SECS" "$MAX_DURATION_SECS" \
+      "$pi_bin" --session "$SESSION_FORK" -p "$prompt" > /dev/null 2> "$err" || rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log_error "conflict-resolution re-prompt exited $rc; stderr follows:"
+    cat "$err" >> "$ERROR_LOG" 2>/dev/null || true
+  fi
+  rm -f "$err"
+  if git -C "$wt" ls-files -u 2>/dev/null | grep -q .; then
+    log_warning "conflict-resolution re-prompt left unresolved index entries"
+    return 1
+  fi
+  if git -C "$wt" rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+# The resolver edited the files but did not commit; commit for it so the
+# merge is concluded. A failure here means the resolution is incomplete.
+    if ! git -C "$wt" commit --no-edit -q >/dev/null 2>&1; then
+      log_warning "conflict-resolution re-prompt left a merge in progress that could not be concluded"
+      return 1
+    fi
+  fi
+  return 0
+}
+
+# refused_patch_path <vault> <branch>
+#
+# Where the hunks dropped by the read-only gate are parked:
+# <vault>/.napkin/distill/refused/<branch-short>.patch. Gitignored
+# (.napkin/distill/ is the wrapper own scratch dir), append-only per
+# branch, and the warning names it so a human can recover the finding.
+refused_patch_path() {
+  local vault="$1" branch="$2"
+  local dir="$vault/.napkin/distill/refused"
+  mkdir -p "$dir" 2>/dev/null || return 1
+  printf "%s\n" "$dir/${branch#distill/}.patch"
+  return 0
+}
+
+# gated_paths <worktree> <default> <branch>
+#
+# Prints the subset of the net change set that matches a read-only glob.
+# Matching uses git own pathspec glob matcher (":(glob)<glob>") instead of
+# a bash [[ $p == $g ]] comparison: git is the reference for **
+# semantics, needs no globstar shell option, and handles the vault
+# unusual paths the same way the rest of the wrapper does.
+gated_paths() {
+  local wt="$1" default="$2" branch="$3" glob
+  while IFS= read -r glob; do
+    if [ -z "$glob" ]; then
+      continue
+    fi
+    git -C "$wt" diff --name-only --no-renames "$default...$branch" \
+      -- ":(glob)$glob" 2>/dev/null
+  done < <(printf "%s\n" "${NAPKIN_DISTILL_READONLY:-}")
+  return 0
+}
+
+# revert_gated_paths <worktree> <default> <branch> <paths>
+#
+# For every gated path: park its hunks in the refused patch, then restore
+# the default-branch version (or delete it when the default branch does
+# not have it). Commits only those paths, so an agent that left unrelated
+# work uncommitted cannot smuggle it into the drop commit.
+#
+# rc 0 = dropped and committed, rc 1 = nothing to do, rc 2 = failed.
+revert_gated_paths() {
+  local wt="$1" default="$2" branch="$3" paths="$4"
+  if [ -z "$paths" ]; then
+    return 1
+  fi
+  local patch
+  patch="$(refused_patch_path "$VAULT" "$branch" 2>/dev/null || true)"
+  local p
+  local dropped=0
+  while IFS= read -r p; do
+    if [ -z "$p" ]; then
+      continue
+    fi
+    log_warning "read-only path changed by the distill, dropping it: $p"
+    if [ -n "$patch" ]; then
+      {
+        printf "%s\n" "--- dropped from $branch: $p ---"
+        git -C "$wt" diff "$default...$branch" -- "$p" 2>/dev/null
+        printf "\n"
+      } >> "$patch" 2>/dev/null || log_warning "could not append to refused patch $patch"
+    fi
+    if git -C "$wt" cat-file -e "$default:$p" 2>/dev/null; then
+      if git -C "$wt" checkout -q "$default" -- "$p" 2>/dev/null; then
+        dropped=$((dropped + 1))
+      fi
+    else
+      if git -C "$wt" rm -q -- "$p" 2>/dev/null; then
+        dropped=$((dropped + 1))
+      fi
+    fi
+  done <<< "$paths"
+  if [ "$dropped" -eq 0 ]; then
+    log_error "revert_gated_paths: could not revert any read-only path in the worktree"
+    return 2
+  fi
+  if ! git -C "$wt" commit -q -m "distill: drop changes to read-only notes" \
+       -- $paths >/dev/null 2>&1; then
+    log_error "revert_gated_paths: the drop commit failed in the worktree"
+    return 2
+  fi
+  return 0
+}
+
+# added_marker_lines <worktree> <default> <branch>
+#
+# Prints ADDED lines that are git own conflict-marker lines, labelled the
+# way git labels them. Only added lines and only git labels, so a note
+# that DISCUSSES markers never trips the gate, while a run that committed
+# an unresolved merge always does (measured labels: "<<<<<<< HEAD" 62,
+# ">>>>>>> main" 35, ">>>>>>> distill/<x>" 27).
+added_marker_lines() {
+  local wt="$1" default="$2" branch="$3"
+  local pattern="^(<<<<<<< (HEAD|ours)|>>>>>>> (${default}|theirs|distill/.*)|\\|\\|\\|\\|\\|\\|\\| )"
+  git -C "$wt" diff --unified=0 "$default...$branch" 2>/dev/null \
+    | grep -E "^\+" \
+    | grep -vE "^\+\+\+ " \
+    | cut -c2- \
+    | grep -E "$pattern"
+  return 0
+}
+
+# live_vault_preflight <vault> <default> <branch> <paths>
+#
+# Everything the squash needs to be a pure fast-forward-like write onto a
+# clean checkout. No stash, ever: a dirty touched path defers instead,
+# because stashing another lane uncommitted work is the defect this issue
+# removes (71 stash entries in Goldmine, 56 naming distill).
+#
+# rc 0 = safe to land, rc 1 = defer (reason in the warning log).
+live_vault_preflight() {
+  local vault="$1" default="$2" branch="$3" paths="$4"
+  local head
+  head="$(git -C "$vault" symbolic-ref --short HEAD 2>/dev/null || true)"
+  if [ "$head" != "$default" ]; then
+    log_warning "live-vault preflight: HEAD is ${head:-detached}, expected $default"
+    return 1
+  fi
+  if ! git -C "$vault" diff --cached --quiet >/dev/null 2>&1; then
+    log_warning "live-vault preflight: the live index already has staged changes; refusing to sweep another lane change into the distill commit"
+    return 1
+  fi
+  local p dirty
+  while IFS= read -r p; do
+    if [ -z "$p" ]; then
+      continue
+    fi
+    dirty="$(git -C "$vault" status --porcelain -- "$p" 2>/dev/null)"
+    if [ -n "$dirty" ]; then
+      log_warning "live-vault preflight: $p is dirty in the live vault (first line: $(printf "%s" "$dirty" | head -1)); deferring instead of stashing"
+      return 1
+    fi
+  done <<< "$paths"
+  git -C "$vault" merge-tree --write-tree "$default" "$branch" >/dev/null 2>&1
+  local mtrc=$?
+  if [ "$mtrc" -eq 1 ]; then
+    log_warning "live-vault preflight: merge-tree reports a conflict landing $branch on $default"
+    return 1
+  fi
+  if [ "$mtrc" -ne 0 ]; then
+# merge-tree --write-tree needs git 2.38; older git falls through to the
+# squash own refusal, which is checked below.
+    log_warning "live-vault preflight: merge-tree unavailable (rc $mtrc; git older than 2.38?); relying on the squash refusal"
+  fi
+  return 0
+}
+
+# abandon_squash <vault> <paths>
+#
+# Undoes a failed squash without touching any path outside the net change
+# set: unstage, then restore each path from HEAD (or delete a path HEAD
+# does not have). Never a hard reset in the live vault.
+abandon_squash() {
+  local vault="$1" paths="$2" p
+  git -C "$vault" reset -q >/dev/null 2>&1 || true
+  while IFS= read -r p; do
+    if [ -z "$p" ]; then
+      continue
+    fi
+    if git -C "$vault" cat-file -e "HEAD:$p" 2>/dev/null; then
+      git -C "$vault" checkout -q HEAD -- "$p" >/dev/null 2>&1 || true
+    else
+      rm -f "$vault/$p" 2>/dev/null || true
+    fi
+  done <<< "$paths"
+  return 0
+}
+
+# distill_subject <worktree> <default> <branch>
+#
+# The squash commit message: the agent first non-merge commit subject,
+# which is the prompt "distill: <one-line summary>" line.
+distill_subject() {
+  local wt="$1" default="$2" branch="$3"
+  local subject
+  subject="$(git -C "$wt" log --no-merges --reverse --format=%s "$default..$branch" 2>/dev/null | head -1)"
+  if [ -z "$subject" ]; then
+    subject="distill: capture"
+  fi
+  printf "%s\n" "$subject"
+  return 0
+}
+
+# land_and_push <vault> <default>
+#
+# rc 0 = pushed (or no origin configured), rc 1 = merged-local,
+# rc 2 = divergent-history.
+#
+# The pull is guarded: --no-rebase because a rebase would rewrite the
+# squash commit, and only on a COMPLETELY clean tracked tree, because a
+# conflicted pull on top of other lane changes cannot be aborted back to
+# their exact state. Untracked files are ignored: git refuses to
+# overwrite them anyway, so they cannot be damaged by the pull, and the
+# wrapper own .napkin/distill scratch files are untracked in a vault that
+# never ran napkin init.
+land_and_push() {
+  local vault="$1" default="$2"
+  if ! git -C "$vault" remote get-url origin >/dev/null 2>&1; then
+    return 0
+  fi
+  if git -C "$vault" push origin "$default" >/dev/null 2>&1; then
+    return 0
+  fi
+  log_warning "push to origin/$default failed"
+  local tracked_dirty
+  tracked_dirty="$(git -C "$vault" status --porcelain --untracked-files=no 2>/dev/null)"
+  if [ -n "$tracked_dirty" ]; then
+    log_warning "tracked changes from another lane are present; not pulling (never stash another lane work)"
+    return 1
+  fi
+  if git -C "$vault" pull --no-rebase origin "$default" >/dev/null 2>&1; then
+    if git -C "$vault" push origin "$default" >/dev/null 2>&1; then
+      return 0
+    fi
+    log_warning "pull --no-rebase succeeded but the retry push failed"
+    return 1
+  fi
+  git -C "$vault" merge --abort >/dev/null 2>&1 || true
+  if git -C "$vault" rev-parse -q --verify "origin/$default" >/dev/null 2>&1 \
+     && git -C "$vault" merge-base --is-ancestor "origin/$default" "$default" 2>/dev/null; then
+    log_warning "pull --no-rebase failed while origin is still an ancestor; surfacing merged-local"
+    return 1
+  fi
+  log_error "pull --no-rebase failed and origin/$default is not an ancestor of $default (divergent histories)"
+  return 2
+}
+
+# integrate_branch <vault_commit_count>
+#
+# The wrapper-owned landing (issue #122). Writes its own outcome and
+# exits on every deferral/refusal path; returns to the caller only with:
+#   0  - landed and pushed (or no origin configured) -> merged-content
+#   1  - landed locally, push blocked               -> merged-local
+#   2  - landed locally, origin diverged            -> failed:divergent-history
+#   10 - nothing to land from the branch            -> legacy/no-content dispatch
+integrate_branch() {
+  local vault_count="$1"
+  local wt="$WORKTREE" default="$DEFAULT_BRANCH" branch="$BRANCH"
+
+  # 1. Serialise per vault so two distills cannot interleave squashes on
+  # the same live checkout.
+  if ! serialize_integration "$VAULT"; then
+    keep_branch_and_report "deferred-dirty" \
+      "Another distill holds the integration lock ($VAULT/.napkin/distill/integrate.lock). The distill branch $branch was kept: merge it by hand with 'git -C $VAULT merge --squash $branch' once the other run finishes, or re-run distill."
+  fi
+
+  # 2. Catch up INSIDE the worktree: the only place a merge may conflict.
+  catch_up_branch "$wt" "$default"
+  local catch_rc=$?
+  if [ "$catch_rc" -eq 1 ]; then
+    if resolve_conflicts_with_agent "$wt" "$default"; then
+      log_warning "catch-up merge conflicts were resolved by one agent re-prompt"
+    else
+      git -C "$wt" merge --abort >/dev/null 2>&1 || true
+      keep_branch_and_report "integration-conflict" \
+        "The distill branch $branch could not be merged with $default: conflicts remained after one agent re-prompt, so the merge was aborted. Nothing reached $default. The branch was kept: resolve it by hand with 'git -C $VAULT merge --no-edit $branch' or re-run distill."
+    fi
+  elif [ "$catch_rc" -ne 0 ]; then
+    git -C "$wt" merge --abort >/dev/null 2>&1 || true
+    keep_branch_and_report "integration-conflict" \
+      "git could not merge $default into the distill branch $branch (see the error log). Nothing reached $default. The branch was kept for inspection."
+  fi
+
+  # 3. Net change set, then drop anything matching the read-only globs.
+  local paths
+  if ! paths="$(net_change_set "$wt" "$default" "$branch")"; then
+    keep_branch_and_report "integration-conflict" \
+      "Could not compute the distill net change set (git diff failed in the worktree). Nothing reached $default. The branch was kept."
+  fi
+  local gated
+  gated="$(gated_paths "$wt" "$default" "$branch" | sort -u)"
+  if [ -n "$gated" ]; then
+    revert_gated_paths "$wt" "$default" "$branch" "$gated"
+    if [ $? -eq 2 ]; then
+      keep_branch_and_report "integration-conflict" \
+        "The distill changed read-only notes and the wrapper could not drop those changes in the worktree. Nothing reached $default. The branch was kept."
+    fi
+    paths="$(net_change_set "$wt" "$default" "$branch")"
+  fi
+
+  if [ -z "$paths" ]; then
+    if [ "$vault_count" -gt 0 ]; then
+      log_warning "the agent landed $vault_count commit(s) on $default itself, so the worktree gates could not run; commits already on the default branch are never rewritten (issue #122). This is the shape the distill-mode tool_call gate blocks."
+      return 10
+    fi
+    # Everything the agent wrote was read-only, or it wrote nothing.
+    write_outcome "no-content"
+    exit 0
+  fi
+
+  # 4. Refuse committed conflict markers.
+  local markers
+  markers="$(added_marker_lines "$wt" "$default" "$branch")"
+  if [ -n "$markers" ]; then
+    log_error "the distill branch adds git conflict-marker lines; refusing to land it: $(printf "%s" "$markers" | head -3 | tr "\n" " ")"
+    keep_branch_and_report "markers-in-content" \
+      "The distill branch $branch adds git conflict-markers to its content, so it was not landed. Inspect 'git -C $VAULT diff $default...$branch', fix or drop the markers, then merge the branch by hand. Nothing reached $default."
+  fi
+
+  # 5. Live-vault preflight: clean HEAD, clean index, clean touched paths,
+  # no conflict. Defers rather than stashing another lane work.
+  if ! live_vault_preflight "$VAULT" "$default" "$branch" "$paths"; then
+    keep_branch_and_report "deferred-dirty" \
+      "The live vault was not clean enough to land the distill ($(printf "%s" "$paths" | head -1) or another lane change). Nothing was stashed and nothing reached $default. The branch was kept: re-run distill, or merge it by hand with 'git -C $VAULT merge --squash $branch'."
+  fi
+
+  # 6. Squash onto the default branch. The branch contains the default tip,
+  # so the squash writes exactly the net change set.
+  local subject
+  subject="$(distill_subject "$wt" "$default" "$branch")"
+  if ! git -C "$VAULT" merge --squash "$branch" >/dev/null 2>&1; then
+    log_error "git merge --squash $branch failed in the live vault"
+    abandon_squash "$VAULT" "$paths"
+    keep_branch_and_report "deferred-dirty" \
+      "git merge --squash $branch was refused by the live vault (another lane changed a touched path between the preflight and the squash). The changes were reverted and nothing reached $default. The branch was kept."
+  fi
+  if git -C "$VAULT" diff --cached --quiet >/dev/null 2>&1; then
+    log_warning "the squash produced no staged changes even though the branch had a net change set"
+    abandon_squash "$VAULT" "$paths"
+    write_outcome "no-content"
+    exit 0
+  fi
+  if ! git -C "$VAULT" commit -q -m "$subject" >/dev/null 2>&1; then
+    log_error "git commit for the squash failed in the live vault"
+    abandon_squash "$VAULT" "$paths"
+    keep_branch_and_report "deferred-dirty" \
+      "The squash committed nothing ($VAULT commit failed, e.g. a hook). The staged changes were reverted and nothing reached $default. The branch was kept."
+  fi
+
+  # 7. Push.
+  land_and_push "$VAULT" "$default"
+  return $?
+}
+
 # detect_local_only <vault> <default_branch>
 #
 # Determines whether the vault has commits on `<default_branch>` that
@@ -942,8 +1488,13 @@ cleanup() {
   # Prune in case the worktree entry is stale but the dir is gone.
   git -C "$VAULT" worktree prune 2>/dev/null || true
   # -D (force) because the distill branch is never marked "merged" (we use
-  # squash merge on main, which leaves the branch dangling).
-  git -C "$VAULT" branch -D "$BRANCH" 2>/dev/null || true
+  # squash merge on main, which leaves the branch dangling). Issue #122:
+  # deferral/refusal outcomes set KEEP_BRANCH=1 so the branch survives as
+  # the forensic breadcrumb (the worktree still goes: the JS poller treats
+  # its disappearance as the completion signal).
+  if [ "${KEEP_BRANCH:-0}" -eq 0 ]; then
+    git -C "$VAULT" branch -D "$BRANCH" 2>/dev/null || true
+  fi
   # Best-effort rmdir of the parent vault-hash dir — succeeds when this
   # was the last distill for the vault. ENOTEMPTY (other concurrent
   # distills) and ENOENT (race) are both expected and benign.
@@ -1405,24 +1956,44 @@ if [ -z "$VAULT_COMMIT_COUNT" ]; then
   exit 1
 fi
 
-if [ "$VAULT_COMMIT_COUNT" -eq 0 ]; then
-  # Genuine no-op — agent ran but produced nothing for main. Outcome
-  # surfaces as a `warning` notification per the locked notification
-  # severity contract.
-  write_outcome "no-content"
+# --- Issue #122: the wrapper lands the branch -------------------------------
+#
+# Everything below this point used to be the agent's step 8-9 (squash onto
+# the default branch, push). The wrapper now computes what the run actually
+# changed, refuses read-only paths and committed markers, preflights the
+# live checkout and owns the squash + push, so the guarantees are enforced
+# on the RESULT (a tree diff) rather than on the commands a model chose to
+# run. See the integrate block above for the per-step contract.
+integrate_branch "$VAULT_COMMIT_COUNT"
+INTEGRATE_RC=$?
+
+if [ "$INTEGRATE_RC" -eq 0 ]; then
+  # Landed and pushed (or no origin configured).
+  write_outcome "merged-content"
   exit 0
 fi
+if [ "$INTEGRATE_RC" -eq 1 ]; then
+  # Landed locally; the push did not land. Existing warning class.
+  write_outcome "merged-local"
+  exit 0
+fi
+if [ "$INTEGRATE_RC" -eq 2 ]; then
+  log_error "origin/$DEFAULT_BRANCH diverged from local $DEFAULT_BRANCH after the guarded pull; the squash commit is local-only and the branch is kept"
+  record_dangling_sha
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "divergent-history"
+  exit 1
+fi
 
-# CORR-2 (Phase C Round 1): design.md "Mocked-pi behaviors" #6 — agent
-# committed 2+ times to default directly (rather than to its branch +
-# squash-merge). The wrapper accepts the outcome as `merged-content`
-# (the dispatch is no-content vs has-content; the squash invariant is
-# a soft suggestion baked into the prompt, not a hard wrapper-side
-# constraint), but logs a warning so the forensic record reflects
-# that the squash didn't collapse to one commit. Keeps the design's
-# spec literally implemented.
+# INTEGRATE_RC 10: the branch had no net changes while the default branch
+# moved since startSha, i.e. the run landed its own commits straight onto
+# <default> (the pre-#122 agent contract, and the shape the distill-mode
+# tool_call gate blocks). The wrapper NEVER rewrites commits that are
+# already on the default branch - a compensating commit would clobber the
+# concurrent edit that shares those paths - so it keeps the legacy
+# commit-count / local-only classification and says so in the warning log
+# (written by integrate_branch).
 if [ "$VAULT_COMMIT_COUNT" -gt 1 ]; then
-  log_warning "validate_commit_count: agent landed $VAULT_COMMIT_COUNT commits on $DEFAULT_BRANCH since startSha (squash-invariant violation; expected 1). Outcome accepted as merged-content but the squash didn't collapse to a single commit."
+  log_warning "validate_commit_count: $VAULT_COMMIT_COUNT commits on $DEFAULT_BRANCH since startSha (squash-invariant violation; expected 1). Outcome accepted as merged-content but the squash didn't collapse to a single commit."
 fi
 
 # Run merged-local / divergent-history detection. detect_local_only returns:

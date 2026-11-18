@@ -413,7 +413,9 @@ describe("distill-prompt.md — content invariants", () => {
     // `git -C {{vaultPath}}` occurrence is a defect: it is either a
     // landing command or a rule the agent cannot follow.
     expect(template).not.toMatch(/git -C \{\{vaultPath\}\}/);
-    expect(template).not.toMatch(/\{\{vaultPath\}\} (checkout|merge|commit|push|pull|reset|rebase|update-ref)/);
+    expect(template).not.toMatch(
+      /\{\{vaultPath\}\} (checkout|merge|commit|push|pull|reset|rebase|update-ref)/,
+    );
   });
 
   test("step 7 forbids landing branches", () => {

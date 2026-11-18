@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 
 import { DISTILL_PROMPT_CACHE_KEY_ENV } from "./distill-workspace";
 import {
@@ -201,6 +201,67 @@ describe("loadVaultConfig", () => {
       provider: "kiro",
       id: "claude-sonnet-4-6",
     });
+  });
+
+  // Issue #122: distill.readOnly is the one distill key that changes what
+  // the wrapper may land, so it is shape-checked rather than spread like
+  // the other keys (a non-array would make the wrapper's glob matching
+  // degenerate). Default [] keeps existing vaults unchanged.
+  test("distill.readOnly defaults to [] (no note is read-only by default)", () => {
+    const vault = track(makeVault(JSON.stringify({ distill: {} })));
+    const cfg = loadVaultConfig(vault);
+    expect(cfg.distill.readOnly).toEqual([]);
+  });
+
+  test("distill.readOnly passes a string array through verbatim", () => {
+    const vault = track(
+      makeVault(
+        JSON.stringify({
+          distill: { enabled: true, readOnly: ["**/prs/**", "**/issues/**"] },
+        }),
+      ),
+    );
+    const cfg = loadVaultConfig(vault);
+    expect(cfg.distill.readOnly).toEqual(["**/prs/**", "**/issues/**"]);
+    // Other keys still merge over defaults.
+    expect(cfg.distill.enabled).toBe(true);
+    expect(cfg.distill.onShutdown).toBe(true);
+  });
+
+  test("distill.readOnly drops non-string entries and warns", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const vault = track(
+        makeVault(
+          JSON.stringify({ distill: { readOnly: ["**/prs/**", 7, "", null] } }),
+        ),
+      );
+      const cfg = loadVaultConfig(vault);
+      expect(cfg.distill.readOnly).toEqual(["**/prs/**"]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain(
+        "distill.readOnly entries must be non-empty strings",
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  test("distill.readOnly that is not an array is ignored with a warning", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const vault = track(
+        makeVault(JSON.stringify({ distill: { readOnly: "**/prs/**" } })),
+      );
+      const cfg = loadVaultConfig(vault);
+      expect(cfg.distill.readOnly).toEqual([]);
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain(
+        "distill.readOnly must be an array of glob strings",
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 
