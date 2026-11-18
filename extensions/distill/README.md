@@ -41,6 +41,7 @@ All distill settings live in `.napkin/config.json` under the `distill` key:
 |-------|---------|-------------|
 | `distill.enabled` | `false` | Enable automatic distillation |
 | `distill.intervalMinutes` | `60` | How often to check for new content |
+| `distill.readOnly` | `[]` | Vault-relative globs the distill must never change (e.g. `["**/prs/**", "**/issues/**"]`). The wrapper drops matching paths from the run before anything reaches the default branch, parks the hunks under `.napkin/distill/refused/` and warns. |
 | `distill.model.provider` | `"anthropic"` | LLM provider |
 | `distill.model.id` | `"claude-sonnet-4-6"` | Model for distillation |
 
@@ -85,3 +86,4 @@ Persistent vault-wide opt-out still lives in `.napkin/config.json` (`distill.ena
 - If `distill.enabled` is `false` in the vault config, the command warns that the session flag has no effect — enable distill in the vault config first.
 - Forking a session with auto-distill off carries the state forward (the CustomEntry is copied with the rest of the session). Run `/distill-auto-this-session on` in the fork to turn it back on.
 - The wrapper writes `failed:history-rewrite` (an error, never `merged-content`) when the vault's default branch post-run tip does not descend from the tip recorded before the agent ran. That means the branch was rewritten rather than fast-forwarded or merged, which can orphan another session's unpushed commits; the outcome's recovery hint names the reflog and cherry-pick path.
+- The wrapper lands the distill branch itself (issue #122): catch-up merge in the worktree, read-only revert, conflict-marker refusal, live-vault preflight, squash, push. The agent stops at a committed branch, and in a distill run an in-process `tool_call` gate blocks its writes into the live vault and its `git` there. Deferral/refusal outcomes (`integration-conflict`, `markers-in-content`, `deferred-dirty`) keep the distill branch and remove the worktree; `git branch --list 'distill/*'` shows what a run left behind.

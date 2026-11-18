@@ -208,6 +208,7 @@ Or edit `<vault>/.napkin/config.json` directly:
     "enabled": true,
     "intervalMinutes": 60,
     "onShutdown": true,
+    "readOnly": ["**/prs/**", "**/issues/**"],
     "model": { "provider": "kiro", "id": "claude-sonnet-4-6" }
   }
 }
@@ -221,6 +222,7 @@ Or edit `<vault>/.napkin/config.json` directly:
 | `distill.intervalMinutes` | `60` | Timer interval. |
 | `distill.maxDurationMinutes` | `10` | Maximum wall-clock duration a detached distill subprocess is allowed before the parent's poll loop declares it stuck and force-cleans its worktree. Values `<= 0` or non-finite silently fall back to the 10-minute default so a bad config can't disable the timeout entirely. Lower this for short-session vaults where a 10-minute hang is unacceptable; raise it for vaults with large merge windows or slow providers. |
 | `distill.onShutdown` | `true` | Also run a final distill at pi shutdown, to capture anything the interval missed. |
+| `distill.readOnly` | `[]` | Vault-relative globs the distill must never change. Before anything reaches the default branch the wrapper computes the net change set of the run, drops every matching path (modified, created or deleted), parks the dropped hunks under `<vault>/.napkin/distill/refused/` and warns. Use it for notes another tool projects into the vault from another repo: PR and issue notes are the measured case (150 distill commits touched `prs` notes and 98 path changes landed under `issues` in three days, including reverts of in-flight edits). Matching uses git pathspec globs, so `**/prs/**` covers `<namespace>/prs/**`. Empty by default: no layout knowledge in the package. |
 | `distill.model.provider` | `"anthropic"` | Model provider for the distill subprocess. |
 | `distill.model.id` | `"claude-sonnet-4-6"` | Model ID. Prefer a cheap, fast model — distill is automated, not interactive. |
 
@@ -248,7 +250,7 @@ The distill subprocess runs a prompt that asks the model to:
 When you enable `distill.enabled: true` on a vault that isn't a git repo, pi-napkin auto-initializes it on the next session start:
 
 1. Runs `git init`.
-2. Installs the [managed `.gitignore` block](#auto-distill-setup) (excludes `.napkin/distill/` — the per-worktree session fork). Distill worktrees themselves live outside the vault (see [Where worktrees live](#where-worktrees-live)), so `.gitignore` doesn't need to exclude them. No `.gitattributes` is written — the agent-driven merge architecture has no driver to register.
+2. Installs the [managed `.gitignore` block](#auto-distill-setup) (excludes `.napkin/distill/` — the per-worktree session fork). Distill worktrees themselves live outside the vault (see [Where worktrees live](#where-worktrees-live)), so `.gitignore` doesn't need to exclude them. No `.gitattributes` is written in the vault: the wrapper's catch-up merge declares `**/daily/*.md merge=union` through a throwaway `core.attributesFile` under the worktree's gitignored `.napkin/distill/`, so the vault's own attributes are never touched.
 3. Commits everything as `napkin: initial vault commit (auto-distill setup)`.
 4. Notifies you once, with instructions to undo (`rm -rf <vault>/.git`) or opt out (`distill.enabled: false`).
 
@@ -274,19 +276,23 @@ Running multiple pi sessions against the same vault (for example, autonomous age
 
 Each auto-distill invocation (interval fire or shutdown) creates its own temporary branch and worktree under `$XDG_CACHE_HOME/napkin-distill/<vault-hash>/<branch-suffix>/` (typically `~/.cache/napkin-distill/…`). pi runs at the **parent session's cwd** (not the worktree) so the system prompt's `Current working directory:` line stays byte-identical to the parent's, preserving prompt-cache hits. Vault writes from the agent's bash tool are routed back to the worktree by a per-distill napkin shim at `<worktree>/.napkin/distill/bin/napkin` that injects `--vault <worktree>` into every napkin invocation. See [Where worktrees live](#where-worktrees-live) for why the worktree dir is external to the vault.
 
-### How distill resolves conflicts
+### How distill lands its work
 
-The distill agent owns the full lifecycle: produce content → merge default branch into the distill branch → squash to default → push to origin (if configured) → clean up. The wrapper does NOT invoke a per-file merge driver; the model that wrote the content also resolves any conflicts that surface when the worktree is reconciled with main.
+The agent produces content and STOPS at a committed distill branch. The wrapper owns landing: it merges the default branch into the branch inside the worktree, drops anything the vault marks read-only, refuses committed conflict markers, proves the live checkout is clean, squash-merges one commit onto the default branch, and pushes. Two consequences matter:
+
+- **The gates judge the result, not the commands.** A path change is a path change whether it came from `write`, `edit`, `sed -i` or a merge conflict resolution, so the read-only list cannot be routed around by choosing a different tool.
+- **The model never holds the live write.** Nothing the agent does can stash another lane's work, rewrite the default branch ref, or commit an unresolved merge: the wrapper does not stash, and it refuses rather than improvises.
 
 Flow:
 
-1. **Wrapper** sets up the worktree, installs the per-distill napkin shim, and spawns one `pi -p $PROMPT` invocation under `timeout ${maxDurationMinutes}m`. The prompt instructs the agent to walk steps 1–10 (distill → merge → squash → push → cleanup).
-2. **Agent** distills content into the worktree, then runs `git -C <worktree> merge --no-edit <default>`. If conflicts surface, it edits each file in place using the conversation history as context.
-3. **Agent** squash-merges into the vault's default branch (`git -C <vault> merge --squash <distill-branch>` then `git commit`).
-4. **Agent** pushes to `origin/<default>` if origin is configured. On non-fast-forward failures it recovers via `git pull --no-rebase origin <default>` then re-pushes. It NEVER uses `--force` or `--force-with-lease`.
-5. **Wrapper** post-validates: no conflict markers in tracked `*.md`, vault HEAD on default branch, push (if attempted) didn't rewrite shared history. Writes an outcome sidecar and force-cleans the worktree + distill branch.
+1. **Wrapper** sets up the worktree, installs the per-distill napkin shim, and spawns one `pi -p $PROMPT` invocation under `timeout ${maxDurationMinutes}m`. It also exports `NAPKIN_DISTILL_VAULT`, `NAPKIN_DISTILL_WORKTREE` and `NAPKIN_DISTILL_READONLY`, which arm an in-process `tool_call` gate: the agent cannot write into the live vault or run git against it (early feedback — the wrapper gate is the guarantee).
+2. **Agent** distills content into the worktree, commits, then runs `git -C <worktree> merge --no-edit <default>`, resolving conflicts there using the conversation history. That is the whole contract (steps 1–7 of the prompt); there is no squash, push or cleanup step.
+3. **Wrapper** serialises per vault, catches the branch up (`**/daily/*.md` is `merge=union`, because daily notes are append logs), and re-prompts the agent ONCE if a conflict remains. Still conflicted: `merge --abort`, outcome `integration-conflict`, branch kept.
+4. **Wrapper** computes the net change set (`git diff --name-only --no-renames <default>...<branch>`), reverts every path matching `distill.readOnly`, parks the dropped hunks under `<vault>/.napkin/distill/refused/` and warns per path. Then it refuses a branch whose ADDED lines carry git conflict-marker labels.
+5. **Wrapper** preflights the live vault: HEAD on the default branch, empty index, none of the touched paths dirty or untracked, `merge-tree` clean. Anything else is `deferred-dirty` — the wrapper never stashes, and it never touches a path outside the net change set.
+6. **Wrapper** squash-merges, commits with the agent's first non-merge subject, and pushes. A rejected push pulls `--no-rebase` only when the tracked tree is completely clean; otherwise the run is `merged-local`.
 
-The full prompt template lives at `extensions/distill/distill-prompt.md`. The wrapper bounds the agent's wall-clock with `timeout(1)`; everything else (retry policy, network handling, conflict-resolution shape) is the agent's call.
+The full prompt template lives at `extensions/distill/distill-prompt.md`. It is advisory: the enforcement is the tree-diff gate, because a prompt-only rule is what produced 150 PR-note commits and 54 marker commits in the first place.
 
 ### Outcome classes
 
@@ -294,9 +300,12 @@ Each distill produces a sidecar at `<vault>/.napkin/distill/errors/<timestamp>-<
 
 | Class | When | UI severity |
 |---|---|---|
-| `merged-content` | Agent produced content, integrated, squashed, and pushed to origin (or origin not configured). | info ✓ |
-| `merged-local` | Agent integrated + squashed, but origin/`<default>` is configured AND local `<default>` is ahead of `origin/<default>` (push didn't land). | warning ⚠ — "distilled but not pushed" |
-| `no-content` | Agent produced nothing (genuine no-op — selective filter), or committed to the distill branch but skipped squash (default branch never moved). | warning ⚠ |
+| `merged-content` | The wrapper landed the distill content as one squash commit and pushed to origin (or origin not configured). | info ✓ |
+| `merged-local` | The content landed locally, but origin/`<default>` is configured AND local `<default>` is ahead of `origin/<default>` (push didn't land, and the guarded pull was refused because other lanes have tracked changes). | warning ⚠ — "distilled but not pushed" |
+| `integration-conflict` | The branch could not be merged with the default branch, even after one agent re-prompt; the merge was aborted. Nothing reached `<default>`; the distill branch is kept. | error ✗ |
+| `markers-in-content` | The branch adds git conflict-marker lines, so it was refused. Nothing reached `<default>`; the distill branch is kept. | error ✗ |
+| `deferred-dirty` | The live vault was not clean enough to land on (staged changes, or a touched path dirty/untracked), or another distill holds the integration lock. Nothing was stashed, nothing reached `<default>`; the distill branch is kept for the next attempt or a manual merge. | warning ⚠ |
+| `no-content` | Agent produced nothing (genuine no-op — selective filter), or everything it produced matched `distill.readOnly` and was dropped. | warning ⚠ |
 | `failed:<reason>` | Wrapper validation rejected the agent's output, or the agent didn't complete. | error ✗ |
 
 Known `failed:<reason>` codes:
@@ -319,15 +328,15 @@ A missing sidecar AND missing error log means the wrapper itself was killed befo
 The salvage path is deliberately narrow: the wrapper janitors the **worktree and distill branch**, never the main vault's commit history. If validation fails:
 
 - Force-remove the worktree (`git worktree remove --force` + path-safety guard, falling back to `rm -rf` only if the worktree path is a descendant of the resolved cache root).
-- Force-delete the distill branch (`git branch -D`).
-- Write a `failed:<reason>` sidecar with a recovery hint that points at the corrupt squash commit if one landed on `<default>`.
+- Force-delete the distill branch (`git branch -D`) — EXCEPT for the `integration-conflict`, `markers-in-content` and `deferred-dirty` classes, which keep the branch on purpose so a human (or a later run) can merge it. The worktree is still removed: the parent poller treats worktree disappearance as the completion signal.
+- Write a `failed:<reason>` (or deferral-class) sidecar with a recovery hint that points at the branch and at the recovery command.
 - Exit 1.
 
 The wrapper deliberately does NOT `git reset --hard` or otherwise rewrite the vault's commit history. If the agent's squash landed corrupt content, the user's `git revert HEAD --no-edit` (forward-only) is preferred over a destructive reset that could clobber concurrent edits the user made between distill spawn and validation. The recovery hint in the failed sidecar names the exact command.
 
 ### Linear history
 
-Successful distill lifecycles produce exactly one squash commit on `main`, with a one-line summary the agent generates from the distill content. This keeps history clean and makes it easy to revert a bad distill with `git revert <sha>`.
+Successful distill lifecycles produce exactly one squash commit on `main`, with the subject of the agent's first non-merge commit as the message. The wrapper is the only writer, so a run cannot produce two, and history stays revertible with `git revert <sha>`.
 
 ## Agent visibility
 

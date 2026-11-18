@@ -2,19 +2,23 @@
 # distill-wrapper — orchestrates a single auto-distill attempt inside a
 # per-distill git worktree.
 #
-# PR #12 architecture: the distill AGENT owns distill content production
-# AND the integration phases (merge, squash, push, cleanup). The wrapper
-# is a thin shell:
+# Architecture (issue #122): the distill AGENT produces content and stops at
+# a committed distill branch. The WRAPPER owns the live vault - catch-up
+# merge, read-only revert, conflict-marker refusal, preflight, squash, push,
+# cleanup:
 #   1. Worktree setup is already done by createDistillWorkspace before
 #      this script runs (git worktree add, session fork, meta.json).
 #   2. Wrapper installs the napkin shim (POST-R6-CACHE), cds to PARENT_CWD
 #      for cache parity, then invokes `pi --session ... -p $PROMPT` ONCE
 #      under a hard `timeout(1)` budget.
-#   3. Agent executes the full agent-driven prompt (extensions/distill/
-#      distill-prompt.md): distill content + git merge + git merge --squash
-#      + git push + git worktree remove + git branch -D.
-#   4. Post-agent-exit, wrapper validates the agent's output (markers
-#      absent, HEAD on default, commit count) and salvages on failure.
+#   3. Agent executes steps 1-7 of extensions/distill/distill-prompt.md:
+#      distill content into the worktree, commit, merge the default branch
+#      into the branch, resolve conflicts there. No git against the vault.
+#   4. Post-agent-exit, wrapper validates the agent result (unresolved
+#      index entries, HEAD on default, default-branch ancestry) and then
+#      LANDS the branch itself (see the integrate block below): net change
+#      set, read-only drop, marker gate, live-vault preflight, squash,
+#      push. Deferral/refusal outcomes keep the branch.
 #   5. Wrapper writes the outcome sidecar and exits.
 #
 # Implementation history: validation (A3) and salvage (A4) landed in
@@ -70,36 +74,43 @@
 #                    two sides stay in sync. Required: the wrapper hard-fails
 #                    at startup if absent or empty.
 #
-# Lifecycle (happy path, PR #12):
+# Lifecycle (happy path):
 #   1. install napkin shim at <worktree>/.napkin/distill/bin/napkin and
 #      prepend it to PATH (auto-routes agent napkin calls to the worktree)
-#   2. cd <parentCwd>                            (cache parity — keeps pi's
+#   2. cd <parentCwd>                            (cache parity - keeps pi's
 #                                                 system prompt cwd line
 #                                                 byte-identical to parent's)
 #   3. timeout <maxDurationSecs> pi --session <sessionFork> -p <prompt>
 #                                                (single agent task: produces
-#                                                 content, runs git merge into
-#                                                 distill branch, squashes to
-#                                                 main, pushes if origin, cleans
-#                                                 up worktree+branch — see
-#                                                 extensions/distill/distill-prompt.md)
+#                                                 content, commits it on the
+#                                                 distill branch, merges the
+#                                                 default branch into it -
+#                                                 steps 1-7, nothing else)
 #   4. validate agent output                     (unresolved conflicts,
-#                                                 HEAD on default,
-#                                                 commit count; see
+#                                                 HEAD on default, ancestry of
+#                                                 the pre-run tip; see
 #                                                 validate_no_unresolved_conflicts /
 #                                                 validate_head_on_default /
-#                                                 validate_commit_count below)
-#   5. salvage if validation fails               (force-cleanup worktree+
+#                                                 validate_start_sha_ancestor
+#                                                 below)
+#   5. integrate the branch (issue #122)         (catch-up merge, read-only
+#                                                 revert, marker gate, live
+#                                                 preflight, squash, push; see
+#                                                 integrate_branch() below)
+#   6. salvage if validation fails               (force-cleanup worktree+
 #                                                 branch + write
 #                                                 `failed:<reason>` outcome
 #                                                 with recovery hint; see
 #                                                 salvage() below)
-#   6. write outcome sidecar                     (`merged-content` on happy path;
-#                                                 `merged-local` when local diverges
-#                                                 from origin; `no-content` on 0
-#                                                 commits since startSha; `failed:<reason>`
-#                                                 on validation failure)
-#   7. cleanup (trap): force-remove worktree, prune, force-delete branch
+#   7. write outcome sidecar                     (`merged-content` on the
+#                                                 happy path; `merged-local`
+#                                                 when the push did not land;
+#                                                 `no-content` when the net
+#                                                 change set is empty;
+#                                                 deferral/refusal classes keep
+#                                                 the branch)
+#   8. cleanup (trap): force-remove worktree, prune, force-delete branch
+#      (unless a deferral/refusal kept it: KEEP_BRANCH=1)
 #
 # Error handling:
 #   Any fatal failure writes a log entry to:
@@ -1739,20 +1750,22 @@ unset PRE_DISTILL_CONFLICT_FILES_RAW
 #
 # A single bounded `pi -p` call. The agent's prompt (already resolved by
 # `buildDistillPrompt` on the JS side) instructs it to:
-#   - distill conversation content into the worktree (steps 1–6)
-#   - git merge $DEFAULT_BRANCH into the distill branch from the worktree
-#   - git merge --squash $BRANCH onto $DEFAULT_BRANCH from the main vault
-#   - git push if origin exists (no force, pull-merge on contention)
-#   - git worktree remove + git branch -D
+#   - distill conversation content into the worktree (steps 1-6)
+#   - commit it on the distill branch
+#   - git merge $DEFAULT_BRANCH into the distill branch from the worktree,
+#     resolving conflicts there
+# Nothing else: no squash, no push, no cleanup, and no git against the live
+# vault (issue #122 - the wrapper lands the branch below).
 #
 # Wrapper guarantees: cwd = PARENT_CWD (cache parity), napkin shim on PATH,
 # session is the parent's fork (so the agent has full conversation context),
 # `timeout(1)` enforces a hard wall-clock bound, NAPKIN_DISTILL_NO_RECURSE=1
 # inhibits the inner pi from auto-distilling.
 #
-# Agent responsibilities: everything between distill and cleanup. The
-# wrapper validates the agent's output post-exit and salvages on
-# validation failure (validate_* helpers + salvage() below).
+# Agent responsibilities: steps 1-7 only (content + commit + catch-up merge
+# + conflict resolution), all inside the worktree. The wrapper validates the
+# agent output post-exit and then LANDS the branch (validate_* helpers +
+# integrate_branch() + salvage() below).
 
 cd "$PARENT_CWD" || { log_error "cd parent cwd failed: $PARENT_CWD"; exit 1; }
 

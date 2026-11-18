@@ -462,6 +462,208 @@ export function spawnDistill(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Distill-mode tool gate (issue #122: the vault-path subset of #117 item 1)
+// ---------------------------------------------------------------------------
+//
+// When the wrapper spawns the agent it exports the live vault and the
+// distill worktree. In that process only, a `tool_call` handler blocks:
+//
+//   - write/edit whose resolved path is under the LIVE VAULT;
+//   - bash that runs `git` against the live vault (`-C <vault>`,
+//     `--git-dir`/`--work-tree` into it, or a bare `git` when the agent cwd
+//     is inside the vault).
+//
+// This is NOT the guarantee: the guarantee is the wrapper tree-diff gate,
+// which judges the RESULT (which paths changed, which lines were added). A
+// shell can obfuscate a path past any command parser (`sed -i`, `$VAR`,
+// base64 into `bash`), which is why the wrapper still validates after the
+// agent exits. This gate is early feedback: it stops the common shapes so a
+// run does not spend ten minutes writing notes the wrapper will drop.
+//
+// A `tool_call` hook leaves the system prompt and the tool list
+// byte-identical, so prompt-cache parity (POST-R6-CACHE) is unaffected.
+
+export interface DistillScope {
+  /** Absolute path of the live vault the agent must not write. */
+  vault: string;
+  /** Absolute path of the per-distill worktree the agent may write. */
+  worktree: string;
+}
+
+/**
+ * Read the distill scope from the environment the wrapper exports. Returns
+ * null outside a distill run (both vars absent) and for a malformed pair
+ * (worktree nested inside the vault: nothing can be allowed safely, so
+ * gate nothing rather than block every write).
+ */
+export function resolveDistillScope(
+  env: NodeJS.ProcessEnv = process.env,
+): DistillScope | null {
+  const vault = env.NAPKIN_DISTILL_VAULT;
+  const worktree = env.NAPKIN_DISTILL_WORKTREE;
+  if (!vault || !worktree) return null;
+  const resolvedVault = path.resolve(vault);
+  const resolvedWorktree = path.resolve(worktree);
+  if (isPathInside(resolvedWorktree, resolvedVault)) return null;
+  return { vault: resolvedVault, worktree: resolvedWorktree };
+}
+
+/** True when `child` is `parent` or lives under it (path-segment safe). */
+export function isPathInside(child: string, parent: string): boolean {
+  if (child === parent) return true;
+  const prefix = parent.endsWith(path.sep) ? parent : parent + path.sep;
+  return child.startsWith(prefix);
+}
+
+/**
+ * Split a shell command into words, honouring single and double quotes.
+ * Deliberately not a shell parser: it exists to find `git` and its
+ * path-carrying options, not to execute or fully understand the line.
+ */
+export function shellWords(command: string): string[] {
+  const words: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  for (const ch of command) {
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      continue;
+    }
+    if (/\s/.test(ch)) {
+      if (current.length > 0) {
+        words.push(current);
+        current = "";
+      }
+      continue;
+    }
+    current += ch;
+  }
+  if (current.length > 0) words.push(current);
+  return words;
+}
+
+/**
+ * Return the path a `git` invocation would operate on inside the LIVE
+ * vault, or null when every git in `command` targets somewhere else.
+ *
+ * `cwd` is the directory the command runs in (the agent shell cwd is the
+ * parent session cwd, pinned for cache parity), so a bare `git` is judged
+ * against it: running pi inside the vault makes every bare git a
+ * live-vault write.
+ */
+export function liveVaultGitTarget(
+  command: string,
+  cwd: string,
+  vault: string,
+): string | null {
+  const words = shellWords(command);
+  const segments: string[][] = [[]];
+  for (const word of words) {
+    if (word === "&&" || word === "||" || word === ";" || word === "|") {
+      segments.push([]);
+    } else {
+      segments[segments.length - 1].push(word);
+    }
+  }
+  for (const segment of segments) {
+    for (let i = 0; i < segment.length; i++) {
+      if (path.basename(segment[i]) !== "git") continue;
+      let explicit: string | null = null;
+      for (let j = i + 1; j < segment.length; j++) {
+        const arg = segment[j];
+        const eq = arg.indexOf("=");
+        const key = eq === -1 ? arg : arg.slice(0, eq);
+        let value: string | null = eq === -1 ? null : arg.slice(eq + 1);
+        if (key !== "-C" && key !== "--git-dir" && key !== "--work-tree") {
+          continue;
+        }
+        if (value === null) {
+          value = segment[j + 1] ?? null;
+          j += 1;
+        }
+        if (value) explicit = path.resolve(cwd, value);
+      }
+      if (explicit) {
+        if (isPathInside(explicit, vault)) return explicit;
+        continue;
+      }
+      if (isPathInside(cwd, vault)) return cwd;
+    }
+  }
+  return null;
+}
+
+export interface DistillToolGateDecision {
+  block: boolean;
+  reason?: string;
+}
+
+/**
+ * Decide whether one tool call may run inside a distill run. Pure: the
+ * caller supplies the tool event, the scope and the agent cwd, so the
+ * matrix is unit-testable without pi.
+ */
+export function distillToolGate(args: {
+  event: { toolName: string; input: Record<string, unknown> };
+  scope: DistillScope | null;
+  cwd: string;
+}): DistillToolGateDecision {
+  const { event, scope } = args;
+  if (!scope) return { block: false };
+  const cwd = path.resolve(args.cwd);
+  const worktreeHint =
+    "Work in the distill worktree (" +
+    scope.worktree +
+    ") and let the wrapper land your branch.";
+
+  if (event.toolName === "write" || event.toolName === "edit") {
+    const raw =
+      typeof event.input.path === "string" ? (event.input.path as string) : "";
+    if (raw.length === 0) return { block: false };
+    const target = path.resolve(cwd, raw);
+    if (isPathInside(target, scope.vault)) {
+      return {
+        block: true,
+        reason:
+          "The live vault is read-only during a distill run: " +
+          target +
+          " is under " +
+          scope.vault +
+          ". " +
+          worktreeHint,
+      };
+    }
+    return { block: false };
+  }
+
+  if (event.toolName === "bash") {
+    const command =
+      typeof event.input.command === "string"
+        ? (event.input.command as string)
+        : "";
+    const target = liveVaultGitTarget(command, cwd, scope.vault);
+    if (target) {
+      return {
+        block: true,
+        reason:
+          "git against the live vault is blocked during a distill run (" +
+          target +
+          "). " +
+          worktreeHint,
+      };
+    }
+    return { block: false };
+  }
+
+  return { block: false };
+}
+
 export default function (pi: ExtensionAPI) {
   let intervalHandle: ReturnType<typeof setInterval> | null = null;
   let countdownHandle: ReturnType<typeof setInterval> | null = null;
@@ -564,6 +766,22 @@ export default function (pi: ExtensionAPI) {
   pi.on("before_provider_request", (event) =>
     applyDistillPromptCacheKey(event.payload),
   );
+
+  // Issue #122: when the wrapper spawned us as the distill agent it
+  // exported the live vault and the worktree. In that process only, block
+  // the agent writes into the live vault and its git there. The guarantee
+  // remains the wrapper tree-diff gate; this is early feedback so a run
+  // does not spend its budget writing notes the wrapper will drop.
+  const distillScope = resolveDistillScope();
+  if (distillScope) {
+    pi.on("tool_call", (event) =>
+      distillToolGate({
+        event: event as { toolName: string; input: Record<string, unknown> },
+        scope: distillScope,
+        cwd: process.cwd(),
+      }),
+    );
+  }
 
   function renderIdleStatus(): void {
     if (!uiRef?.hasUI || !uiRef.showStatus) return;
@@ -2125,6 +2343,35 @@ export function formatOutcomeNotification(args: {
         statusGlyph: "⚠",
         statusText: " distill: local-only",
       };
+    case "integration-conflict":
+    case "markers-in-content": {
+      // Issue #122 deferral/refusal classes. The branch was kept and
+      // nothing reached the default branch, so this is an error the user
+      // has to act on (merge the branch by hand, or fix and re-run) - not
+      // a warning that something landed.
+      const suffix = outcome.recoveryHint ? ` - ${outcome.recoveryHint}` : "";
+      return {
+        level: "error",
+        message: `Distillation not landed (${outcome.outcomeClass})${suffix}`,
+        statusKey: "error",
+        statusGlyph: "✗",
+        statusText: ` distill: ${outcome.outcomeClass}`,
+      };
+    }
+    case "deferred-dirty": {
+      // The live vault was not clean enough to land the run (another lane
+      // staged or dirty on a touched path). Nothing was stashed and nothing
+      // reached the default branch; the branch is kept for the next attempt
+      // or a manual merge, so this is a warning.
+      const hint = outcome.recoveryHint ? ` - ${outcome.recoveryHint}` : "";
+      return {
+        level: "warning",
+        message: `Distillation deferred; the live vault was busy${hint}`,
+        statusKey: "warning",
+        statusGlyph: "⚠",
+        statusText: " distill: deferred",
+      };
+    }
     case "no-content":
       return {
         level: "warning",

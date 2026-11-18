@@ -330,6 +330,43 @@ describe("formatOutcomeNotification (POST-CONV-5)", () => {
     expect(r.statusKey).toBe("warning");
   });
 
+  // Issue #122: deferral/refusal classes carry no `failed:` prefix (the
+  // branch, not the run, is what the user has to act on) but they must not
+  // fall into the "unrecognised outcome" branch either.
+  test("integration-conflict -> error naming the class and the hint", () => {
+    const r = formatOutcomeNotification({
+      outcome: {
+        outcomeClass: "integration-conflict",
+        recoveryHint: "The branch was kept.",
+      },
+      elapsedSec: 30,
+    });
+    expect(r.level).toBe("error");
+    expect(r.message).toContain("integration-conflict");
+    expect(r.message).toContain("The branch was kept.");
+    expect(r.statusText).toContain("integration-conflict");
+  });
+
+  test("markers-in-content -> error (refused, nothing landed)", () => {
+    const r = formatOutcomeNotification({
+      outcome: { outcomeClass: "markers-in-content", recoveryHint: null },
+      elapsedSec: 12,
+    });
+    expect(r.level).toBe("error");
+    expect(r.message).toBe("Distillation not landed (markers-in-content)");
+  });
+
+  test("deferred-dirty -> warning (live vault busy, branch kept)", () => {
+    const r = formatOutcomeNotification({
+      outcome: { outcomeClass: "deferred-dirty", recoveryHint: null },
+      elapsedSec: 9,
+    });
+    expect(r.level).toBe("warning");
+    expect(r.message).toContain("deferred");
+    expect(r.statusKey).toBe("warning");
+    expect(r.statusText).toContain("deferred");
+  });
+
   test("unknown class → defensive warning with class verbatim", () => {
     const r = formatOutcomeNotification({
       outcome: {
