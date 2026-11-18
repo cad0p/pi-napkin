@@ -235,18 +235,18 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     // Prompt is now built internally via buildDistillPrompt against the
     // shipped distill-prompt.md template. It must contain the worktree-
     // isolation cwd contract (POST-R6-CACHE; CLEAN-A-2/CLEAN-A-3 prompt
-    // rewrite) AND the agent-driven step markers for steps 7–9
-    // (merge / squash / push) with the four template placeholders
-    // substituted to real values. Worktree cleanup is owned by the
-    // wrapper, not the agent, so the prompt has 9 steps, not 10.
+    // rewrite) AND the agent-driven step markers for steps 1–7 with the
+    // four template placeholders substituted to real values. Issue #122
+    // moved squash, push and cleanup to the wrapper, so the prompt ends
+    // at step 7 and the agent never runs git against the live vault.
     expect(call.args[5]).toContain(
       `git worktree at ${result.workspace.worktreePath}`,
     );
     expect(call.args[5]).toContain(`git -C ${result.workspace.worktreePath}`);
     expect(call.args[5]).toContain(result.workspace.branchName);
     expect(call.args[5]).toContain(vault);
-    // Steps 1–9 markers (line-start `<n>.`).
-    for (let n = 1; n <= 9; n++) {
+    // Steps 1–7 markers (line-start `<n>.`).
+    for (let n = 1; n <= 7; n++) {
       expect(call.args[5]).toMatch(new RegExp(`^${n}\\.`, "m"));
     }
     // No leftover unresolved placeholders.
@@ -290,6 +290,43 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     // system prompt cwd line byte-identical to the parent's.
     expect(opts.cwd).toBe(parentCwd);
     expect(opts.env.NAPKIN_DISTILL_NO_RECURSE).toBe("1");
+  });
+
+  // Issue #122: the wrapper owns integration, so it needs the read-only
+  // glob list and the two paths. The same env reaches the agent's pi
+  // process, which is how the in-process tool_call gate learns it is in a
+  // distill run (and what the live vault vs the worktree is).
+  test("exports the read-only globs and both paths for the wrapper-owned integration", () => {
+    const { spawnFn, calls } = makeMockSpawn();
+    const result = spawnDistillInWorktree({
+      vault,
+      sessionFile,
+      parentCwd: sessionDir,
+      maxDurationSecs: 600,
+      readOnly: ["**/prs/**", "**/issues/**"],
+      spawnFn,
+    });
+    workspaces.push(result.workspace);
+
+    const env = calls[0].options.env;
+    // Newline-separated: a glob may contain spaces or commas.
+    expect(env.NAPKIN_DISTILL_READONLY).toBe("**/prs/**\n**/issues/**");
+    expect(env.NAPKIN_DISTILL_VAULT).toBe(vault);
+    expect(env.NAPKIN_DISTILL_WORKTREE).toBe(result.workspace.worktreePath);
+  });
+
+  test("exports an empty read-only list when the vault config has none", () => {
+    const { spawnFn, calls } = makeMockSpawn();
+    const result = spawnDistillInWorktree({
+      vault,
+      sessionFile,
+      parentCwd: sessionDir,
+      maxDurationSecs: 600,
+      spawnFn,
+    });
+    workspaces.push(result.workspace);
+
+    expect(calls[0].options.env.NAPKIN_DISTILL_READONLY).toBe("");
   });
 
   test("passes parent session id as distill prompt-cache key env", () => {

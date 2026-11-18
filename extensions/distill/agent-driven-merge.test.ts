@@ -228,22 +228,29 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
   // merge; this test pins the impl-side contract.
   // -------------------------------------------------------------------------
 
-  test("squash-skipped fixture \u2192 no-content (default branch never moved)", () => {
+  test("branch-only commit fixture \u2192 merged-content (issue #122: the wrapper squashes it)", () => {
     const s = makeScaffold();
     try {
       const r = runWrapperWithStub(s, {
         fixturePath: fixturePath("squash-skipped.sh"),
       });
       expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("no-content");
-      // Vault main should be at startSha.
+      expect(r.outcome).toBe("merged-content");
+      // Issue #122 inverted this contract: the agent stops at a committed
+      // distill branch and the WRAPPER lands it, so a branch-only commit is
+      // now the happy path, not a skipped squash.
+      expect(fs.existsSync(path.join(s.vault, "dangling.md"))).toBe(true);
       const postSha = spawnSync("git", ["-C", s.vault, "rev-parse", "main"], {
         encoding: "utf-8",
       }).stdout.trim();
-      expect(postSha).toBe(r.preSha);
-      // The dangling.md the agent wrote in the worktree shouldn't have
-      // landed on default.
-      expect(fs.existsSync(path.join(s.vault, "dangling.md"))).toBe(false);
+      expect(postSha).not.toBe(r.preSha);
+      // Exactly one squash commit beyond the pre-run tip.
+      const count = spawnSync(
+        "git",
+        ["-C", s.vault, "rev-list", "--count", `${r.preSha}..HEAD`],
+        { encoding: "utf-8" },
+      ).stdout.trim();
+      expect(count).toBe("1");
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
@@ -297,7 +304,7 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       );
       expect(warningBody).toContain("WARNING:");
       expect(warningBody).toContain("squash-invariant violation");
-      expect(warningBody).toMatch(/landed 2 commits on main/);
+      expect(warningBody).toMatch(/2 commits on main since startSha/);
 
       // The fatal `.log` must NOT exist (no failure surface).
       const fatalLogs = fs

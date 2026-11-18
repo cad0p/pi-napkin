@@ -73,6 +73,28 @@ snapshot the outcome sidecar at the moment the worktree disappears.
 | `step10-race.sh`   | happy-path commit + squash, then `sleep 0.5` to widen the cleanup window  | `merged-content`                  |
 | `salvage-race.sh`  | leaves a REAL unresolved merge conflict, then `sleep 0.5`                 | `failed:markers-after-agent-exit` |
 
+### Wrapper-owned integration fixtures (issue #122)
+
+These follow the post-#122 contract: the stub commits in the WORKTREE and
+stops (step 7). The wrapper owns catch-up, read-only revert, marker
+refusal, preflight, squash, push and cleanup, so each fixture only has to
+produce the branch state the test wants to judge.
+
+| Fixture | Behavior | Expected outcome |
+|---|---|---|
+| `readonly-modify.sh` | appends to a read-only PR note and creates an ordinary note | `merged-content` (PR note byte-identical, patch under `.napkin/distill/refused/`, warning) |
+| `readonly-create-delete.sh` | creates a PR note and deletes an issue note | `merged-content` (neither path in the landed diff) |
+| `readonly-merge-resolution.sh` | resolves a catch-up conflict in the branch favour, i.e. writes a read-only note through conflict resolution | `merged-content` (main version kept) |
+| `committed-markers.sh` | commits a file that still carries `<<<<<<<` / `>>>>>>>` markers | `markers-in-content` (main tip unchanged, branch kept) |
+| `daily-union-merge.sh` | appends a daily-note line while a lane appends another | `merged-content` (union: both lines, no markers) |
+| `note-change.sh` | commits one ordinary note change (`NAPKIN_STUB_NOTE` overrides the path) | `merged-content`, or the deferral/local outcome the test arranges in the live vault |
+
+`wrapper-integration.test.ts` drives these. The older fixtures above still
+test the legacy shapes (an agent that lands its own commits, leaves a live
+vault merge, crashes, times out); the wrapper keeps that dispatch for runs
+whose default branch already moved, because it never rewrites commits that
+are already on the default branch.
+
 ## Adding a fixture
 
 1. Write a self-contained `#!/usr/bin/env bash` script that reads

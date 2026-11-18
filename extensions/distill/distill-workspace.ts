@@ -885,7 +885,16 @@ export interface SpawnDistillOptions {
    */
   maxDurationSecs: number;
   /**
-   * Override for the `spawn` function — wired by unit tests to capture calls
+   * Vault-relative globs the distill must not change (`distill.readOnly`
+   * in `.napkin/config.json`, issue #122). Passed to the wrapper as
+   * NEWLINE-separated `NAPKIN_DISTILL_READONLY`; the wrapper matches them
+   * with git's own pathspec glob matcher and drops matching paths from
+   * the net change set before anything reaches the default branch.
+   * Undefined/empty means "nothing is read-only".
+   */
+  readOnly?: readonly string[];
+  /**
+   * Override for the `spawn` function - wired by unit tests to capture calls
    * without actually starting processes. Defaults to the node:child_process
    * export at module load time.
    */
@@ -947,6 +956,7 @@ export function spawnDistillInWorktree(
   opts: SpawnDistillOptions,
 ): SpawnDistillResult {
   const { vault, sessionFile, parentCwd, model, maxDurationSecs } = opts;
+  const readOnly = (opts.readOnly ?? []).filter((g) => g.length > 0);
   const spawnFn = opts.spawnFn ?? spawn;
 
   const workspace = createDistillWorkspace(vault, sessionFile, parentCwd);
@@ -1018,6 +1028,15 @@ export function spawnDistillInWorktree(
     env: {
       ...process.env,
       NAPKIN_DISTILL_NO_RECURSE: "1",
+      // Issue #122: the wrapper owns integration, so it needs the
+      // read-only glob list (newline-separated; a glob may contain
+      // commas or spaces) and the two paths the in-process
+      // distill-mode tool_call gate compares against. The wrapper
+      // inherits this env to the agent's pi process, which is how the
+      // gate learns it is in a distill run at all.
+      NAPKIN_DISTILL_READONLY: readOnly.join("\n"),
+      NAPKIN_DISTILL_VAULT: vault,
+      NAPKIN_DISTILL_WORKTREE: workspace.worktreePath,
       ...(parentSessionId
         ? { [DISTILL_PROMPT_CACHE_KEY_ENV]: parentSessionId }
         : {}),
