@@ -1028,14 +1028,18 @@ export function spawnDistillInWorktree(
     env: {
       ...process.env,
       NAPKIN_DISTILL_NO_RECURSE: "1",
-      // Issue #122: the wrapper owns integration, so it needs the
+      // Issues #117/#122: the wrapper owns integration, so it needs the
       // read-only glob list (newline-separated; a glob may contain
-      // commas or spaces) and the two paths the in-process
-      // distill-mode tool_call gate compares against. The wrapper
-      // inherits this env to the agent's pi process, which is how the
-      // gate learns it is in a distill run at all.
+      // commas or spaces) and the paths the in-process distill-mode
+      // tool_call gate compares against. The wrapper inherits this env
+      // to the agent's pi process, which is how the gate learns it is in
+      // a distill run at all, and which tree it may write.
       NAPKIN_DISTILL_READONLY: readOnly.join("\n"),
       NAPKIN_DISTILL_VAULT: vault,
+      // #117: the sandbox is the only tree the agent may write, and the
+      // var that arms the in-process tool_call gate. WORKTREE is the
+      // #122 alias, kept for the wrapper's own env contract.
+      NAPKIN_DISTILL_SANDBOX: workspace.worktreePath,
       NAPKIN_DISTILL_WORKTREE: workspace.worktreePath,
       ...(parentSessionId
         ? { [DISTILL_PROMPT_CACHE_KEY_ENV]: parentSessionId }

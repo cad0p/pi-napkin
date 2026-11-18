@@ -173,7 +173,7 @@ describe("spawnDistill (tmpdir argv-based path, SEC-1)", () => {
     expect(calls[0].args[6]).not.toContain("lives in the git worktree at");
   });
 
-  test("passes detached + stdio:ignore + NAPKIN_DISTILL_NO_RECURSE", () => {
+  test("passes detached + stdio:ignore + the distill scope env", () => {
     const { spawnFn, calls } = makeMockSpawn();
     const tmpDir = spawnDistill(
       sessionFile,
@@ -192,6 +192,10 @@ describe("spawnDistill (tmpdir argv-based path, SEC-1)", () => {
     expect(opts.stdio).toBe("ignore");
     expect(opts.cwd).toBe(cwd);
     expect(opts.env.NAPKIN_DISTILL_NO_RECURSE).toBe("1");
+    // Issue #117: the git-less path has no worktree, so the sandbox is the
+    // vault itself and the tool_call gate arms on it.
+    expect(opts.env.NAPKIN_DISTILL_SANDBOX).toBe(cwd);
+    expect(opts.env.NAPKIN_DISTILL_VAULT).toBeUndefined();
   });
 
   test("shell-metacharacter values stay isolated as argv — never concatenated into template", () => {

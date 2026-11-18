@@ -312,6 +312,7 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     // Newline-separated: a glob may contain spaces or commas.
     expect(env.NAPKIN_DISTILL_READONLY).toBe("**/prs/**\n**/issues/**");
     expect(env.NAPKIN_DISTILL_VAULT).toBe(vault);
+    expect(env.NAPKIN_DISTILL_SANDBOX).toBe(result.workspace.worktreePath);
     expect(env.NAPKIN_DISTILL_WORKTREE).toBe(result.workspace.worktreePath);
   });
 

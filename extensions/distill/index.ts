@@ -450,7 +450,14 @@ export function spawnDistill(
         cwd,
         detached: true,
         stdio: "ignore",
-        env: { ...process.env, NAPKIN_DISTILL_NO_RECURSE: "1" },
+        env: {
+          ...process.env,
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          // #117: the git-less path has no worktree, so the vault itself is
+          // the sandbox: the agent writes notes in place, and the tool_call
+          // gate keeps every other tree (and every non-napkin command) out.
+          NAPKIN_DISTILL_SANDBOX: path.resolve(cwd),
+        },
       },
     );
     proc.unref();
@@ -463,50 +470,103 @@ export function spawnDistill(
 }
 
 // ---------------------------------------------------------------------------
-// Distill-mode tool gate (issue #122: the vault-path subset of #117 item 1)
+// Distill-mode tool gate (issues #117, #111, #108; the #122 vault subset)
 // ---------------------------------------------------------------------------
 //
-// When the wrapper spawns the agent it exports the live vault and the
-// distill worktree. In that process only, a `tool_call` handler blocks:
+// The distill agent is a fork of ANOTHER session's conversation, resumed in
+// that session's cwd with every tool and extension loaded. The transcript
+// reads like its own history, so the model continues the parent's work: the
+// 2026-11-18 run hand-merged a PR branch, pushed it, launched a systemd gate
+// unit, refreshed a PR body and stopped other sessions' units - every step
+// through built-in `bash` alone (issue #117).
 //
-//   - write/edit whose resolved path is under the LIVE VAULT;
-//   - bash that runs `git` against the live vault (`-C <vault>`,
-//     `--git-dir`/`--work-tree` into it, or a bare `git` when the agent cwd
-//     is inside the vault).
+// The wrapper exports the sandbox (the per-distill worktree; the vault itself
+// on the git-less tmpdir path) and, when it differs, the live vault. In that
+// process only, a `tool_call` handler refuses:
+//
+//   - write/edit whose real path leaves the sandbox (symlink escapes are
+//     resolved through the deepest existing ancestor);
+//   - bash that is not, segment by segment, the `napkin` CLI, `git` against
+//     the sandbox with a non-landing subcommand, a `cd` inside the sandbox,
+//     or a small read-only text tool - with no shell wrapper, no command
+//     substitution and no redirection outside /dev/null;
+//   - every tool that is not one of pi's built-in file/bash tools, so
+//     `Agent`, `timer`, `heartbeat`, `codemode` (nested calls included) and
+//     MCP tools cannot resume the parent's workstream.
 //
 // This is NOT the guarantee: the guarantee is the wrapper tree-diff gate,
 // which judges the RESULT (which paths changed, which lines were added). A
-// shell can obfuscate a path past any command parser (`sed -i`, `$VAR`,
-// base64 into `bash`), which is why the wrapper still validates after the
-// agent exits. This gate is early feedback: it stops the common shapes so a
-// run does not spend ten minutes writing notes the wrapper will drop.
+// shell can obfuscate a path past any command parser (`base64 | sh`), so the
+// wrapper still validates after the agent exits. This gate is early feedback:
+// it stops the common shapes, keeps a resumed fork from launching work, and
+// hands the model an explicit boundary instead of a silent no-op.
 //
 // A `tool_call` hook leaves the system prompt and the tool list
 // byte-identical, so prompt-cache parity (POST-R6-CACHE) is unaffected.
 
-export interface DistillScope {
-  /** Absolute path of the live vault the agent must not write. */
-  vault: string;
-  /** Absolute path of the per-distill worktree the agent may write. */
-  worktree: string;
-}
+/** Resolve a path to its real target, or null when it cannot be resolved. */
+export type RealpathFn = (p: string) => string | null;
+
+const defaultRealpath: RealpathFn = (p) => {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return null;
+  }
+};
 
 /**
- * Read the distill scope from the environment the wrapper exports. Returns
- * null outside a distill run (both vars absent) and for a malformed pair
- * (worktree nested inside the vault: nothing can be allowed safely, so
- * gate nothing rather than block every write).
+ * What the wrapper told this process about its distill run.
+ *
+ *   - `armed`   - a sandbox was exported; the whole gate applies.
+ *   - `invalid` - a distill spawn exported an unusable scope (a vault with
+ *                 no sandbox, a relative sandbox). Fail closed: only
+ *                 read-only tools stay available.
+ */
+export type DistillScope =
+  | { kind: "armed"; sandbox: string; vault: string | null }
+  | { kind: "invalid"; reason: string };
+
+/**
+ * Read the scope from the environment the wrapper exports with the spawn.
+ *
+ * Returns null when this is not a distill spawn at all. `NAPKIN_DISTILL_
+ * NO_RECURSE` alone is deliberately NOT the trigger: tests and users set it
+ * to suppress a nested auto-distill without sandboxing their own session.
+ * The canonical var is `NAPKIN_DISTILL_SANDBOX`; `NAPKIN_DISTILL_WORKTREE`
+ * stays accepted as the alias #122 shipped.
  */
 export function resolveDistillScope(
   env: NodeJS.ProcessEnv = process.env,
 ): DistillScope | null {
-  const vault = env.NAPKIN_DISTILL_VAULT;
-  const worktree = env.NAPKIN_DISTILL_WORKTREE;
-  if (!vault || !worktree) return null;
-  const resolvedVault = path.resolve(vault);
-  const resolvedWorktree = path.resolve(worktree);
-  if (isPathInside(resolvedWorktree, resolvedVault)) return null;
-  return { vault: resolvedVault, worktree: resolvedWorktree };
+  const sandboxRaw = env.NAPKIN_DISTILL_SANDBOX || env.NAPKIN_DISTILL_WORKTREE;
+  const vaultRaw = env.NAPKIN_DISTILL_VAULT;
+  // Presence, not truthiness: an explicitly empty sandbox var is a broken
+  // spawn, not "no distill run".
+  const declared =
+    env.NAPKIN_DISTILL_SANDBOX !== undefined ||
+    env.NAPKIN_DISTILL_WORKTREE !== undefined ||
+    vaultRaw !== undefined;
+  if (!declared) return null;
+  if (!sandboxRaw) {
+    return {
+      kind: "invalid",
+      reason: "NAPKIN_DISTILL_VAULT is set without a sandbox path",
+    };
+  }
+  if (!path.isAbsolute(sandboxRaw)) {
+    return {
+      kind: "invalid",
+      reason: `the sandbox path is not absolute: ${sandboxRaw}`,
+    };
+  }
+  const sandbox = path.resolve(sandboxRaw);
+  // The vault is only a label (and a read-only reminder): the writable rule
+  // is the sandbox. A relative vault path cannot be trusted, so it is dropped
+  // rather than resolved against the agent cwd.
+  const vault =
+    vaultRaw && path.isAbsolute(vaultRaw) ? path.resolve(vaultRaw) : null;
+  return { kind: "armed", sandbox, vault: vault === sandbox ? null : vault };
 }
 
 /** True when `child` is `parent` or lives under it (path-segment safe). */
@@ -549,54 +609,456 @@ export function shellWords(command: string): string[] {
 }
 
 /**
- * Return the path a `git` invocation would operate on inside the LIVE
- * vault, or null when every git in `command` targets somewhere else.
- *
- * `cwd` is the directory the command runs in (the agent shell cwd is the
- * parent session cwd, pinned for cache parity), so a bare `git` is judged
- * against it: running pi inside the vault makes every bare git a
- * live-vault write.
+ * Split a shell command on unquoted control operators (`&&`, `||`, `;`,
+ * `|`, `&`, newline). Deliberately not a POSIX parser: it exists to judge
+ * every command the agent would run, and anything it cannot classify stays
+ * its own segment and is refused by the allowlist below.
  */
-export function liveVaultGitTarget(
-  command: string,
-  cwd: string,
-  vault: string,
-): string | null {
-  const words = shellWords(command);
-  const segments: string[][] = [[]];
-  for (const word of words) {
-    if (word === "&&" || word === "||" || word === ";" || word === "|") {
-      segments.push([]);
+export function shellSegments(command: string): string[] {
+  const segments: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  for (let i = 0; i < command.length; i++) {
+    const ch = command[i];
+    if (quote) {
+      current += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      quote = ch;
+      current += ch;
+      continue;
+    }
+    if (ch === "\n" || ch === ";" || ch === "|" || ch === "&") {
+      segments.push(current);
+      current = "";
+      if ((ch === "|" || ch === "&") && command[i + 1] === ch) i += 1;
+      continue;
+    }
+    current += ch;
+  }
+  segments.push(current);
+  return segments;
+}
+
+/**
+ * Quote-aware scan for the constructs that make a command's real effect
+ * unjudgeable: command substitution, heredocs / process substitution, and
+ * a redirection whose target is neither /dev/null nor an fd duplication.
+ * Everything else (paths, quotes, `$VAR`) is left to the allowlist.
+ */
+export function scanShellSegment(segment: string): {
+  construct: string | null;
+  redirect: string | null;
+} {
+  let quote: string | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const ch = segment[i];
+    if (quote === "'") {
+      if (ch === "'") quote = null;
+      continue;
+    }
+    if (quote === '"') {
+      if (ch === '"') quote = null;
+      else if (ch === "`") {
+        return { construct: "backtick command substitution", redirect: null };
+      } else if (ch === "$" && segment[i + 1] === "(") {
+        return { construct: "command substitution", redirect: null };
+      }
+      continue;
+    }
+    if (ch === "'" || ch === '"') {
+      quote = ch;
+      continue;
+    }
+    if (ch === "`") {
+      return { construct: "backtick command substitution", redirect: null };
+    }
+    if (ch === "$" && segment[i + 1] === "(") {
+      return { construct: "command substitution", redirect: null };
+    }
+    if (ch === "<" && (segment[i + 1] === "<" || segment[i + 1] === "(")) {
+      return { construct: "heredoc or process substitution", redirect: null };
+    }
+    if (ch !== ">") continue;
+    let j = i + 1;
+    if (segment[j] === ">") j += 1;
+    while (segment[j] === " " || segment[j] === "\t") j += 1;
+    // `2>&1`, `>&2`, `>&-`: fd manipulation, not a file write.
+    if (segment[j] === "&") {
+      i = j;
+      continue;
+    }
+    let target = "";
+    if (segment[j] === '"' || segment[j] === "'") {
+      const closer = segment[j];
+      j += 1;
+      while (j < segment.length && segment[j] !== closer) {
+        target += segment[j];
+        j += 1;
+      }
     } else {
-      segments[segments.length - 1].push(word);
+      while (j < segment.length && !" \t;&|)".includes(segment[j])) {
+        target += segment[j];
+        j += 1;
+      }
+    }
+    if (target.length > 0 && target !== "/dev/null") {
+      return { construct: null, redirect: target };
+    }
+    i = j;
+  }
+  return { construct: null, redirect: null };
+}
+
+type SandboxPath = { ok: true; path: string } | { ok: false; reason: string };
+
+/** Real path of the deepest ancestor of `p` that exists, or null. */
+function deepestExistingRealpath(
+  p: string,
+  realpath: RealpathFn,
+): string | null {
+  let current = path.dirname(p);
+  for (;;) {
+    const resolved = realpath(current);
+    if (resolved) return resolved;
+    const up = path.dirname(current);
+    if (up === current) return null;
+    current = up;
+  }
+}
+
+/**
+ * Judge whether `raw` (resolved against `base`) may be written or used as
+ * a git target inside the sandbox. Containment is checked lexically first,
+ * then against the real path of the deepest existing ancestor, so a symlink
+ * planted inside the sandbox cannot reach outside it.
+ */
+export function resolveSandboxPath(
+  raw: string,
+  base: string,
+  sandbox: string,
+  realpath: RealpathFn,
+): SandboxPath {
+  const lexical = path.resolve(base, raw);
+  const sandboxReal = realpath(sandbox) ?? path.resolve(sandbox);
+  if (!isPathInside(lexical, sandbox) && !isPathInside(lexical, sandboxReal)) {
+    return {
+      ok: false,
+      reason: `${lexical} is outside the distill worktree (${sandbox})`,
+    };
+  }
+  const resolved =
+    realpath(lexical) ?? deepestExistingRealpath(lexical, realpath);
+  if (!resolved) {
+    return {
+      ok: false,
+      reason: `cannot resolve ${lexical} to prove that it stays inside ${sandbox}`,
+    };
+  }
+  if (!isPathInside(resolved, sandboxReal)) {
+    return {
+      ok: false,
+      reason:
+        lexical +
+        " resolves to " +
+        resolved +
+        ", a symlink escape from " +
+        sandbox,
+    };
+  }
+  return { ok: true, path: resolved };
+}
+
+/** Tools the distill agent may use at all; everything else is refused. */
+const DISTILL_TOOLS = new Set([
+  "bash",
+  "read",
+  "grep",
+  "find",
+  "ls",
+  "write",
+  "edit",
+]);
+
+/** Tools that cannot write, so they stay available even without a sandbox. */
+const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
+
+/**
+ * Read-only text tools. None of them writes without a redirection, which
+ * `scanShellSegment` already refuses.
+ */
+const READ_ONLY_COMMANDS = new Set([
+  "basename",
+  "cat",
+  "cut",
+  "date",
+  "diff",
+  "dirname",
+  "echo",
+  "file",
+  "find",
+  "grep",
+  "head",
+  "jq",
+  "ls",
+  "printf",
+  "pwd",
+  "readlink",
+  "realpath",
+  "rg",
+  "sort",
+  "stat",
+  "tail",
+  "tr",
+  "true",
+  "uniq",
+  "wc",
+]);
+
+/** Flags that turn an otherwise read-only command into a writer/launcher. */
+const FORBIDDEN_FLAGS: Record<string, string[]> = {
+  file: ["-C", "--compile"],
+  find: [
+    "-delete",
+    "-exec",
+    "-execdir",
+    "-ok",
+    "-okdir",
+    "-fprint",
+    "-fprint0",
+    "-fprintf",
+    "-fls",
+  ],
+  sort: ["-o", "--output"],
+};
+
+/** git subcommands that only read. */
+const GIT_READ_SUBCOMMANDS = new Set([
+  "blame",
+  "cat-file",
+  "describe",
+  "diff",
+  "diff-index",
+  "diff-tree",
+  "for-each-ref",
+  "grep",
+  "log",
+  "ls-files",
+  "ls-tree",
+  "merge-base",
+  "rev-parse",
+  "shortlog",
+  "show",
+  "status",
+]);
+
+/** git subcommands the distill prompt needs (step 7 commit + catch-up). */
+const GIT_WRITE_SUBCOMMANDS = new Set(["add", "commit", "merge"]);
+
+/** git global options that load config or run a program from anywhere. */
+const GIT_FORBIDDEN_OPTIONS = new Set([
+  "-c",
+  "--config-env",
+  "--exec-path",
+  "--receive-pack",
+  "--upload-pack",
+]);
+
+/** Subcommand options that rewrite history or run an external strategy. */
+const GIT_FORBIDDEN_ARGS = new Set([
+  "--amend",
+  "--squash",
+  "-s",
+  "--strategy",
+  "-X",
+  "--strategy-option",
+]);
+
+type SegmentVerdict = { ok: true; cwd: string } | { ok: false; reason: string };
+
+/**
+ * Judge one `git` segment. Every path the invocation names (`-C`,
+ * `--git-dir`, `--work-tree`) must land inside the sandbox, and the
+ * subcommand must be one of the read-only or step-7 ones: no push, fetch,
+ * pull, remote, reset, rebase or update-ref, because the wrapper owns the
+ * landing.
+ */
+function judgeGitSegment(
+  words: string[],
+  cwd: string,
+  sandbox: string,
+  realpath: RealpathFn,
+): SegmentVerdict {
+  const args = words.slice(1);
+  let gitCwd = cwd;
+  let subcommand: string | null = null;
+  let rest: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    const eq = arg.indexOf("=");
+    const option = arg.startsWith("--") && eq !== -1 ? arg.slice(0, eq) : arg;
+    const inline = arg.startsWith("--") && eq !== -1 ? arg.slice(eq + 1) : null;
+    if (arg === "-C") {
+      const value = args[i + 1];
+      if (value === undefined) {
+        return { ok: false, reason: "git -C needs a path" };
+      }
+      // git resolves each -C against the previous one, so track it the same
+      // way: a second hop must still land inside the sandbox.
+      const target = resolveSandboxPath(value, gitCwd, sandbox, realpath);
+      if (!target.ok) return { ok: false, reason: target.reason };
+      gitCwd = target.path;
+      i += 1;
+      continue;
+    }
+    if (option === "--git-dir" || option === "--work-tree") {
+      const value = inline ?? args[i + 1];
+      if (value === undefined) {
+        return { ok: false, reason: `git ${option} needs a path` };
+      }
+      if (inline === null) i += 1;
+      const target = resolveSandboxPath(value, gitCwd, sandbox, realpath);
+      if (!target.ok) return { ok: false, reason: target.reason };
+      continue;
+    }
+    if (GIT_FORBIDDEN_OPTIONS.has(option)) {
+      return {
+        ok: false,
+        reason:
+          "git " +
+          option +
+          " can load config or run a program; it is not allowed in a distill run",
+      };
+    }
+    if (arg === "--version" || arg === "--help" || arg === "-h") {
+      return { ok: true, cwd };
+    }
+    if (arg.startsWith("-")) {
+      return {
+        ok: false,
+        reason: `git option ${arg} is not allowed in a distill run`,
+      };
+    }
+    subcommand = arg;
+    rest = args.slice(i + 1);
+    break;
+  }
+  if (!subcommand) {
+    return { ok: false, reason: "git needs a subcommand" };
+  }
+  const workDir = resolveSandboxPath(".", gitCwd, sandbox, realpath);
+  if (!workDir.ok) return { ok: false, reason: workDir.reason };
+  if (
+    !GIT_READ_SUBCOMMANDS.has(subcommand) &&
+    !GIT_WRITE_SUBCOMMANDS.has(subcommand)
+  ) {
+    return {
+      ok: false,
+      reason: `git ${subcommand} is not allowed in a distill run`,
+    };
+  }
+  for (const arg of rest) {
+    const eq = arg.indexOf("=");
+    const option = arg.startsWith("--") && eq !== -1 ? arg.slice(0, eq) : arg;
+    if (GIT_FORBIDDEN_ARGS.has(option)) {
+      return {
+        ok: false,
+        reason: `git ${subcommand} ${arg} is not allowed in a distill run`,
+      };
     }
   }
-  for (const segment of segments) {
-    for (let i = 0; i < segment.length; i++) {
-      if (path.basename(segment[i]) !== "git") continue;
-      let explicit: string | null = null;
-      for (let j = i + 1; j < segment.length; j++) {
-        const arg = segment[j];
-        const eq = arg.indexOf("=");
-        const key = eq === -1 ? arg : arg.slice(0, eq);
-        let value: string | null = eq === -1 ? null : arg.slice(eq + 1);
-        if (key !== "-C" && key !== "--git-dir" && key !== "--work-tree") {
-          continue;
-        }
-        if (value === null) {
-          value = segment[j + 1] ?? null;
-          j += 1;
-        }
-        if (value) explicit = path.resolve(cwd, value);
-      }
-      if (explicit) {
-        if (isPathInside(explicit, vault)) return explicit;
-        continue;
-      }
-      if (isPathInside(cwd, vault)) return cwd;
-    }
+  return { ok: true, cwd };
+}
+
+/**
+ * Judge one bash segment: the executable must be `napkin`, `git`, `cd`
+ * inside the sandbox, or a read-only text tool. Anything else (gh, curl,
+ * systemd-run, kill, docker, a shell, an interpreter …) is refused by
+ * omission — the allowlist is the policy.
+ */
+function judgeBashSegment(
+  segment: string,
+  cwd: string,
+  sandbox: string,
+  realpath: RealpathFn,
+): SegmentVerdict {
+  const scan = scanShellSegment(segment);
+  if (scan.construct) {
+    return {
+      ok: false,
+      reason: `${scan.construct} is not allowed in a distill run`,
+    };
   }
-  return null;
+  if (scan.redirect) {
+    return {
+      ok: false,
+      reason: `writing through a redirection to ${scan.redirect} is not allowed; use the write/edit tool inside the worktree`,
+    };
+  }
+  const words = shellWords(segment);
+  if (words.length === 0) return { ok: true, cwd };
+  const name = path.basename(words[0]);
+
+  if (name === "cd") {
+    if (words.length !== 2) {
+      return { ok: false, reason: "cd needs exactly one directory" };
+    }
+    const target = resolveSandboxPath(words[1], cwd, sandbox, realpath);
+    if (!target.ok) return { ok: false, reason: target.reason };
+    return { ok: true, cwd: target.path };
+  }
+
+  if (name === "napkin") {
+    for (let i = 1; i < words.length; i++) {
+      const word = words[i];
+      let raw: string | null = null;
+      if (word === "--vault") {
+        raw = words[i + 1] ?? "";
+        i += 1;
+      } else if (word.startsWith("--vault=")) {
+        raw = word.slice("--vault=".length);
+      }
+      if (raw === null) continue;
+      if (raw.length === 0) {
+        return { ok: false, reason: "napkin --vault needs a path" };
+      }
+      const target = resolveSandboxPath(raw, cwd, sandbox, realpath);
+      if (!target.ok) {
+        return { ok: false, reason: `napkin --vault: ${target.reason}` };
+      }
+    }
+    return { ok: true, cwd };
+  }
+
+  if (name === "git") {
+    return judgeGitSegment(words, cwd, sandbox, realpath);
+  }
+
+  if (READ_ONLY_COMMANDS.has(name)) {
+    const forbidden = FORBIDDEN_FLAGS[name] ?? [];
+    for (const word of words.slice(1)) {
+      if (word === "--") break;
+      for (const flag of forbidden) {
+        const hit = flag.startsWith("--")
+          ? word === flag || word.startsWith(`${flag}=`)
+          : word === flag || word.startsWith(flag);
+        if (hit) {
+          return {
+            ok: false,
+            reason: `${name} ${word} can write or launch a program; it is not allowed in a distill run`,
+          };
+        }
+      }
+    }
+    return { ok: true, cwd };
+  }
+
+  return {
+    ok: false,
+    reason: `${name} is not in the distill bash allowlist`,
+  };
 }
 
 export interface DistillToolGateDecision {
@@ -605,38 +1067,63 @@ export interface DistillToolGateDecision {
 }
 
 /**
+ * Every refusal starts with this: the model must learn from the refusal that
+ * the transcript is somebody else's record, not a task list handed to it.
+ */
+const DISTILL_PREAMBLE =
+  "This is a distill run: the conversation is another session's record to " +
+  "distill, not a task for you to continue. ";
+
+const BASH_HINT =
+  "Allowed bash: the napkin CLI, git on the worktree (status, diff, log, " +
+  "add, commit, merge - no push, fetch, reset or rebase), cd inside the " +
+  "worktree, and read-only text tools.";
+
+/**
  * Decide whether one tool call may run inside a distill run. Pure: the
- * caller supplies the tool event, the scope and the agent cwd, so the
- * matrix is unit-testable without pi.
+ * caller supplies the tool event, the scope, the agent cwd and (for tests)
+ * a realpath resolver, so the matrix is unit-testable without pi.
  */
 export function distillToolGate(args: {
   event: { toolName: string; input: Record<string, unknown> };
   scope: DistillScope | null;
   cwd: string;
+  realpath?: RealpathFn;
 }): DistillToolGateDecision {
   const { event, scope } = args;
   if (!scope) return { block: false };
   const cwd = path.resolve(args.cwd);
-  const worktreeHint =
-    "Work in the distill worktree (" +
-    scope.worktree +
-    ") and let the wrapper land your branch.";
+  const realpath = args.realpath ?? defaultRealpath;
+
+  if (scope.kind === "invalid") {
+    if (READ_ONLY_TOOLS.has(event.toolName)) return { block: false };
+    return {
+      block: true,
+      reason: `${DISTILL_PREAMBLE}Its sandbox is misconfigured (${scope.reason}), so only read-only tools are available. Stop and report the problem instead of retrying.`,
+    };
+  }
+
+  if (!DISTILL_TOOLS.has(event.toolName)) {
+    return {
+      block: true,
+      reason: `${DISTILL_PREAMBLE}${event.toolName} is not available while distilling. Use read/grep/find/ls to inspect, write/edit inside ${scope.sandbox}, and the distill bash allowlist.`,
+    };
+  }
 
   if (event.toolName === "write" || event.toolName === "edit") {
     const raw =
       typeof event.input.path === "string" ? (event.input.path as string) : "";
-    if (raw.length === 0) return { block: false };
-    const target = path.resolve(cwd, raw);
-    if (isPathInside(target, scope.vault)) {
+    if (raw.length === 0) {
       return {
         block: true,
-        reason:
-          "The live vault is read-only during a distill run: " +
-          target +
-          " is under " +
-          scope.vault +
-          ". " +
-          worktreeHint,
+        reason: `${DISTILL_PREAMBLE}write/edit needs a path inside the worktree (${scope.sandbox}).`,
+      };
+    }
+    const target = resolveSandboxPath(raw, cwd, scope.sandbox, realpath);
+    if (!target.ok) {
+      return {
+        block: true,
+        reason: `${DISTILL_PREAMBLE}${target.reason}. Write only inside ${scope.sandbox} and let the wrapper land your branch.`,
       };
     }
     return { block: false };
@@ -647,20 +1134,26 @@ export function distillToolGate(args: {
       typeof event.input.command === "string"
         ? (event.input.command as string)
         : "";
-    const target = liveVaultGitTarget(command, cwd, scope.vault);
-    if (target) {
-      return {
-        block: true,
-        reason:
-          "git against the live vault is blocked during a distill run (" +
-          target +
-          "). " +
-          worktreeHint,
-      };
+    let segmentCwd = cwd;
+    for (const segment of shellSegments(command)) {
+      const verdict = judgeBashSegment(
+        segment,
+        segmentCwd,
+        scope.sandbox,
+        realpath,
+      );
+      if (!verdict.ok) {
+        return {
+          block: true,
+          reason: `${DISTILL_PREAMBLE}${verdict.reason}. ${BASH_HINT}`,
+        };
+      }
+      segmentCwd = verdict.cwd;
     }
     return { block: false };
   }
 
+  // read / grep / find / ls: reading is always allowed.
   return { block: false };
 }
 
@@ -767,11 +1260,12 @@ export default function (pi: ExtensionAPI) {
     applyDistillPromptCacheKey(event.payload),
   );
 
-  // Issue #122: when the wrapper spawned us as the distill agent it
-  // exported the live vault and the worktree. In that process only, block
-  // the agent writes into the live vault and its git there. The guarantee
-  // remains the wrapper tree-diff gate; this is early feedback so a run
-  // does not spend its budget writing notes the wrapper will drop.
+  // Issues #117/#122: when the wrapper spawned us as the distill agent it
+  // exported our sandbox (the worktree, or the vault on the git-less tmpdir
+  // path) and the live vault. In that process only, arm the tool_call gate:
+  // the fork may distill into its sandbox and nothing else. The guarantee
+  // remains the wrapper tree-diff gate; this is early feedback that also
+  // stops a resumed fork from launching the parent's work.
   const distillScope = resolveDistillScope();
   if (distillScope) {
     pi.on("tool_call", (event) =>
