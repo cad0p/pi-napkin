@@ -1,6 +1,9 @@
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as path from "node:path";
-import { Napkin } from "@cad0p/napkin";
+import { pathToFileURL } from "node:url";
+import { Worker } from "node:worker_threads";
+import { Napkin, type VaultOverview } from "@cad0p/napkin";
 import {
   type AgentToolResult,
   type ExtensionAPI,
@@ -177,6 +180,49 @@ function kbRenderTimedResult(
  */
 const SEARCH_FRESHNESS_MS = 5000;
 
+/**
+ * Generous bound for a stuck overview worker (pi-napkin #132). A 28.7k-note
+ * cold build takes ~14 s worst case; 120 s only fires on a genuinely wedged
+ * worker, which is then terminated and the in-thread fallback runs.
+ */
+const OVERVIEW_WORKER_TIMEOUT_MS = 120_000;
+
+/**
+ * Test/debug seams. NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER forces the
+ * in-thread build (also a user escape hatch if worker_threads misbehaves on
+ * an exotic runtime); NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY points the Worker
+ * at a different file (tests use it to inject failing/slow workers).
+ */
+function overviewWorkerDisabled(): boolean {
+  return !!process.env.NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER;
+}
+
+function overviewWorkerEntry(): URL | string {
+  const override = process.env.NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY;
+  if (override) return override;
+  // Plain .mjs next to this file: pi loads index.ts through jiti (which
+  // supports import.meta.url under jiti 2.x), but the Worker needs a file
+  // Node can run without a TS loader — a .ts sibling would only work on
+  // Node's type-stripping versions, not on the Node range pi supports.
+  return new URL("overview-worker.mjs", import.meta.url);
+}
+
+/**
+ * Resolve @cad0p/napkin's entry against THIS package so the worker imports
+ * the same copy the extension uses even under pnpm/nested node_modules. The
+ * resolved file URL rides in workerData; on failure the worker falls back to
+ * a bare specifier resolved from its own location.
+ */
+function resolveNapkinEntryUrl(): string | undefined {
+  try {
+    return pathToFileURL(
+      createRequire(import.meta.url).resolve("@cad0p/napkin"),
+    ).href;
+  } catch {
+    return undefined;
+  }
+}
+
 function getNapkin(cwd: string): Napkin {
   return new Napkin(cwd, { searchFreshnessMs: SEARCH_FRESHNESS_MS });
 }
@@ -185,10 +231,57 @@ interface OverviewPayload {
   text: string;
 }
 
+/** The plain overview object the worker posts back (structured-clone safe). */
+type RawOverview = (VaultOverview & { root?: string }) | null | undefined;
+
 /**
- * Build the injectable overview payload. Async on purpose: it lets
- * session_start defer the call (see buildOverview) and is ready for
- * napkin's asynchronous overview (#86) without changing the call site.
+ * Format a raw VaultOverview (built in-thread or posted back by the worker)
+ * into the injectable payload. Pure: identical inputs give identical text,
+ * which is what the worker-vs-in-thread equivalence test asserts.
+ */
+function formatOverview(overview: RawOverview): OverviewPayload | null {
+  if (!overview) return null;
+
+  // The tags delimit the injected blocks so the provider's merge of
+  // consecutive user-role turns keeps vault context distinguishable from
+  // the user's actual message. Constant tag text keeps the prompt-cache
+  // prefix stable.
+  const blocks: string[] = [];
+  const context = overview.context?.trim();
+  if (context) {
+    blocks.push(`<napkin-context>\n${context}\n</napkin-context>`);
+  }
+  if (overview.overview && overview.overview.length > 0) {
+    let listing = "";
+    for (const folder of overview.overview) {
+      const collapsed = folder.collapsedFolders
+        ? ` (+${folder.collapsedFolders} similar subfolders)`
+        : "";
+      // The SDK reports the vault root as "/"; the CLI renders it as
+      // "./". Mirror that here — "//" looked like a broken path.
+      const path = folder.path === "/" ? "." : folder.path;
+      listing += `${path}/${collapsed}\n`;
+      if (folder.keywords && folder.keywords.length > 0) {
+        listing += `  keywords: ${folder.keywords.join(", ")}\n`;
+      }
+      listing += `  notes: ${folder.notes}\n`;
+    }
+    if (overview.truncated) {
+      // maxRows cap in the SDK dropped the tail of the sorted listing;
+      // tell the agent the vault is bigger than what's shown.
+      listing += `\n… ${overview.truncated.rows} more folders (${overview.truncated.notes} notes) — use kb_search to find specific content\n`;
+    }
+    blocks.push(`<napkin-overview>\n${listing.trimEnd()}\n</napkin-overview>`);
+  }
+  const body = blocks.join("\n\n").trim();
+  if (!body) return null;
+  return { text: body };
+}
+
+/**
+ * Build the injectable overview payload in-thread. Used as the fallback when
+ * the worker cannot start, errors, or times out — the overview must never
+ * disappear just because worker_threads is unavailable.
  */
 async function getOverview(n: Napkin): Promise<OverviewPayload | null> {
   try {
@@ -196,59 +289,18 @@ async function getOverview(n: Napkin): Promise<OverviewPayload | null> {
     // 100) in DEFAULT_CONFIG, so the extension must not diverge from napkin —
     // it relies on napkin's defaults, overridable via the vault config.
     const overview = await n.overview();
-    if (!overview) return null;
-
-    // The tags delimit the injected blocks so the provider's merge of
-    // consecutive user-role turns keeps vault context distinguishable from
-    // the user's actual message. Constant tag text keeps the prompt-cache
-    // prefix stable.
-    const blocks: string[] = [];
-    const context = overview.context?.trim();
-    if (context) {
-      blocks.push(`<napkin-context>\n${context}\n</napkin-context>`);
-    }
-    if (overview.overview && overview.overview.length > 0) {
-      let listing = "";
-      for (const folder of overview.overview) {
-        const collapsed = folder.collapsedFolders
-          ? ` (+${folder.collapsedFolders} similar subfolders)`
-          : "";
-        // The SDK reports the vault root as "/"; the CLI renders it as
-        // "./". Mirror that here — "//" looked like a broken path.
-        const path = folder.path === "/" ? "." : folder.path;
-        listing += `${path}/${collapsed}\n`;
-        if (folder.keywords && folder.keywords.length > 0) {
-          listing += `  keywords: ${folder.keywords.join(", ")}\n`;
-        }
-        listing += `  notes: ${folder.notes}\n`;
-      }
-      if (overview.truncated) {
-        // maxRows cap in the SDK dropped the tail of the sorted listing;
-        // tell the agent the vault is bigger than what's shown.
-        listing += `\n… ${overview.truncated.rows} more folders (${overview.truncated.notes} notes) — use kb_search to find specific content\n`;
-      }
-      blocks.push(
-        `<napkin-overview>\n${listing.trimEnd()}\n</napkin-overview>`,
-      );
-    }
-    const body = blocks.join("\n\n").trim();
-    if (!body) return null;
-    return { text: body };
+    return formatOverview(overview);
   } catch {
     return null;
   }
 }
 
 /**
- * Yield once before building so a fresh session's session_start resolves
- * without waiting for the overview (up to ~11 s / ~850 MB on a large
- * vault). Until napkin #86 lands the synchronous work still blocks the
- * event loop, but after session_start rather than inside it.
+ * Test hook: in-flight background overview builds. The suite polls it to
+ * know when the deferred worker build has settled instead of racing fixed
+ * sleeps; pi itself never reads it.
  */
-async function buildOverview(n: Napkin): Promise<OverviewPayload | null> {
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  return getOverview(n);
-}
+export const __overviewBuildsPending = { count: 0 };
 
 export default function (pi: ExtensionAPI) {
   let hasVault = false;
@@ -257,6 +309,104 @@ export default function (pi: ExtensionAPI) {
   // overview build captures the value and drops its result when the session
   // it was started for is gone (/new, /resume, /fork, quit).
   let sessionGeneration = 0;
+  // The one in-flight overview worker (a build exists at most once per
+  // session). Tracked so session_shutdown can terminate it — a dead
+  // session's 850 MB build must not run to completion.
+  let overviewWorker: Worker | null = null;
+
+  /**
+   * Run Napkin.overview() on a worker thread and resolve with the plain
+   * result object. Rejects on spawn failure, worker error, a posted error,
+   * or the 120 s timeout; the caller falls back to the in-thread build. The
+   * worker is always terminated here once settled — its heap is released
+   * instead of being retained by pi's process for the session's life.
+   */
+  function runOverviewInWorker(cwd: string): Promise<RawOverview> {
+    return new Promise<RawOverview>((resolve, reject) => {
+      let worker: Worker;
+      try {
+        worker = new Worker(overviewWorkerEntry(), {
+          workerData: {
+            cwd,
+            searchFreshnessMs: SEARCH_FRESHNESS_MS,
+            napkinEntryUrl: resolveNapkinEntryUrl(),
+          },
+        });
+      } catch (err) {
+        reject(err);
+        return;
+      }
+      overviewWorker = worker;
+      const settle = (ok: boolean, v: unknown) => {
+        clearTimeout(timer);
+        if (ok) resolve(v as RawOverview);
+        else reject(v);
+        if (overviewWorker === worker) overviewWorker = null;
+        void worker.terminate();
+      };
+      const timer = setTimeout(() => {
+        settle(false, new Error("overview worker timed out"));
+      }, OVERVIEW_WORKER_TIMEOUT_MS);
+      // Keep the timer from holding the process open if the worker dies
+      // without settling (defensive; 'exit' non-zero covers it).
+      timer.unref?.();
+      worker.once(
+        "message",
+        (msg: { overview?: RawOverview; error?: string }) => {
+          if (msg && typeof msg === "object" && "error" in msg && msg.error) {
+            settle(false, new Error(`overview worker failed: ${msg.error}`));
+          } else {
+            settle(true, msg?.overview ?? null);
+          }
+        },
+      );
+      worker.once("error", (err) => settle(false, err));
+      worker.once("exit", (code) => {
+        // Any exit before a message lands is a failed build — including the
+        // code-0 exit terminate() can produce, and a worker that closed its
+        // port without posting. Settling rejects only if not already
+        // resolved (a delivered result wins).
+        settle(
+          false,
+          new Error(
+            `overview worker exited (code ${code}) before posting a result`,
+          ),
+        );
+      });
+    });
+  }
+
+  /**
+   * Yield once before building so a fresh session's session_start resolves
+   * without waiting for the overview (up to ~14 s / ~850 MB on a large
+   * vault), then build it on a worker thread so pi's main thread never
+   * freezes (pi-napkin #132). Falls back to the in-thread call if the
+   * worker cannot deliver.
+   *
+   * The worker failing because session_shutdown terminated it must NOT fall
+   * back: the result would be dropped by the generation guard anyway, and a
+   * synchronous in-thread build would freeze pi mid-teardown for seconds on
+   * a large vault.
+   */
+  async function buildOverview(
+    n: Napkin,
+    cwd: string,
+    generation: number,
+  ): Promise<OverviewPayload | null> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    if (!overviewWorkerDisabled()) {
+      try {
+        return formatOverview(await runOverviewInWorker(cwd));
+      } catch (err) {
+        if (generation !== sessionGeneration) return null;
+        console.error(
+          "[napkin-context] overview worker unavailable; building in-thread:",
+          err,
+        );
+      }
+    }
+    return getOverview(n);
+  }
 
   pi.registerMessageRenderer(
     "napkin-context",
@@ -381,57 +531,62 @@ export default function (pi: ExtensionAPI) {
     }
 
     const buildAndDeliver = async (): Promise<void> => {
-      const overview = await buildOverview(n);
+      __overviewBuildsPending.count++;
+      try {
+        const overview = await buildOverview(n, ctx.cwd, generation);
 
-      // The session was replaced while the overview built (session_shutdown
-      // bumped the generation). Never post into the new session from the
-      // old build, and never touch its UI.
-      if (generation !== sessionGeneration) return;
+        // The session was replaced while the overview built (session_shutdown
+        // bumped the generation). Never post into the new session from the
+        // old build, and never touch its UI.
+        if (generation !== sessionGeneration) return;
 
-      // A message may have appeared while we built; re-check rather than
-      // posting a second copy.
-      if (hasCustomMessage(ctx.sessionManager, "napkin-context")) {
-        paintStatus(true);
-        return;
+        // A message may have appeared while we built; re-check rather than
+        // posting a second copy.
+        if (hasCustomMessage(ctx.sessionManager, "napkin-context")) {
+          paintStatus(true);
+          return;
+        }
+
+        if (overview) {
+          // Send via the public message event path (message_start) so the TUI
+          // renders the custom message live. A direct sessionManager append is
+          // only picked up by the next full chat rebuild — on /new the chat is
+          // rebuilt BEFORE session_start handlers run, so a direct append would
+          // leave the vault overview invisible in the new session's chat (the
+          // stale line survives as terminal pixels until the next repaint).
+          //
+          // Never steer and never ask for a turn: a steered message still
+          // pending after the final assistant response keeps pi's agent loop
+          // going (pi-agent-core getSteeringMessages → another LLM call), and
+          // this context must not cost a turn. triggerTurn:false appends it
+          // without starting or extending a run — immediately when idle,
+          // before the starting messages when a run is about to begin, and at
+          // the next turn_end (never mid tool call) when one is in flight.
+          sendCustomMessageOnce({
+            poster: pi,
+            sm: ctx.sessionManager as Partial<SessionManager>,
+            customType: "napkin-context",
+            content: overview.text,
+            sendOptions: { triggerTurn: false },
+            onFallbackFailure: (err) => {
+              if (ctx.hasUI) {
+                ctx.ui.notify(
+                  `napkin-context: could not inject vault overview (${
+                    err instanceof Error ? err.message : String(err)
+                  })`,
+                  "warning",
+                );
+              }
+            },
+          });
+        }
+
+        // A vault without a renderable overview (no NAPKIN.md, empty
+        // vault, or a failed build) keeps the "no NAPKIN.md" status.
+        paintStatus(!!overview);
+      } finally {
+        __overviewBuildsPending.count--;
       }
-
-      if (overview) {
-        // Send via the public message event path (message_start) so the TUI
-        // renders the custom message live. A direct sessionManager append is
-        // only picked up by the next full chat rebuild — on /new the chat is
-        // rebuilt BEFORE session_start handlers run, so a direct append would
-        // leave the vault overview invisible in the new session's chat (the
-        // stale line survives as terminal pixels until the next repaint).
-        //
-        // Never steer and never ask for a turn: a steered message still
-        // pending after the final assistant response keeps pi's agent loop
-        // going (pi-agent-core getSteeringMessages → another LLM call), and
-        // this context must not cost a turn. triggerTurn:false appends it
-        // without starting or extending a run — immediately when idle,
-        // before the starting messages when a run is about to begin, and at
-        // the next turn_end (never mid tool call) when one is in flight.
-        sendCustomMessageOnce({
-          poster: pi,
-          sm: ctx.sessionManager as Partial<SessionManager>,
-          customType: "napkin-context",
-          content: overview.text,
-          sendOptions: { triggerTurn: false },
-          onFallbackFailure: (err) => {
-            if (ctx.hasUI) {
-              ctx.ui.notify(
-                `napkin-context: could not inject vault overview (${
-                  err instanceof Error ? err.message : String(err)
-                })`,
-                "warning",
-              );
-            }
-          },
-        });
-      }
-
-      // A vault without a renderable overview (no NAPKIN.md, empty vault,
-      // or a failed build) keeps the "no NAPKIN.md" status.
-      paintStatus(!!overview);
     };
 
     void buildAndDeliver().catch((err) => {
@@ -447,6 +602,13 @@ export default function (pi: ExtensionAPI) {
     // being torn down (session replacement runs shutdown on the old
     // extension instance before the new one starts).
     sessionGeneration++;
+    // And kill the worker carrying it: the result would be dropped by the
+    // generation guard anyway, so letting a multi-hundred-MB build finish
+    // would be pure waste.
+    if (overviewWorker) {
+      void overviewWorker.terminate();
+      overviewWorker = null;
+    }
   });
 
   pi.on("before_agent_start", async (event) => {
