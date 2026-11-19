@@ -304,6 +304,16 @@ export const __overviewBuildsPending = { count: 0 };
  */
 export const __overviewChildPid = { pid: null as number | null };
 
+/**
+ * V8 flags for the overview child (#147). A 4 MB young generation makes the
+ * scavenger collect the short-lived arrays a miss allocates while decoding
+ * per-note blobs before they reach RSS: on a 29.5k-note vault a three-note
+ * miss peaks at 183–187 MB instead of 229–242 MB, at the same miss time.
+ */
+export const OVERVIEW_CHILD_EXEC_ARGV: readonly string[] = [
+  "--max-semi-space-size=4",
+];
+
 export default function (pi: ExtensionAPI) {
   let hasVault = false;
   let vaultRoot: string | null = null;
@@ -334,9 +344,10 @@ export default function (pi: ExtensionAPI) {
       try {
         child = fork(overviewChildEntry(), [], {
           // Same node binary, no inherited flags: --inspect/--import-style
-          // flags in execArgv would break or hijack the child.
+          // flags in execArgv would break or hijack the child. Only the
+          // child's own heap sizing goes in (OVERVIEW_CHILD_EXEC_ARGV).
           execPath: process.execPath,
-          execArgv: [],
+          execArgv: [...OVERVIEW_CHILD_EXEC_ARGV],
           // "advanced" is the V8 serializer — the fork() equivalent of the
           // worker's structured-clone postMessage, so the overview object
           // round-trips identical to the in-thread build.

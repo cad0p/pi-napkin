@@ -22,6 +22,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import napkinContext, {
   __overviewBuildsPending,
   __overviewChildPid,
+  OVERVIEW_CHILD_EXEC_ARGV,
 } from "./index";
 
 const SEARCH_CONFIG = {
@@ -892,6 +893,25 @@ describe("vault overview (session context)", () => {
       expect(childRun.injected[0]).toBe(inThreadRun.injected[0]);
       expect(childRun.injected[0]).toContain("<napkin-context>");
       expect(childRun.injected[0]).toContain("<napkin-overview>");
+    });
+
+    test("the child runs with only the overview heap flags (#147)", async () => {
+      // The fixture child reports its own execArgv as the vault context, so
+      // the injected text shows exactly which flags the fork passed.
+      const entry = writeFixtureChild(
+        "argv.mjs",
+        "process.send({ overview: { context: 'ARGV=' + JSON.stringify(process.execArgv), overview: [] } });\n",
+      );
+      vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY", entry);
+      const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+
+      const { injected, calls } = await runSessionStart(vault);
+
+      expect(calls).toBe(1);
+      expect(OVERVIEW_CHILD_EXEC_ARGV).toEqual(["--max-semi-space-size=4"]);
+      expect(injected[0]).toContain(
+        `ARGV=${JSON.stringify(OVERVIEW_CHILD_EXEC_ARGV)}`,
+      );
     });
 
     test("falls back to the in-thread build when the child cannot start", async () => {
