@@ -35,6 +35,7 @@
   },
   "files": [
     "extensions/**/*.ts",
+    "extensions/**/*.mjs",
     "!extensions/**/*.test.ts",
     "!extensions/**/_test-helpers.ts",
     "extensions/**/scripts/**",
