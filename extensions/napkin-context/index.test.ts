@@ -110,13 +110,15 @@ interface RegisteredTool {
   ) => Text;
 }
 
-function loadExtension(): {
+function loadExtension(
+  options: { sendMessage?: (message: unknown, options?: unknown) => void } = {},
+): {
   tools: Map<string, RegisteredTool>;
   handlers: Map<string, (event: unknown, ctx: never) => unknown>;
 } {
   const tools = new Map<string, RegisteredTool>();
   const handlers = new Map<string, (event: unknown, ctx: never) => unknown>();
-  const pi = {
+  const pi: Record<string, unknown> = {
     registerTool: (t: RegisteredTool) => {
       tools.set(t.name, t);
     },
@@ -125,6 +127,10 @@ function loadExtension(): {
       handlers.set(event, handler);
     },
   };
+  // The delivery path only exists when the caller supplies sendMessage.
+  // Without it the shared helper's fallback (appendCustomMessageEntry) is
+  // exercised, which is what the overview-content tests assert on.
+  if (options.sendMessage) pi.sendMessage = options.sendMessage;
   napkinContext(pi as never);
   return { tools, handlers };
 }
@@ -177,6 +183,13 @@ function renderResult(
   return render(result, options, identityTheme, context)
     .render(200)
     .map((line) => line.trimEnd());
+}
+
+// session_start defers the overview build via setImmediate; drain it (and
+// its microtasks) before asserting on the injected message/status.
+async function flushBackgroundWork(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 function makeContext(overrides: Partial<RenderContext> = {}): RenderContext {
@@ -405,16 +418,32 @@ describe("vault overview (session context)", () => {
   // injected custom message, mirroring the other suites' real-SDK pattern.
   // With hasUI the fake UI captures setStatus calls (identity theme, so
   // content is ANSI-free).
-  async function runSessionStart(
-    vault: string,
-    opts: { hasUI?: boolean } = {},
-  ): Promise<{
+  interface SessionStartCapture {
     injected: string[];
     types: string[];
     calls: number;
     setStatusCalls: { id: string; content: string }[];
-  }> {
-    const { handlers } = loadExtension();
+    handlers: Map<string, (event: unknown, ctx: never) => unknown>;
+  }
+
+  interface SessionStartOptions {
+    hasUI?: boolean;
+    /** Session history probe; mutable so a test can add an entry mid-build. */
+    entries?: () => unknown[];
+    isIdle?: () => boolean;
+    sendMessage?: (message: unknown, options?: unknown) => void;
+  }
+
+  // Invokes session_start and returns as soon as the handler resolves — the
+  // overview build is still pending. Tests that assert on its delivery use
+  // runSessionStart (which flushes) or flushBackgroundWork themselves.
+  async function invokeSessionStart(
+    vault: string,
+    opts: SessionStartOptions = {},
+  ): Promise<SessionStartCapture> {
+    const { handlers } = loadExtension({
+      sendMessage: opts.sendMessage,
+    });
     const injected: string[] = [];
     const types: string[] = [];
     const setStatusCalls: { id: string; content: string }[] = [];
@@ -422,7 +451,7 @@ describe("vault overview (session context)", () => {
     const ctx = {
       cwd: vault,
       sessionManager: {
-        getEntries: () => [],
+        getEntries: opts.entries ?? (() => []),
         appendCustomMessageEntry: (type: string, text: string) => {
           calls++;
           types.push(type);
@@ -430,6 +459,7 @@ describe("vault overview (session context)", () => {
         },
       },
       hasUI: opts.hasUI ?? false,
+      isIdle: opts.isIdle ?? (() => true),
       ui: opts.hasUI
         ? {
             theme: identityTheme,
@@ -443,7 +473,26 @@ describe("vault overview (session context)", () => {
     const handler = handlers.get("session_start");
     if (!handler) throw new Error("session_start handler not registered");
     await handler(undefined, ctx as never);
-    return { injected, types, calls, setStatusCalls };
+    return {
+      injected,
+      types,
+      // Getter, not a snapshot: the deferred build appends after the
+      // handler (and before runSessionStart returns).
+      get calls() {
+        return calls;
+      },
+      setStatusCalls,
+      handlers,
+    };
+  }
+
+  async function runSessionStart(
+    vault: string,
+    opts: SessionStartOptions = {},
+  ): Promise<SessionStartCapture> {
+    const capture = await invokeSessionStart(vault, opts);
+    await flushBackgroundWork();
+    return capture;
   }
 
   test("renders homogeneous sibling subfolders as a collapsed row with count", async () => {
@@ -534,13 +583,131 @@ describe("vault overview (session context)", () => {
     expect(injected[0]).toContain("notes/");
   });
 
-  test("injects nothing for an empty vault (no root-only message)", async () => {
+  test("injects nothing for an empty vault and keeps the no-NAPKIN.md status", async () => {
     const vault = makeVault({});
 
-    const { injected, calls } = await runSessionStart(vault);
+    const { injected, calls, setStatusCalls } = await runSessionStart(vault, {
+      hasUI: true,
+    });
 
     expect(calls).toBe(0);
     expect(injected).toEqual([]);
+    // The build resolved to null (empty vault): status still says there is
+    // no NAPKIN.md, as it did before the background build.
+    expect(setStatusCalls).toContainEqual({
+      id: "napkin",
+      content: "napkin: no NAPKIN.md",
+    });
+  });
+
+  test("skips the build when the session already carries an overview", async () => {
+    const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+    const overview = vi.spyOn(Napkin.prototype, "overview");
+    try {
+      const { injected, calls, setStatusCalls } = await runSessionStart(vault, {
+        entries: () => [
+          { type: "custom_message", customType: "napkin-context" },
+        ],
+        hasUI: true,
+      });
+
+      expect(overview).not.toHaveBeenCalled();
+      expect(calls).toBe(0);
+      expect(injected).toEqual([]);
+      expect(setStatusCalls).toContainEqual({
+        id: "napkin",
+        content: "📜 napkin",
+      });
+    } finally {
+      overview.mockRestore();
+    }
+  });
+
+  test("session_start resolves before the overview is built", async () => {
+    const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+    const overview = vi.spyOn(Napkin.prototype, "overview");
+    try {
+      const capture = await invokeSessionStart(vault);
+
+      // The handler has resolved, but the deferred build has not started.
+      expect(overview).not.toHaveBeenCalled();
+      expect(capture.calls).toBe(0);
+
+      await flushBackgroundWork();
+
+      expect(overview).toHaveBeenCalledTimes(1);
+      expect(capture.calls).toBe(1);
+      expect(capture.types).toEqual(["napkin-context"]);
+    } finally {
+      overview.mockRestore();
+    }
+  });
+
+  test("idle delivery stores the overview without starting a turn", async () => {
+    const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+    const sendMessage = vi.fn();
+    const { calls } = await runSessionStart(vault, {
+      sendMessage,
+      isIdle: () => true,
+    });
+
+    expect(calls).toBe(0);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    const [message, options] = sendMessage.mock.calls[0];
+    expect(message).toMatchObject({
+      customType: "napkin-context",
+      display: true,
+    });
+    expect(options).toEqual({ triggerTurn: false });
+  });
+
+  test("mid-run delivery steers the overview into the running turn", async () => {
+    const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+    const sendMessage = vi.fn();
+    await runSessionStart(vault, {
+      sendMessage,
+      isIdle: () => false,
+    });
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage.mock.calls[0][1]).toEqual({
+      deliverAs: "steer",
+      triggerTurn: true,
+    });
+  });
+
+  test("a shutdown before the build finishes drops the overview", async () => {
+    const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+    const sendMessage = vi.fn();
+    const capture = await invokeSessionStart(vault, { sendMessage });
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    const shutdown = capture.handlers.get("session_shutdown");
+    if (!shutdown) throw new Error("session_shutdown handler not registered");
+    await shutdown(undefined, {} as never);
+    await flushBackgroundWork();
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(capture.calls).toBe(0);
+    expect(capture.injected).toEqual([]);
+  });
+
+  test("an overview appearing while building is not duplicated", async () => {
+    const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+    const entries: unknown[] = [];
+    const sendMessage = vi.fn();
+    const capture = await invokeSessionStart(vault, {
+      sendMessage,
+      entries: () => entries,
+    });
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    // e.g. a fork/resume replaced the history while the build was running.
+    entries.push({ type: "custom_message", customType: "napkin-context" });
+    await flushBackgroundWork();
+
+    expect(sendMessage).not.toHaveBeenCalled();
+    expect(capture.calls).toBe(0);
   });
 
   test.skipIf(!napkinThrowsWithoutVault)(
@@ -669,6 +836,7 @@ describe("before_agent_start (system prompt mandate)", () => {
         },
       },
       hasUI: false,
+      isIdle: () => true,
     };
     const sessionStart = handlers.get("session_start");
     const beforeAgentStart = handlers.get("before_agent_start");
@@ -676,10 +844,13 @@ describe("before_agent_start (system prompt mandate)", () => {
       throw new Error("session_start/before_agent_start not registered");
     }
     await sessionStart(undefined, ctx as never);
+    // before_agent_start runs while the deferred overview build is still
+    // pending, proving the mandate no longer waits for the overview.
     const res = await beforeAgentStart(
       { systemPrompt: "base prompt", systemPromptOptions: {} },
       undefined as never,
     );
+    await flushBackgroundWork();
     return { injected, calls, res };
   }
 
@@ -689,7 +860,8 @@ describe("before_agent_start (system prompt mandate)", () => {
     const { calls, res } = await runMandate(vault);
 
     expect(calls).toBe(1);
-    // overview.root === the fixture dir (proven here via the mandate string)
+    // vault.contentPath === the fixture dir (proven here via the mandate
+    // string); the root does not depend on the overview build.
     expect(res).toEqual({
       systemPrompt:
         "base prompt\n\nA napkin obsidian vault with the user context is available at " +
@@ -697,14 +869,21 @@ describe("before_agent_start (system prompt mandate)", () => {
     });
   });
 
-  test("empty vault: no overview injected and the mandate is empty", async () => {
+  test("empty vault: no overview injected, but the mandate is still set", async () => {
     const vault = makeVault({});
 
     const { injected, calls, res } = await runMandate(vault);
 
     expect(calls).toBe(0);
     expect(injected).toEqual([]);
-    expect(res).toEqual({});
+    // Vault presence now comes from resolution, not from a non-empty
+    // overview, so the first prompt knows the vault even on a fresh/empty
+    // vault.
+    expect(res).toEqual({
+      systemPrompt:
+        "base prompt\n\nA napkin obsidian vault with the user context is available at " +
+        `${vault}. Before answering, you must consult it via kb_search.`,
+    });
   });
 });
 

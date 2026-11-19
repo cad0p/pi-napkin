@@ -53,7 +53,7 @@ Two pi extensions, one skill, two slash commands, one agent tool.
 
 | Extension | What it does |
 |---|---|
-| `napkin-context` | On session start, injects the vault overview into the agent's context. Registers `kb_search` + `kb_read` tools. |
+| `napkin-context` | On session start, injects the vault overview into the agent's context. The overview is built in the background on fresh sessions, and skipped when a resumed/forked session already carries it, so startup is not blocked. Registers `kb_search`, `kb_read` and `kb_outline` tools. |
 | `napkin-distill` | Automatic knowledge distillation. Runs on a timer and at shutdown, forks the conversation, and asks a cheap model to extract structured notes into the vault. |
 
 ### Skill
