@@ -11,6 +11,7 @@ All notable changes to this project will be documented in this file.
 ### 🚀 Features
 
 - *(napkin-context)* Bump @cad0p/napkin to 0.14.0-20261119.6, reuse vault walks for 5 s in kb_search (closes #130) ([#131](https://github.com/cad0p/pi-napkin/pull/131))
+- *(napkin-context)* Build the vault overview in a worker thread (closes #132) ([#133](https://github.com/cad0p/pi-napkin/pull/133))
 
 ### 🐛 Bug Fixes
 
