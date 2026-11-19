@@ -3,6 +3,14 @@ import type {
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
 
+/** Delivery options forwarded to `pi.sendMessage` (see its docs). */
+export interface CustomMessageDeliveryOptions {
+  /** If true and idle, start an LLM turn; without it the message is stored only. */
+  triggerTurn?: boolean;
+  /** "steer" queues while streaming, "followUp" waits for the agent to settle. */
+  deliverAs?: "steer" | "followUp" | "nextTurn";
+}
+
 export interface SendCustomMessageWithFallbackOptions {
   /** The extension API whose `sendMessage` is fire-and-forget (void). */
   poster: Pick<ExtensionAPI, "sendMessage">;
@@ -17,6 +25,12 @@ export interface SendCustomMessageWithFallbackOptions {
   content: string;
   /** Defaults to `true` (surface in the TUI). */
   display?: boolean;
+  /**
+   * Optional delivery options. Omitted = pi's defaults (steer while
+   * streaming, idle append without a turn); the fallback append ignores
+   * them because it writes straight to the session manager.
+   */
+  sendOptions?: CustomMessageDeliveryOptions;
   /**
    * Invoked when the fallback append itself throws (e.g. a genuinely
    * readonly manager at runtime). Lets callers surface a warning;
@@ -63,10 +77,15 @@ export function sendCustomMessageWithFallback(
     customType,
     content,
     display = true,
+    sendOptions,
     onFallbackFailure,
   } = options;
   try {
-    poster.sendMessage({ customType, content, display });
+    const message = { customType, content, display };
+    // Pass the options argument only when set: callers/tests pin the plain
+    // single-argument call for the default path.
+    if (sendOptions) poster.sendMessage(message, sendOptions);
+    else poster.sendMessage(message);
   } catch {
     if (sm && typeof sm.appendCustomMessageEntry === "function") {
       try {

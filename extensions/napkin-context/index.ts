@@ -11,7 +11,10 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
-import { sendCustomMessageOnce } from "../shared/custom-message";
+import {
+  hasCustomMessage,
+  sendCustomMessageOnce,
+} from "../shared/custom-message";
 
 function loadShowStatus(vaultPath: string): boolean {
   const configPath = path.join(vaultPath, "config.json");
@@ -170,12 +173,21 @@ function getNapkin(cwd: string): Napkin {
   return new Napkin(cwd);
 }
 
-function getOverview(n: Napkin): { text: string; root: string } | null {
+interface OverviewPayload {
+  text: string;
+}
+
+/**
+ * Build the injectable overview payload. Async on purpose: it lets
+ * session_start defer the call (see buildOverview) and is ready for
+ * napkin's asynchronous overview (#86) without changing the call site.
+ */
+async function getOverview(n: Napkin): Promise<OverviewPayload | null> {
   try {
     // napkin >= 0.12.3 ships the fork's defaults (collapseDepth 2, maxRows
     // 100) in DEFAULT_CONFIG, so the extension must not diverge from napkin —
     // it relies on napkin's defaults, overridable via the vault config.
-    const overview = n.overview();
+    const overview = await n.overview();
     if (!overview) return null;
 
     // The tags delimit the injected blocks so the provider's merge of
@@ -213,15 +225,30 @@ function getOverview(n: Napkin): { text: string; root: string } | null {
     }
     const body = blocks.join("\n\n").trim();
     if (!body) return null;
-    return { text: body, root: overview.root };
+    return { text: body };
   } catch {
     return null;
   }
 }
 
+/**
+ * Yield once before building so a fresh session's session_start resolves
+ * without waiting for the overview (up to ~11 s / ~850 MB on a large
+ * vault). Until napkin #86 lands the synchronous work still blocks the
+ * event loop, but after session_start rather than inside it.
+ */
+async function buildOverview(n: Napkin): Promise<OverviewPayload | null> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  return getOverview(n);
+}
+
 export default function (pi: ExtensionAPI) {
   let hasVault = false;
   let vaultRoot: string | null = null;
+  // Bumped by every session_start and session_shutdown. A background
+  // overview build captures the value and drops its result when the session
+  // it was started for is gone (/new, /resume, /fork, quit).
+  let sessionGeneration = 0;
 
   pi.registerMessageRenderer(
     "napkin-context",
@@ -270,10 +297,14 @@ export default function (pi: ExtensionAPI) {
   );
 
   pi.on("session_start", async (_event, ctx) => {
+    const generation = ++sessionGeneration;
+
     let n: Napkin;
     try {
       n = getNapkin(ctx.cwd);
     } catch (e) {
+      hasVault = false;
+      vaultRoot = null;
       // No usable vault (none found, or a refused legacy-layout vault).
       // Surface napkin's own actionable error to BOTH the user (TUI) and the
       // agent (context), so the first session is self-documenting: without
@@ -312,52 +343,102 @@ export default function (pi: ExtensionAPI) {
       return;
     }
 
-    const overview = getOverview(n);
-    hasVault = !!overview;
-    vaultRoot = overview?.root ?? null;
+    // Derive vault presence/root from the resolved vault, not from the
+    // overview: the background build may be skipped (resumed history) or
+    // still running, and before_agent_start needs the root on the first
+    // prompt.
+    hasVault = true;
+    vaultRoot = n.vault.contentPath;
 
-    if (overview) {
-      // Send via the public message event path (message_start) so the TUI
-      // renders the custom message live. A direct sessionManager append is
-      // only picked up by the next full chat rebuild — on /new the chat is
-      // rebuilt BEFORE session_start handlers run, so a direct append would
-      // leave the vault overview invisible in the new session's chat (the
-      // stale line survives as terminal pixels until the next repaint).
-      // pi.sendMessage is fire-and-forget (void). In the idle path it
-      // appends the entry to the session manager synchronously AND pushes
-      // the message into agent state — the overview participates in LLM
-      // context by design, even where the TUI event is not subscribed yet
-      // (startup path).
-      //
-      // `sendCustomMessageOnce` dedupes by customType: a resumed session
-      // already replays the prior overview in its history, so re-injecting
-      // would only duplicate it.
-      sendCustomMessageOnce({
-        poster: pi,
-        sm: ctx.sessionManager as Partial<SessionManager>,
-        customType: "napkin-context",
-        content: overview.text,
-        onFallbackFailure: (err) => {
-          if (ctx.hasUI) {
-            ctx.ui.notify(
-              `napkin-context: could not inject vault overview (${
-                err instanceof Error ? err.message : String(err)
-              })`,
-              "warning",
-            );
-          }
-        },
-      });
-    }
+    const showStatus = ctx.hasUI && loadShowStatus(n.vault.configPath);
 
-    if (ctx.hasUI && loadShowStatus(n.vault.configPath)) {
+    const paintStatus = (hasOverview: boolean): void => {
+      if (!showStatus || !ctx.ui) return;
       const theme = ctx.ui.theme;
-      if (hasVault) {
-        ctx.ui.setStatus("napkin", `📜${theme.fg("dim", " napkin")}`);
-      } else {
-        ctx.ui.setStatus("napkin", theme.fg("dim", "napkin: no NAPKIN.md"));
-      }
+      ctx.ui.setStatus(
+        "napkin",
+        hasOverview
+          ? `📜${theme.fg("dim", " napkin")}`
+          : theme.fg("dim", "napkin: no NAPKIN.md"),
+      );
+    };
+
+    // Forked and resumed sessions (distill's SessionManager.forkFrom, pi
+    // --resume, pi -c) already replay the injected overview in their
+    // history. Their prompt-cache prefix is unchanged by it, so rebuilding
+    // would burn the full overview just to discard the duplicate.
+    if (hasCustomMessage(ctx.sessionManager, "napkin-context")) {
+      paintStatus(true);
+      return;
     }
+
+    const buildAndDeliver = async (): Promise<void> => {
+      const overview = await buildOverview(n);
+
+      // The session was replaced while the overview built (session_shutdown
+      // bumped the generation). Never post into the new session from the
+      // old build, and never touch its UI.
+      if (generation !== sessionGeneration) return;
+
+      // A message may have appeared while we built; re-check rather than
+      // posting a second copy.
+      if (hasCustomMessage(ctx.sessionManager, "napkin-context")) {
+        paintStatus(true);
+        return;
+      }
+
+      if (overview) {
+        // Send via the public message event path (message_start) so the TUI
+        // renders the custom message live. A direct sessionManager append is
+        // only picked up by the next full chat rebuild — on /new the chat is
+        // rebuilt BEFORE session_start handlers run, so a direct append would
+        // leave the vault overview invisible in the new session's chat (the
+        // stale line survives as terminal pixels until the next repaint).
+        //
+        // Never steer and never ask for a turn: a steered message still
+        // pending after the final assistant response keeps pi's agent loop
+        // going (pi-agent-core getSteeringMessages → another LLM call), and
+        // this context must not cost a turn. triggerTurn:false appends it
+        // without starting or extending a run — immediately when idle,
+        // before the starting messages when a run is about to begin, and at
+        // the next turn_end (never mid tool call) when one is in flight.
+        sendCustomMessageOnce({
+          poster: pi,
+          sm: ctx.sessionManager as Partial<SessionManager>,
+          customType: "napkin-context",
+          content: overview.text,
+          sendOptions: { triggerTurn: false },
+          onFallbackFailure: (err) => {
+            if (ctx.hasUI) {
+              ctx.ui.notify(
+                `napkin-context: could not inject vault overview (${
+                  err instanceof Error ? err.message : String(err)
+                })`,
+                "warning",
+              );
+            }
+          },
+        });
+      }
+
+      // A vault without a renderable overview (no NAPKIN.md, empty vault,
+      // or a failed build) keeps the "no NAPKIN.md" status.
+      paintStatus(!!overview);
+    };
+
+    void buildAndDeliver().catch((err) => {
+      // buildOverview turns overview failures into null; anything reaching
+      // here happened after session_start returned, so surfacing it there is
+      // no longer possible.
+      console.error("[napkin-context] background overview failed:", err);
+    });
+  });
+
+  pi.on("session_shutdown", async () => {
+    // Invalidate an in-flight build: its result belongs to the session
+    // being torn down (session replacement runs shutdown on the old
+    // extension instance before the new one starts).
+    sessionGeneration++;
   });
 
   pi.on("before_agent_start", async (event) => {
