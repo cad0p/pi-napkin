@@ -12,7 +12,7 @@
  * this file is the only TS-free artifact that has to exist for that.
  *
  * Protocol (structured-clone safe):
- *   workerData: { cwd, searchFreshnessMs?, napkinEntryUrl? }
+ *   workerData: { cwd, searchFreshnessMs? }
  *   posts:      { overview: <VaultOverview & { root }> | null }
  *            or { error: <message> } — the parent treats both like a worker
  *            'error' event and falls back to the in-thread build.
@@ -21,15 +21,13 @@
 import { parentPort, workerData } from "node:worker_threads";
 
 async function main() {
-  const { cwd, searchFreshnessMs, napkinEntryUrl } = workerData;
-  // Prefer the entry the extension resolved against pi-napkin's own package
-  // (createRequire(import.meta.url).resolve — correct under pnpm/nested
-  // layouts where a bare specifier would resolve against THIS file's package,
-  // which may not carry @cad0p/napkin). Fall back to the bare specifier:
-  // inside the published package this file sits next to the dependency.
-  const napkin = napkinEntryUrl
-    ? await import(napkinEntryUrl)
-    : await import("@cad0p/napkin");
+  const { cwd, searchFreshnessMs } = workerData;
+  // Bare specifier resolved from THIS file's location: the worker sits inside
+  // the published pi-napkin package, and module resolution walks up from
+  // extensions/napkin-context/ into pi-napkin's own node_modules, where
+  // @cad0p/napkin is a real dependency — including pnpm's
+  // .pnpm/<pkg>/node_modules sibling layout.
+  const napkin = await import("@cad0p/napkin");
   const n = new napkin.Napkin(
     cwd,
     searchFreshnessMs === undefined ? undefined : { searchFreshnessMs },

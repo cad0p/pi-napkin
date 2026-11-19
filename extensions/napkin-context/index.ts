@@ -1,7 +1,5 @@
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as path from "node:path";
-import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { Napkin, type VaultOverview } from "@cad0p/napkin";
 import {
@@ -207,22 +205,6 @@ function overviewWorkerEntry(): URL | string {
   return new URL("overview-worker.mjs", import.meta.url);
 }
 
-/**
- * Resolve @cad0p/napkin's entry against THIS package so the worker imports
- * the same copy the extension uses even under pnpm/nested node_modules. The
- * resolved file URL rides in workerData; on failure the worker falls back to
- * a bare specifier resolved from its own location.
- */
-function resolveNapkinEntryUrl(): string | undefined {
-  try {
-    return pathToFileURL(
-      createRequire(import.meta.url).resolve("@cad0p/napkin"),
-    ).href;
-  } catch {
-    return undefined;
-  }
-}
-
 function getNapkin(cwd: string): Napkin {
   return new Napkin(cwd, { searchFreshnessMs: SEARCH_FRESHNESS_MS });
 }
@@ -329,7 +311,6 @@ export default function (pi: ExtensionAPI) {
           workerData: {
             cwd,
             searchFreshnessMs: SEARCH_FRESHNESS_MS,
-            napkinEntryUrl: resolveNapkinEntryUrl(),
           },
         });
       } catch (err) {
