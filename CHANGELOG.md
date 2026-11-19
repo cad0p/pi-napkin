@@ -27,6 +27,7 @@ All notable changes to this project will be documented in this file.
 - Bump @cad0p/napkin to 0.14.0-20261119.11 (closes #137) ([#138](https://github.com/cad0p/pi-napkin/pull/138))
 - Bump @cad0p/napkin to 0.14.0-20261119.12 (closes #141) ([#142](https://github.com/cad0p/pi-napkin/pull/142))
 - Bump @cad0p/napkin to 0.14.0-20261119.13 (closes #143) ([#144](https://github.com/cad0p/pi-napkin/pull/144))
+- Bump @cad0p/napkin to 0.14.0-20261119.14 (closes #145) ([#146](https://github.com/cad0p/pi-napkin/pull/146))
 
 
 ## [0.7.3] - 2026-08-24
