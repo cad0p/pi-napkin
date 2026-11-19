@@ -395,19 +395,19 @@ export default function (pi: ExtensionAPI) {
         // leave the vault overview invisible in the new session's chat (the
         // stale line survives as terminal pixels until the next repaint).
         //
-        // Idle: store the message without starting a turn (pi.sendMessage
-        // with triggerTurn false), as the previous synchronous path did.
-        // Mid-run: steer it so it is delivered before the next LLM call
-        // instead of waiting for the whole turn to end (the same split
-        // pi-subagents uses for completion notices).
+        // Never steer and never ask for a turn: a steered message still
+        // pending after the final assistant response keeps pi's agent loop
+        // going (pi-agent-core getSteeringMessages → another LLM call), and
+        // this context must not cost a turn. triggerTurn:false appends it
+        // without starting or extending a run — immediately when idle,
+        // before the starting messages when a run is about to begin, and at
+        // the next turn_end (never mid tool call) when one is in flight.
         sendCustomMessageOnce({
           poster: pi,
           sm: ctx.sessionManager as Partial<SessionManager>,
           customType: "napkin-context",
           content: overview.text,
-          sendOptions: ctx.isIdle()
-            ? { triggerTurn: false }
-            : { deliverAs: "steer", triggerTurn: true },
+          sendOptions: { triggerTurn: false },
           onFallbackFailure: (err) => {
             if (ctx.hasUI) {
               ctx.ui.notify(

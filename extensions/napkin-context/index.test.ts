@@ -430,6 +430,7 @@ describe("vault overview (session context)", () => {
     hasUI?: boolean;
     /** Session history probe; mutable so a test can add an entry mid-build. */
     entries?: () => unknown[];
+    /** Fake run state. Delivery must not branch on it (no steer, no turn). */
     isIdle?: () => boolean;
     sendMessage?: (message: unknown, options?: unknown) => void;
   }
@@ -659,21 +660,25 @@ describe("vault overview (session context)", () => {
       display: true,
     });
     expect(options).toEqual({ triggerTurn: false });
+    expect(options).not.toHaveProperty("deliverAs");
   });
 
-  test("mid-run delivery steers the overview into the running turn", async () => {
+  test("mid-run delivery never steers or triggers a turn", async () => {
+    // The background build can resolve while the first prompt is already
+    // running. Steer would keep pi's agent loop alive for an extra LLM
+    // call, so busy delivery must stay triggerTurn:false too.
     const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
     const sendMessage = vi.fn();
-    await runSessionStart(vault, {
+    const { calls } = await runSessionStart(vault, {
       sendMessage,
       isIdle: () => false,
     });
 
+    expect(calls).toBe(0);
     expect(sendMessage).toHaveBeenCalledTimes(1);
-    expect(sendMessage.mock.calls[0][1]).toEqual({
-      deliverAs: "steer",
-      triggerTurn: true,
-    });
+    const options = sendMessage.mock.calls[0][1];
+    expect(options).toEqual({ triggerTurn: false });
+    expect(options).not.toHaveProperty("deliverAs");
   });
 
   test("a shutdown before the build finishes drops the overview", async () => {
