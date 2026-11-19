@@ -38,6 +38,37 @@ describe("sendCustomMessageWithFallback", () => {
     });
   });
 
+  test("forwards sendOptions to sendMessage", () => {
+    const sendMessage = vi.fn();
+    sendCustomMessageWithFallback({
+      poster: { sendMessage },
+      sm: undefined,
+      customType: "napkin-test",
+      content: "notice-text",
+      sendOptions: { deliverAs: "steer", triggerTurn: true },
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(sendMessage).toHaveBeenCalledWith(
+      { customType: "napkin-test", content: "notice-text", display: true },
+      { deliverAs: "steer", triggerTurn: true },
+    );
+  });
+
+  test("forwards the idle no-turn option", () => {
+    const sendMessage = vi.fn();
+    sendCustomMessageWithFallback({
+      poster: { sendMessage },
+      sm: undefined,
+      customType: "napkin-test",
+      content: "notice-text",
+      sendOptions: { triggerTurn: false },
+    });
+    expect(sendMessage).toHaveBeenCalledWith(
+      { customType: "napkin-test", content: "notice-text", display: true },
+      { triggerTurn: false },
+    );
+  });
+
   test("falls back to a direct session-manager append when sendMessage throws", () => {
     const sendMessage = vi.fn(() => {
       throw new Error("stale runtime");
