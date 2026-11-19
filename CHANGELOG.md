@@ -19,6 +19,7 @@ All notable changes to this project will be documented in this file.
 - *(distill)* Preflight the napkin CLI and surface a repair notice when missing (closes #109)
 - *(package)* Ship CHANGELOG.md so Pi shows Extension Updates (closes #114)
 - *(napkin-context)* Skip the overview when the session has one; build it in the background, never trigger a turn (closes #126)
+- *(napkin-context)* Build the vault overview in a child process (closes #139) ([#140](https://github.com/cad0p/pi-napkin/pull/140))
 
 ### 💼 Other
 
