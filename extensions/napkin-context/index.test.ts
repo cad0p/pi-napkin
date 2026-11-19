@@ -16,11 +16,13 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Worker } from "node:worker_threads";
 import { NAPKIN_MARKER, Napkin } from "@cad0p/napkin";
 import type { Text } from "@earendil-works/pi-tui";
 import { afterEach, describe, expect, test, vi } from "vitest";
-import napkinContext, { __overviewBuildsPending } from "./index";
+import napkinContext, {
+  __overviewBuildsPending,
+  __overviewChildPid,
+} from "./index";
 
 const SEARCH_CONFIG = {
   // vault.root mirrors the real Goldmine config: sibling layout, content
@@ -187,7 +189,7 @@ function renderResult(
 }
 
 // session_start defers the overview build via setImmediate, then runs it on
-// a worker thread (#132). Drain the deferral, then wait out the worker
+// a forked child process (#139). Drain the deferral, then wait out the child
 // round-trip via the extension's pending-build counter before asserting on
 // the injected message/status.
 async function flushBackgroundWork(): Promise<void> {
@@ -633,7 +635,7 @@ describe("vault overview (session context)", () => {
 
   test("session_start resolves before the overview is built", async () => {
     const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
-    // The overview runs on a worker thread by default (#132), where a
+    // The overview runs in a child process by default (#139), where a
     // main-thread prototype spy cannot see it — pin this deferral-semantics
     // test to the in-thread path so the spy stays meaningful.
     vi.stubEnv("NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER", "1");
@@ -829,50 +831,77 @@ describe("vault overview (session context)", () => {
     );
   });
 
-  describe("worker thread (#132)", () => {
+  describe("child process (#139)", () => {
     afterEach(() => {
       vi.unstubAllEnvs();
       vi.restoreAllMocks();
+      __overviewChildPid.pid = null;
     });
 
-    /** Writes a fixture worker .mjs to a temp dir and returns its path. */
-    function writeFixtureWorker(name: string, body: string): string {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-ctx-wk-"));
+    /** Writes a fixture child .mjs to a temp dir and returns its path. */
+    function writeFixtureChild(name: string, body: string): string {
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "napkin-ctx-child-"));
       const p = path.join(dir, name);
       fs.writeFileSync(p, body);
       return p;
     }
 
-    test("the worker path injects text identical to the in-thread build", async () => {
+    /** Resolves once the pid is fully gone (ESRCH — killed AND reaped). */
+    async function waitForPidExit(pid: number, ms = 5_000): Promise<boolean> {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(pid, 0);
+        } catch {
+          return true;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      return false;
+    }
+
+    /** Waits until the deferred build has forked its child; returns the pid. */
+    async function waitForChildSpawn(): Promise<number> {
+      const deadline = Date.now() + 5_000;
+      while (__overviewChildPid.pid === null && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 5));
+      }
+      const pid = __overviewChildPid.pid;
+      if (pid === null) throw new Error("overview child never spawned");
+      return pid;
+    }
+
+    test("the child path injects text identical to the in-thread build", async () => {
       const vault = makeVault({
         "NAPKIN.md": "# My vault\n\n## What is this?\nfixture context",
         "notes/a.md": "# A\n\nnote content about fixture notes\n",
         "notes/b.md": "# B\n\nmore note content about fixture widgets\n",
       });
 
-      // Default path: real worker thread builds the overview.
-      const workerRun = await runSessionStart(vault);
+      // Default path: real forked child builds the overview.
+      const childRun = await runSessionStart(vault);
 
-      // Escape hatch: same session flow with the worker disabled.
+      // Escape hatch: same session flow with the child disabled.
       vi.stubEnv("NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER", "1");
       const inThreadRun = await runSessionStart(vault);
 
-      expect(workerRun.calls).toBe(1);
+      expect(childRun.calls).toBe(1);
       expect(inThreadRun.calls).toBe(1);
       // Formatting lives on the main thread in both paths, so the injected
       // text must be byte-identical.
-      expect(workerRun.injected[0]).toBe(inThreadRun.injected[0]);
-      expect(workerRun.injected[0]).toContain("<napkin-context>");
-      expect(workerRun.injected[0]).toContain("<napkin-overview>");
+      expect(childRun.injected[0]).toBe(inThreadRun.injected[0]);
+      expect(childRun.injected[0]).toContain("<napkin-context>");
+      expect(childRun.injected[0]).toContain("<napkin-overview>");
     });
 
-    test("falls back to the in-thread build when the worker cannot start", async () => {
+    test("falls back to the in-thread build when the child cannot start", async () => {
       const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
-      // A worker entry that does not exist makes the Worker emit 'error';
-      // the extension must still deliver the overview via the in-thread path.
+      // An entry file that does not exist makes the child process exit
+      // non-zero before posting (spawn failure surfaces via 'exit', not
+      // 'error'); the extension must still deliver via the in-thread path.
       vi.stubEnv(
         "NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY",
-        path.join(vault, "missing-worker.mjs"),
+        path.join(vault, "missing-child.mjs"),
       );
 
       const { injected, calls } = await runSessionStart(vault);
@@ -881,11 +910,11 @@ describe("vault overview (session context)", () => {
       expect(injected[0]).toContain("<napkin-overview>");
     });
 
-    test("falls back to the in-thread build when the worker errors mid-build", async () => {
+    test("falls back to the in-thread build when the child errors mid-build", async () => {
       const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
-      const entry = writeFixtureWorker(
+      const entry = writeFixtureChild(
         "boom.mjs",
-        'throw new Error("fixture worker exploded");\n',
+        'throw new Error("fixture child exploded");\n',
       );
       vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY", entry);
 
@@ -895,33 +924,31 @@ describe("vault overview (session context)", () => {
       expect(injected[0]).toContain("<napkin-overview>");
     });
 
-    test("a session replaced while the worker builds drops the result", async () => {
-      // Slow worker: posts a valid-shaped overview ~200 ms in, so the
+    test("a session replaced while the child builds drops the result", async () => {
+      // Slow child: posts a valid-shaped overview ~200 ms in, so the
       // session_shutdown below lands while the build is still in flight.
-      const entry = writeFixtureWorker(
+      const entry = writeFixtureChild(
         "slow.mjs",
-        'import { parentPort } from "node:worker_threads";\n' +
-          "setTimeout(() => {\n" +
-          '  parentPort.postMessage({ overview: { context: "late", overview: [] } });\n' +
-          "  parentPort.close();\n" +
+        "setTimeout(() => {\n" +
+          '  process.send({ overview: { context: "late", overview: [] } });\n' +
           "}, 200);\n",
       );
       vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY", entry);
       const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
       const sendMessage = vi.fn();
-      // Once the session is gone the worker error must NOT trigger the
+      // Once the session is gone the child error must NOT trigger the
       // in-thread fallback — that would freeze pi mid-teardown on a large
       // vault for a result the generation guard drops anyway.
       const overview = vi.spyOn(Napkin.prototype, "overview");
 
       const capture = await invokeSessionStart(vault, { sendMessage });
-      // Let the deferred build spawn the worker, then replace the session.
+      // Let the deferred build spawn the child, then replace the session.
       await new Promise<void>((resolve) => setImmediate(resolve));
       const shutdown = capture.handlers.get("session_shutdown");
       if (!shutdown) throw new Error("session_shutdown handler not registered");
       await shutdown(undefined, {} as never);
 
-      // Wait past the worker's post time; the generation guard must drop it.
+      // Wait past the child's post time; the generation guard must drop it.
       await new Promise((resolve) => setTimeout(resolve, 500));
       await flushBackgroundWork();
 
@@ -931,34 +958,47 @@ describe("vault overview (session context)", () => {
       expect(capture.injected).toEqual([]);
     });
 
-    test("session_shutdown terminates the in-flight worker", async () => {
-      // Worker that never posts: without termination it would burn a thread
-      // for a minute. The only terminate call possible here is the shutdown
-      // handler's (the build never settles).
-      const entry = writeFixtureWorker(
+    test("session_shutdown kills the in-flight child (no live orphan)", async () => {
+      // Child that never posts: without a kill it would burn a process for a
+      // minute. The only kill possible here is the shutdown handler's (the
+      // build never settles) — prove it by the pid being fully dead.
+      const entry = writeFixtureChild(
         "hang.mjs",
         "setTimeout(() => {}, 60_000);\n",
       );
       vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY", entry);
-      const terminate = vi.spyOn(Worker.prototype, "terminate");
       const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
 
       const capture = await invokeSessionStart(vault);
-      // Wait until the build is in flight (worker spawned or spawning).
-      const deadline = Date.now() + 5_000;
-      while (__overviewBuildsPending.count === 0 && Date.now() < deadline) {
-        await new Promise((resolve) => setTimeout(resolve, 5));
-      }
-      // Give the Worker constructor a tick to run inside the build.
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      const pid = await waitForChildSpawn();
 
       const shutdown = capture.handlers.get("session_shutdown");
       if (!shutdown) throw new Error("session_shutdown handler not registered");
       await shutdown(undefined, {} as never);
 
-      expect(terminate).toHaveBeenCalled();
+      expect(await waitForPidExit(pid)).toBe(true);
       await flushBackgroundWork();
       expect(capture.calls).toBe(0);
+    });
+
+    test("a timed-out child is SIGKILLed (no orphan) and the in-thread fallback delivers", async () => {
+      const entry = writeFixtureChild(
+        "hang.mjs",
+        "setTimeout(() => {}, 60_000);\n",
+      );
+      vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY", entry);
+      vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_TIMEOUT_MS", "100");
+      const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+
+      const capture = await invokeSessionStart(vault);
+      const pid = await waitForChildSpawn();
+      await flushBackgroundWork();
+
+      // Timeout rejected the child build; the fallback built in-thread.
+      expect(capture.calls).toBe(1);
+      expect(capture.injected[0]).toContain("<napkin-overview>");
+      // And the wedged child did not survive its timeout kill.
+      expect(await waitForPidExit(pid)).toBe(true);
     });
   });
 });
