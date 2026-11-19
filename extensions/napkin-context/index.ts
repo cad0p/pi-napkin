@@ -169,8 +169,16 @@ function kbRenderTimedResult(
   return text;
 }
 
+/**
+ * Reuse a vault walk younger than this for kb_search (napkin #93). The agent
+ * often searches several times in a row; each search would otherwise re-stat
+ * every note (~0.4 s on a 28.7k-note vault). Notes written by other processes
+ * (distill, other sessions) show up after at most this window.
+ */
+const SEARCH_FRESHNESS_MS = 5000;
+
 function getNapkin(cwd: string): Napkin {
-  return new Napkin(cwd);
+  return new Napkin(cwd, { searchFreshnessMs: SEARCH_FRESHNESS_MS });
 }
 
 interface OverviewPayload {
