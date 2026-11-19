@@ -20,6 +20,10 @@ All notable changes to this project will be documented in this file.
 - *(package)* Ship CHANGELOG.md so Pi shows Extension Updates (closes #114)
 - *(napkin-context)* Skip the overview when the session has one; build it in the background, never trigger a turn (closes #126)
 
+### 💼 Other
+
+- Bump @cad0p/napkin to 0.14.0-20261119.9 (closes #134) ([#136](https://github.com/cad0p/pi-napkin/pull/136))
+
 
 ## [0.7.3] - 2026-08-24
 
