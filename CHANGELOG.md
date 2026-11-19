@@ -29,6 +29,10 @@ All notable changes to this project will be documented in this file.
 - Bump @cad0p/napkin to 0.14.0-20261119.13 (closes #143) ([#144](https://github.com/cad0p/pi-napkin/pull/144))
 - Bump @cad0p/napkin to 0.14.0-20261119.14 (closes #145) ([#146](https://github.com/cad0p/pi-napkin/pull/146))
 
+### ⚡ Performance
+
+- *(napkin-context)* Fork the overview child with a 4 MB young generation (closes #147) ([#148](https://github.com/cad0p/pi-napkin/pull/148))
+
 
 ## [0.7.3] - 2026-08-24
 
