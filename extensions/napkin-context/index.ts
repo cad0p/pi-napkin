@@ -1,6 +1,7 @@
+import { type ChildProcess, fork } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 import { Napkin, type VaultOverview } from "@cad0p/napkin";
 import {
   type AgentToolResult,
@@ -179,30 +180,42 @@ function kbRenderTimedResult(
 const SEARCH_FRESHNESS_MS = 5000;
 
 /**
- * Generous bound for a stuck overview worker (pi-napkin #132). A 28.7k-note
+ * Generous bound for a stuck overview child (pi-napkin #139). A 28.7k-note
  * cold build takes ~14 s worst case; 120 s only fires on a genuinely wedged
- * worker, which is then terminated and the in-thread fallback runs.
+ * child, which is then SIGKILLed and the in-thread fallback runs.
  */
-const OVERVIEW_WORKER_TIMEOUT_MS = 120_000;
+const OVERVIEW_CHILD_TIMEOUT_MS = 120_000;
 
 /**
- * Test/debug seams. NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER forces the
- * in-thread build (also a user escape hatch if worker_threads misbehaves on
- * an exotic runtime); NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY points the Worker
- * at a different file (tests use it to inject failing/slow workers).
+ * Test/debug seams. The env names predate the move from worker_thread to a
+ * forked child process (#139) and are kept unchanged so existing escape
+ * hatches keep working:
+ *  - NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER forces the in-thread build (also
+ *    a user escape hatch if forking misbehaves on an exotic runtime);
+ *  - NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY points the fork at a different
+ *    file (tests use it to inject failing/slow children);
+ *  - NAPKIN_CONTEXT_OVERVIEW_TIMEOUT_MS shortens the timeout in tests (a
+ *    real 120 s wait is untestable).
  */
-function overviewWorkerDisabled(): boolean {
+function overviewChildDisabled(): boolean {
   return !!process.env.NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER;
 }
 
-function overviewWorkerEntry(): URL | string {
+function overviewChildEntry(): string {
   const override = process.env.NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY;
   if (override) return override;
   // Plain .mjs next to this file: pi loads index.ts through jiti (which
-  // supports import.meta.url under jiti 2.x), but the Worker needs a file
+  // supports import.meta.url under jiti 2.x), but the child needs a file
   // Node can run without a TS loader — a .ts sibling would only work on
   // Node's type-stripping versions, not on the Node range pi supports.
-  return new URL("overview-worker.mjs", import.meta.url);
+  return fileURLToPath(new URL("overview-child.mjs", import.meta.url));
+}
+
+function overviewChildTimeoutMs(): number {
+  const override = Number(process.env.NAPKIN_CONTEXT_OVERVIEW_TIMEOUT_MS);
+  return Number.isFinite(override) && override > 0
+    ? override
+    : OVERVIEW_CHILD_TIMEOUT_MS;
 }
 
 function getNapkin(cwd: string): Napkin {
@@ -213,13 +226,13 @@ interface OverviewPayload {
   text: string;
 }
 
-/** The plain overview object the worker posts back (structured-clone safe). */
+/** The plain overview object the child posts back (IPC-serializable). */
 type RawOverview = (VaultOverview & { root?: string }) | null | undefined;
 
 /**
- * Format a raw VaultOverview (built in-thread or posted back by the worker)
+ * Format a raw VaultOverview (built in-thread or posted back by the child)
  * into the injectable payload. Pure: identical inputs give identical text,
- * which is what the worker-vs-in-thread equivalence test asserts.
+ * which is what the child-vs-in-thread equivalence test asserts.
  */
 function formatOverview(overview: RawOverview): OverviewPayload | null {
   if (!overview) return null;
@@ -262,8 +275,8 @@ function formatOverview(overview: RawOverview): OverviewPayload | null {
 
 /**
  * Build the injectable overview payload in-thread. Used as the fallback when
- * the worker cannot start, errors, or times out — the overview must never
- * disappear just because worker_threads is unavailable.
+ * the child cannot start, errors, or times out — the overview must never
+ * disappear just because forking is unavailable.
  */
 async function getOverview(n: Napkin): Promise<OverviewPayload | null> {
   try {
@@ -279,10 +292,17 @@ async function getOverview(n: Napkin): Promise<OverviewPayload | null> {
 
 /**
  * Test hook: in-flight background overview builds. The suite polls it to
- * know when the deferred worker build has settled instead of racing fixed
+ * know when the deferred child build has settled instead of racing fixed
  * sleeps; pi itself never reads it.
  */
 export const __overviewBuildsPending = { count: 0 };
+
+/**
+ * Test hook: pid of the current overview child (null before the first spawn
+ * of this process). The suite uses it to prove killed children are really
+ * dead (no orphan after shutdown/timeout); pi itself never reads it.
+ */
+export const __overviewChildPid = { pid: null as number | null };
 
 export default function (pi: ExtensionAPI) {
   let hasVault = false;
@@ -291,80 +311,126 @@ export default function (pi: ExtensionAPI) {
   // overview build captures the value and drops its result when the session
   // it was started for is gone (/new, /resume, /fork, quit).
   let sessionGeneration = 0;
-  // The one in-flight overview worker (a build exists at most once per
-  // session). Tracked so session_shutdown can terminate it — a dead
-  // session's 850 MB build must not run to completion.
-  let overviewWorker: Worker | null = null;
+  // The one in-flight overview child (a build exists at most once per
+  // session). Tracked so session_shutdown can kill it — a dead session's
+  // 850 MB build must not run to completion.
+  let overviewChild: ChildProcess | null = null;
 
   /**
-   * Run Napkin.overview() on a worker thread and resolve with the plain
-   * result object. Rejects on spawn failure, worker error, a posted error,
-   * or the 120 s timeout; the caller falls back to the in-thread build. The
-   * worker is always terminated here once settled — its heap is released
-   * instead of being retained by pi's process for the session's life.
+   * Run Napkin.overview() in a forked child process and resolve with the
+   * plain result object. Rejects on spawn failure, child error, a posted
+   * error, or the timeout; the caller falls back to the in-thread build.
+   *
+   * A child process — not the #132 worker thread — because a terminated
+   * worker's freed heap stays inside pi's process (~330 MB resident after a
+   * Goldmine build), while the child's whole footprint returns to the OS on
+   * exit. The child is always SIGKILLed here once settled, so none of its
+   * memory is retained and no orphan outlives the build.
    */
-  function runOverviewInWorker(cwd: string): Promise<RawOverview> {
+  function runOverviewInChild(cwd: string): Promise<RawOverview> {
     return new Promise<RawOverview>((resolve, reject) => {
-      let worker: Worker;
+      __overviewChildPid.pid = null;
+      let child: ChildProcess;
       try {
-        worker = new Worker(overviewWorkerEntry(), {
-          workerData: {
-            cwd,
-            searchFreshnessMs: SEARCH_FRESHNESS_MS,
-          },
+        child = fork(overviewChildEntry(), [], {
+          // Same node binary, no inherited flags: --inspect/--import-style
+          // flags in execArgv would break or hijack the child.
+          execPath: process.execPath,
+          execArgv: [],
+          // "advanced" is the V8 serializer — the fork() equivalent of the
+          // worker's structured-clone postMessage, so the overview object
+          // round-trips identical to the in-thread build.
+          serialization: "advanced",
+          // stderr is piped (bounded tail below) so a child that dies before
+          // posting still explains itself; stdin/stdout are unused.
+          stdio: ["ignore", "ignore", "pipe", "ipc"],
         });
       } catch (err) {
         reject(err);
         return;
       }
-      overviewWorker = worker;
+      overviewChild = child;
+      __overviewChildPid.pid = child.pid ?? null;
+
+      // Bounded tail of the child's stderr, appended to exit-before-result
+      // errors (a node that cannot find the entry file reports it there).
+      let stderrTail = "";
+      child.stderr?.on("data", (chunk) => {
+        stderrTail = (stderrTail + String(chunk)).slice(-8192);
+      });
+
+      const killChild = () => {
+        try {
+          child.kill("SIGKILL");
+        } catch {
+          // already gone
+        }
+      };
+      // SIGKILL a live child when pi exits so no orphan outlives it. The
+      // listener is removed on settle, so listeners never pile up across
+      // sessions.
+      const killOnParentExit = () => killChild();
+
       const settle = (ok: boolean, v: unknown) => {
         clearTimeout(timer);
+        process.off("exit", killOnParentExit);
         if (ok) resolve(v as RawOverview);
         else reject(v);
-        if (overviewWorker === worker) overviewWorker = null;
-        void worker.terminate();
+        if (overviewChild === child) overviewChild = null;
+        killChild();
       };
       const timer = setTimeout(() => {
-        settle(false, new Error("overview worker timed out"));
-      }, OVERVIEW_WORKER_TIMEOUT_MS);
-      // Keep the timer from holding the process open if the worker dies
-      // without settling (defensive; 'exit' non-zero covers it).
+        settle(false, new Error("overview child timed out"));
+      }, overviewChildTimeoutMs());
+      // Keep the timer from holding the process open if the child dies
+      // without settling (defensive; 'exit' covers it).
       timer.unref?.();
-      worker.once(
+      process.once("exit", killOnParentExit);
+
+      child.once(
         "message",
         (msg: { overview?: RawOverview; error?: string }) => {
           if (msg && typeof msg === "object" && "error" in msg && msg.error) {
-            settle(false, new Error(`overview worker failed: ${msg.error}`));
+            settle(false, new Error(`overview child failed: ${msg.error}`));
           } else {
             settle(true, msg?.overview ?? null);
           }
         },
       );
-      worker.once("error", (err) => settle(false, err));
-      worker.once("exit", (code) => {
+      child.once("error", (err) => settle(false, err));
+      child.once("exit", (code, signal) => {
         // Any exit before a message lands is a failed build — including the
-        // code-0 exit terminate() can produce, and a worker that closed its
-        // port without posting. Settling rejects only if not already
-        // resolved (a delivered result wins).
+        // SIGKILL settle() itself issues, and a child that died on its own
+        // (missing entry, throw at module scope). Settling rejects only if
+        // not already resolved (a delivered result wins).
+        const tail = stderrTail.trimEnd();
         settle(
           false,
           new Error(
-            `overview worker exited (code ${code}) before posting a result`,
+            `overview child exited (code ${code}, signal ${signal}) before posting a result` +
+              (tail ? ` — stderr: ${tail}` : ""),
           ),
         );
       });
+
+      try {
+        child.send({ cwd, searchFreshnessMs: SEARCH_FRESHNESS_MS }, (err) => {
+          if (err) settle(false, err);
+        });
+      } catch (err) {
+        settle(false, err);
+      }
     });
   }
 
   /**
    * Yield once before building so a fresh session's session_start resolves
    * without waiting for the overview (up to ~14 s / ~850 MB on a large
-   * vault), then build it on a worker thread so pi's main thread never
-   * freezes (pi-napkin #132). Falls back to the in-thread call if the
-   * worker cannot deliver.
+   * vault), then build it in a forked child so pi's main thread never
+   * freezes and none of the build's memory is retained (pi-napkin #139).
+   * Falls back to the in-thread call if the child cannot deliver.
    *
-   * The worker failing because session_shutdown terminated it must NOT fall
+   * The child failing because session_shutdown killed it must NOT fall
    * back: the result would be dropped by the generation guard anyway, and a
    * synchronous in-thread build would freeze pi mid-teardown for seconds on
    * a large vault.
@@ -375,13 +441,13 @@ export default function (pi: ExtensionAPI) {
     generation: number,
   ): Promise<OverviewPayload | null> {
     await new Promise<void>((resolve) => setImmediate(resolve));
-    if (!overviewWorkerDisabled()) {
+    if (!overviewChildDisabled()) {
       try {
-        return formatOverview(await runOverviewInWorker(cwd));
+        return formatOverview(await runOverviewInChild(cwd));
       } catch (err) {
         if (generation !== sessionGeneration) return null;
         console.error(
-          "[napkin-context] overview worker unavailable; building in-thread:",
+          "[napkin-context] overview child unavailable; building in-thread:",
           err,
         );
       }
@@ -583,12 +649,16 @@ export default function (pi: ExtensionAPI) {
     // being torn down (session replacement runs shutdown on the old
     // extension instance before the new one starts).
     sessionGeneration++;
-    // And kill the worker carrying it: the result would be dropped by the
+    // And kill the child carrying it: the result would be dropped by the
     // generation guard anyway, so letting a multi-hundred-MB build finish
     // would be pure waste.
-    if (overviewWorker) {
-      void overviewWorker.terminate();
-      overviewWorker = null;
+    if (overviewChild) {
+      try {
+        overviewChild.kill("SIGKILL");
+      } catch {
+        // already gone
+      }
+      overviewChild = null;
     }
   });
 
