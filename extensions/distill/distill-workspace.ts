@@ -30,7 +30,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { NAPKIN_MARKER, Napkin } from "@cad0p/napkin";
+import { findVault, NAPKIN_MARKER } from "@cad0p/napkin/vault";
 import {
   parseSessionEntries,
   SessionManager,
@@ -723,7 +723,7 @@ export interface SpawnDistillResult {
  */
 export function resolveDistillErrorDir(vault: string): string {
   try {
-    return path.join(new Napkin(vault).vault.configPath, "distill", "errors");
+    return path.join(findVault(vault).configPath, "distill", "errors");
   } catch {
     return path.join(vault, NAPKIN_MARKER, "distill", "errors");
   }

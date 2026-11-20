@@ -2,7 +2,8 @@ import { type ChildProcess, fork } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { Napkin, type VaultOverview } from "@cad0p/napkin";
+import type { Napkin, VaultOverview } from "@cad0p/napkin";
+import { findVault, type VaultInfo } from "@cad0p/napkin/vault";
 import {
   type AgentToolResult,
   type ExtensionAPI,
@@ -17,6 +18,7 @@ import {
   hasCustomMessage,
   sendCustomMessageOnce,
 } from "../shared/custom-message";
+import { loadNapkinSdk } from "../shared/napkin-sdk";
 
 function loadShowStatus(vaultPath: string): boolean {
   const configPath = path.join(vaultPath, "config.json");
@@ -219,6 +221,8 @@ function overviewChildTimeoutMs(): number {
 }
 
 function getNapkin(cwd: string): Napkin {
+  // The SDK is loaded here, on first use, not at extension load (#149).
+  const { Napkin } = loadNapkinSdk();
   return new Napkin(cwd, { searchFreshnessMs: SEARCH_FRESHNESS_MS });
 }
 
@@ -278,8 +282,9 @@ function formatOverview(overview: RawOverview): OverviewPayload | null {
  * the child cannot start, errors, or times out — the overview must never
  * disappear just because forking is unavailable.
  */
-async function getOverview(n: Napkin): Promise<OverviewPayload | null> {
+async function getOverview(cwd: string): Promise<OverviewPayload | null> {
   try {
+    const n = getNapkin(cwd);
     // napkin >= 0.12.3 ships the fork's defaults (collapseDepth 2, maxRows
     // 100) in DEFAULT_CONFIG, so the extension must not diverge from napkin —
     // it relies on napkin's defaults, overridable via the vault config.
@@ -447,7 +452,6 @@ export default function (pi: ExtensionAPI) {
    * a large vault.
    */
   async function buildOverview(
-    n: Napkin,
     cwd: string,
     generation: number,
   ): Promise<OverviewPayload | null> {
@@ -463,7 +467,7 @@ export default function (pi: ExtensionAPI) {
         );
       }
     }
-    return getOverview(n);
+    return getOverview(cwd);
   }
 
   pi.registerMessageRenderer(
@@ -515,9 +519,12 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", async (_event, ctx) => {
     const generation = ++sessionGeneration;
 
-    let n: Napkin;
+    // Vault resolution only — the same findVault `new Napkin(cwd)` runs, so
+    // the same VaultNotFoundError / legacy-layout refusal — without loading
+    // the SDK into pi's main process (#149).
+    let vault: VaultInfo;
     try {
-      n = getNapkin(ctx.cwd);
+      vault = findVault(ctx.cwd);
     } catch (e) {
       hasVault = false;
       vaultRoot = null;
@@ -564,9 +571,9 @@ export default function (pi: ExtensionAPI) {
     // still running, and before_agent_start needs the root on the first
     // prompt.
     hasVault = true;
-    vaultRoot = n.vault.contentPath;
+    vaultRoot = vault.contentPath;
 
-    const showStatus = ctx.hasUI && loadShowStatus(n.vault.configPath);
+    const showStatus = ctx.hasUI && loadShowStatus(vault.configPath);
 
     const paintStatus = (hasOverview: boolean): void => {
       if (!showStatus || !ctx.ui) return;
@@ -591,7 +598,7 @@ export default function (pi: ExtensionAPI) {
     const buildAndDeliver = async (): Promise<void> => {
       __overviewBuildsPending.count++;
       try {
-        const overview = await buildOverview(n, ctx.cwd, generation);
+        const overview = await buildOverview(ctx.cwd, generation);
 
         // The session was replaced while the overview built (session_shutdown
         // bumped the generation). Never post into the new session from the

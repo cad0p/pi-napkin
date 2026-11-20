@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Part of pi-napkin.
 
-import { findAncestorVault } from "@cad0p/napkin";
+import { findAncestorVault } from "@cad0p/napkin/vault";
 import type { PredicateContext } from "@cad0p/pi-steering";
 
 /**
