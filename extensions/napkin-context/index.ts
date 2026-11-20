@@ -430,7 +430,7 @@ export default function (pi: ExtensionAPI) {
       });
 
       try {
-        child.send({ cwd, searchFreshnessMs: SEARCH_FRESHNESS_MS }, (err) => {
+        child.send({ cwd }, (err) => {
           if (err) settle(false, err);
         });
       } catch (err) {

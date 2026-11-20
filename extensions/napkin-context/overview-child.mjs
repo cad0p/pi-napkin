@@ -15,7 +15,7 @@
  *
  * Protocol (V8-serialized IPC — "advanced", the fork() equivalent of the
  * worker's structured clone, so the overview round-trips identical):
- *   parent sends: { cwd, searchFreshnessMs? }
+ *   parent sends: { cwd }
  *   child sends:  { overview: <VaultOverview & { root }> | null }
  *              or { error: <message> } — the parent treats both like a spawn
  *              failure and falls back to the in-thread build.
@@ -50,19 +50,18 @@ async function main() {
     process.once("message", resolve);
     process.once("disconnect", () => process.exit(0));
   });
-  const { cwd, searchFreshnessMs } = input ?? {};
+  const { cwd } = input ?? {};
   // Bare specifier resolved from THIS file's location: the child sits inside
   // the published pi-napkin package, and module resolution walks up from
   // extensions/napkin-context/ into pi-napkin's own node_modules, where
   // @cad0p/napkin is a real dependency — including pnpm's
   // .pnpm/<pkg>/node_modules sibling layout.
-  const napkin = await import("@cad0p/napkin");
-  const n = new napkin.Napkin(
-    cwd,
-    searchFreshnessMs === undefined ? undefined : { searchFreshnessMs },
-  );
+  // The slim overview entry (#151, napkin #123): the same function
+  // Napkin#overview runs, without loading search, bases, canvas, tasks,
+  // templates or gray-matter into the child.
+  const { buildVaultOverview } = await import("@cad0p/napkin/overview");
   // Synchronous on purpose — that is the whole reason this is a child.
-  const overview = await n.overview();
+  const overview = buildVaultOverview(cwd);
   await send({ overview: overview ?? null });
 }
 
