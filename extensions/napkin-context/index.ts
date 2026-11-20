@@ -310,14 +310,26 @@ export const __overviewBuildsPending = { count: 0 };
 export const __overviewChildPid = { pid: null as number | null };
 
 /**
- * V8 flags for the overview child (#147). A 4 MB young generation makes the
- * scavenger collect the short-lived arrays a miss allocates while decoding
- * per-note blobs before they reach RSS: on a 29.5k-note vault a three-note
- * miss peaks at 183–187 MB instead of 229–242 MB, at the same miss time.
+ * V8 flags for the overview child (#147, #155). A small young generation
+ * makes the scavenger collect the short-lived arrays a miss allocates before
+ * they reach RSS. With napkin's folder-term rows (napkin #130) the child's
+ * working set is small, so 2 MB is enough: on a 29.5k-note vault the child
+ * peaks at 69–83 MB instead of 75–92 MB with 4 MB, and pi-memory-budget's
+ * spike is released in 0.2 s instead of 12.8 s.
  */
 export const OVERVIEW_CHILD_EXEC_ARGV: readonly string[] = [
-  "--max-semi-space-size=4",
+  "--max-semi-space-size=2",
 ];
+
+/**
+ * Extra environment for the overview child (#155). One glibc malloc arena:
+ * the child is single-threaded JS plus a few libuv/V8 helper threads, and
+ * per-thread arenas only add resident memory there. Ignored outside glibc.
+ * Merged over pi's own environment, so everything else is inherited.
+ */
+export const OVERVIEW_CHILD_ENV: Readonly<Record<string, string>> = {
+  MALLOC_ARENA_MAX: "1",
+};
 
 export default function (pi: ExtensionAPI) {
   let hasVault = false;
@@ -353,6 +365,7 @@ export default function (pi: ExtensionAPI) {
           // child's own heap sizing goes in (OVERVIEW_CHILD_EXEC_ARGV).
           execPath: process.execPath,
           execArgv: [...OVERVIEW_CHILD_EXEC_ARGV],
+          env: { ...process.env, ...OVERVIEW_CHILD_ENV },
           // "advanced" is the V8 serializer — the fork() equivalent of the
           // worker's structured-clone postMessage, so the overview object
           // round-trips identical to the in-thread build.
