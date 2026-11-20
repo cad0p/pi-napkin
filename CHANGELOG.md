@@ -33,6 +33,7 @@ All notable changes to this project will be documented in this file.
 
 - *(napkin-context)* Fork the overview child with a 4 MB young generation (closes #147) ([#148](https://github.com/cad0p/pi-napkin/pull/148))
 - *(napkin-context, distill)* Resolve the vault through @cad0p/napkin/vault and load the SDK lazily, outside jiti (closes #149) ([#150](https://github.com/cad0p/pi-napkin/pull/150))
+- *(napkin-context)* Build the overview in the child through @cad0p/napkin/overview (closes #151) ([#152](https://github.com/cad0p/pi-napkin/pull/152))
 
 
 ## [0.7.3] - 2026-08-24
