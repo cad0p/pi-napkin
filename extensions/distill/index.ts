@@ -2,7 +2,9 @@ import { spawn } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Napkin } from "@cad0p/napkin";
+// Vault resolution only: the light entry keeps the napkin SDK graph out of
+// pi's jiti load (#149).
+import { findVault } from "@cad0p/napkin/vault";
 import type {
   CustomEntry,
   ExtensionAPI,
@@ -1542,7 +1544,7 @@ export default function (pi: ExtensionAPI) {
    *
    * Vault resolution note: the spawned `pi -p` instance runs with
    * `cwd = vaultContentPath`, which is already resolved by napkin
-   * (cwd-independent via `new Napkin(ctx.cwd).vault`). The distill
+   * (cwd-independent via `findVault(ctx.cwd)`). The distill
    * subprocess itself calls `napkin` commands that walk up from their
    * cwd, so targeting `vaultContentPath` ensures they hit the user's
    * real vault regardless of where pi was originally launched.
@@ -1801,7 +1803,8 @@ export default function (pi: ExtensionAPI) {
   /**
    * Resolve the distill vault handle from a cwd.
    *
-   * Uses napkin's own resolution (`new Napkin(cwd).vault`, which
+   * Uses napkin's own resolution (`findVault(cwd)`, the same call
+   * `new Napkin(cwd)` makes, which
    * includes the global-config fallback). napkin >= 0.14 refuses
    * legacy-embedded layouts and missing/unreadable `config.json` with
    * `VaultNotFoundError`; distill supports exactly what napkin
@@ -1815,7 +1818,7 @@ export default function (pi: ExtensionAPI) {
     contentPath: string;
   } | null {
     try {
-      const vault = new Napkin(cwd).vault;
+      const vault = findVault(cwd);
       return { configPath: vault.configPath, contentPath: vault.contentPath };
     } catch {
       return null;
