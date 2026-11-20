@@ -28,6 +28,7 @@ All notable changes to this project will be documented in this file.
 - Bump @cad0p/napkin to 0.14.0-20261119.12 (closes #141) ([#142](https://github.com/cad0p/pi-napkin/pull/142))
 - Bump @cad0p/napkin to 0.14.0-20261119.13 (closes #143) ([#144](https://github.com/cad0p/pi-napkin/pull/144))
 - Bump @cad0p/napkin to 0.14.0-20261119.14 (closes #145) ([#146](https://github.com/cad0p/pi-napkin/pull/146))
+- Bump @cad0p/napkin to 0.14.0-20261120.2, folder-term rows and content ignore fingerprint (closes #153) ([#154](https://github.com/cad0p/pi-napkin/pull/154))
 
 ### ⚡ Performance
 
