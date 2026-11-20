@@ -90,7 +90,7 @@ import {
   withNapkinOnPath,
 } from "./_test-helpers";
 import { resolveCacheRoot } from "./distill-workspace";
-import distillExtension from "./index";
+import distillExtension, { ORPHAN_SWEEP_INTERVAL_MS } from "./index";
 
 interface CapturedAPI {
   // biome-ignore lint/suspicious/noExplicitAny: opaque handlers
@@ -175,6 +175,24 @@ function createVault(intervalMinutes: number): string {
   );
   git(["add", "-A"]);
   git(["commit", "-q", "-m", "seed"]);
+  return dir;
+}
+
+/**
+ * Plant a cache-root directory shaped like a hard-killed distill leftover:
+ * the per-vault `<hash>/<6hex>-<epoch>/` path, no `.git` gitfile, every
+ * entry aged past the sweep's `ORPHAN_MIN_AGE_MS` floor.
+ */
+function plantCacheRootOrphan(
+  vaultPath: string,
+  name = "abc999-1700000009",
+): string {
+  const dir = path.join(resolveCacheRoot(vaultPath), name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "seed.md"), "# seed\n");
+  const aged = (Date.now() - 8 * 60 * 60 * 1000) / 1000;
+  fs.utimesSync(path.join(dir, "seed.md"), aged, aged);
+  fs.utimesSync(dir, aged, aged);
   return dir;
 }
 
@@ -564,6 +582,35 @@ describe("auto-distill stale-ctx race after session replacement (issue #84)", ()
     // Pre-#93 the queued old tick rendered through the refreshed uiRef and
     // called setStatus again; the generation guard makes it a clean no-op.
     expect(ui2.setStatusCalls.length).toBe(callsAfterSession2);
+  });
+
+  test("hourly orphan sweep tick reclaims a cache-root orphan", async () => {
+    // The cache-root sweep has to run on a TIMER, not only at this
+    // process's start/end: a long-lived session is precisely the one that
+    // outlives hard-killed siblings' debris. Fire the captured tick once
+    // (ms = ORPHAN_SWEEP_INTERVAL_MS) and assert the planted orphan is
+    // gone, with the session still live so the guards let it through.
+    vault = createVault(1);
+    const sm = SessionManager.create(vault, vault);
+    sm.appendMessage({ role: "user", content: "hello" });
+    sm.appendMessage({ role: "assistant", content: "hi" });
+    const fake = makeFakeUI();
+    const ctx = makeUICtx(sm, vault, fake.ui);
+    await startSession(ctx);
+
+    const sweepTick = capturedIntervals.find(
+      (i) => i.ms === ORPHAN_SWEEP_INTERVAL_MS,
+    );
+    expect(sweepTick).toBeDefined();
+
+    // Planted after session_start's own sweep, so only the tick can
+    // reclaim it.
+    const orphan = plantCacheRootOrphan(vault);
+    expect(fs.existsSync(orphan)).toBe(true);
+
+    // biome-ignore lint/style/noNonNullAssertion: asserted above
+    expect(() => sweepTick!.cb()).not.toThrow();
+    expect(fs.existsSync(orphan)).toBe(false);
   });
 
   test("stale-ctx error inside a tick disarms the auto interval and logs once (issue #96)", async () => {

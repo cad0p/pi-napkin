@@ -213,6 +213,24 @@ function makeCaptureUI(): {
   return { ui, notifies };
 }
 
+/**
+ * Plant a cache-root directory shaped like a hard-killed distill's leftover:
+ * the per-vault `<hash>/<6hex>-<epoch>/` path, no `.git` gitfile, and every
+ * entry aged past the sweep's `ORPHAN_MIN_AGE_MS` floor.
+ */
+function plantCacheRootOrphan(
+  vaultPath: string,
+  name = "abc999-1700000009",
+): string {
+  const cacheRoot = resolveCacheRoot(vaultPath);
+  const dir = path.join(cacheRoot, name);
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, "seed.md"), "# seed\n");
+  const aged = (Date.now() - 8 * 60 * 60 * 1000) / 1000;
+  fs.utimesSync(path.join(dir, "seed.md"), aged, aged);
+  fs.utimesSync(dir, aged, aged);
+  return dir;
+}
 /** Count worktrees present under the vault's XDG distill cache dir. */
 function countWorktrees(vault: string): number {
   const d = resolveCacheRoot(vault);
@@ -321,6 +339,26 @@ describe("session_shutdown handler (Item 8)", () => {
     await captured.handlers.session_shutdown({ reason: shutdownReason }, ctx);
     return countWorktrees(vaultPath);
   }
+
+  test("sweeps a cache-root orphan on shutdown (best-effort janitor pass)", async () => {
+    // session_start sweeps too, so the orphan is planted AFTER it: the
+    // removal below can only come from the shutdown handler's own pass.
+    // That pass is the last chance to reclaim debris from hard-killed
+    // siblings when a pi process is about to go away for days.
+    vault = createVault({ enabled: true });
+    sm = createSession(vault);
+    const { api, captured } = makeMockAPI();
+    distillExtension(api as never);
+    // biome-ignore lint/suspicious/noExplicitAny: partial ctx
+    const ctx: any = { cwd: vault, sessionManager: sm, hasUI: false, ui: null };
+    await captured.handlers.session_start({ reason: "new" }, ctx);
+
+    const orphan = plantCacheRootOrphan(vault);
+    expect(fs.existsSync(orphan)).toBe(true);
+
+    await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
+    expect(fs.existsSync(orphan)).toBe(false);
+  });
 
   test("spawns on normal quit with enabled config + git vault + content", async () => {
     vault = createVault({ enabled: true });
