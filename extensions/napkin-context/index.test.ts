@@ -22,6 +22,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import napkinContext, {
   __overviewBuildsPending,
   __overviewChildPid,
+  OVERVIEW_CHILD_ENV,
   OVERVIEW_CHILD_EXEC_ARGV,
 } from "./index";
 
@@ -895,12 +896,13 @@ describe("vault overview (session context)", () => {
       expect(childRun.injected[0]).toContain("<napkin-overview>");
     });
 
-    test("the child runs with only the overview heap flags (#147)", async () => {
-      // The fixture child reports its own execArgv as the vault context, so
-      // the injected text shows exactly which flags the fork passed.
+    test("the child runs with only the overview heap flags and its malloc env (#147, #155)", async () => {
+      // The fixture child reports its own execArgv and MALLOC_ARENA_MAX as
+      // the vault context, so the injected text shows exactly what the fork
+      // passed.
       const entry = writeFixtureChild(
         "argv.mjs",
-        "process.send({ overview: { context: 'ARGV=' + JSON.stringify(process.execArgv), overview: [] } });\n",
+        "process.send({ overview: { context: 'ARGV=' + JSON.stringify(process.execArgv) + ' ARENA=' + process.env.MALLOC_ARENA_MAX + ' PATH=' + (process.env.PATH ? 'set' : 'unset'), overview: [] } });\n",
       );
       vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY", entry);
       const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
@@ -908,9 +910,10 @@ describe("vault overview (session context)", () => {
       const { injected, calls } = await runSessionStart(vault);
 
       expect(calls).toBe(1);
-      expect(OVERVIEW_CHILD_EXEC_ARGV).toEqual(["--max-semi-space-size=4"]);
+      expect(OVERVIEW_CHILD_EXEC_ARGV).toEqual(["--max-semi-space-size=2"]);
+      expect(OVERVIEW_CHILD_ENV).toEqual({ MALLOC_ARENA_MAX: "1" });
       expect(injected[0]).toContain(
-        `ARGV=${JSON.stringify(OVERVIEW_CHILD_EXEC_ARGV)}`,
+        `ARGV=${JSON.stringify(OVERVIEW_CHILD_EXEC_ARGV)} ARENA=1 PATH=set`,
       );
     });
 
