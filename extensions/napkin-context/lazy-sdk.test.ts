@@ -147,6 +147,15 @@ describe("napkin SDK loads lazily, outside jiti (#149)", () => {
     expect(offenders).toEqual([]);
   });
 
+  test("the overview child imports the slim ./overview entry, not the package root (#151)", () => {
+    const child = fs.readFileSync(
+      path.join(EXTENSIONS, "napkin-context", "overview-child.mjs"),
+      "utf-8",
+    );
+    expect(child).toMatch(/import\(\s*["']@cad0p\/napkin\/overview["']\s*\)/);
+    expect(child).not.toMatch(/["']@cad0p\/napkin["']/);
+  });
+
   test("session_start and the child-built overview leave the SDK unloaded; the first kb tool loads it once", async () => {
     delete process.env.NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER;
     __resetNapkinSdkForTests();
