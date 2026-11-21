@@ -17,8 +17,8 @@
  * worker's structured clone, so the overview round-trips identical):
  *   parent sends: { cwd }
  *   child sends:  { overview: <VaultOverview & { root }> | null }
- *              or { error: <message> } — the parent treats both like a spawn
- *              failure and falls back to the in-thread build.
+ *              or { error: <message> } — the parent treats an error like
+ *              a spawn failure and skips the overview (#161).
  * The child disconnects and exits right after posting; the parent SIGKILLs
  * it on timeout, session_shutdown, or pi exit.
  */

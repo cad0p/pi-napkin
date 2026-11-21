@@ -434,6 +434,7 @@ describe("vault overview (session context)", () => {
     types: string[];
     calls: number;
     setStatusCalls: { id: string; content: string }[];
+    notifyCalls: { message: string; level: string }[];
     handlers: Map<string, (event: unknown, ctx: never) => unknown>;
   }
 
@@ -459,6 +460,7 @@ describe("vault overview (session context)", () => {
     const injected: string[] = [];
     const types: string[] = [];
     const setStatusCalls: { id: string; content: string }[] = [];
+    const notifyCalls: { message: string; level: string }[] = [];
     let calls = 0;
     const ctx = {
       cwd: vault,
@@ -475,7 +477,9 @@ describe("vault overview (session context)", () => {
       ui: opts.hasUI
         ? {
             theme: identityTheme,
-            notify: () => {},
+            notify: (message: string, level: string) => {
+              notifyCalls.push({ message, level });
+            },
             setStatus: (id: string, content: string) => {
               setStatusCalls.push({ id, content });
             },
@@ -494,6 +498,7 @@ describe("vault overview (session context)", () => {
         return calls;
       },
       setStatusCalls,
+      notifyCalls,
       handlers,
     };
   }
@@ -917,23 +922,40 @@ describe("vault overview (session context)", () => {
       );
     });
 
-    test("falls back to the in-thread build when the child cannot start", async () => {
+    // A failed child skips the overview: no in-thread build, a distinct
+    // status and one warning (#161).
+    async function expectSkipped(vault: string) {
+      const overview = vi.spyOn(Napkin.prototype, "overview");
+      const capture = await runSessionStart(vault, { hasUI: true });
+      expect(overview).not.toHaveBeenCalled();
+      expect(capture.calls).toBe(0);
+      expect(capture.injected).toEqual([]);
+      expect(capture.setStatusCalls.at(-1)?.content).toBe(
+        "napkin: overview unavailable",
+      );
+      expect(capture.notifyCalls).toHaveLength(1);
+      expect(capture.notifyCalls[0].level).toBe("warning");
+      expect(capture.notifyCalls[0].message).toContain(
+        "vault overview skipped this session",
+      );
+      return capture;
+    }
+
+    test("a child that cannot start skips the overview (no in-thread build)", async () => {
       const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
       // An entry file that does not exist makes the child process exit
       // non-zero before posting (spawn failure surfaces via 'exit', not
-      // 'error'); the extension must still deliver via the in-thread path.
+      // 'error').
       vi.stubEnv(
         "NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY",
         path.join(vault, "missing-child.mjs"),
       );
 
-      const { injected, calls } = await runSessionStart(vault);
-
-      expect(calls).toBe(1);
-      expect(injected[0]).toContain("<napkin-overview>");
+      const { notifyCalls } = await expectSkipped(vault);
+      expect(notifyCalls[0].message).toContain("overview child exited");
     });
 
-    test("falls back to the in-thread build when the child errors mid-build", async () => {
+    test("a child that errors mid-build skips the overview (no in-thread build)", async () => {
       const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
       const entry = writeFixtureChild(
         "boom.mjs",
@@ -941,10 +963,53 @@ describe("vault overview (session context)", () => {
       );
       vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY", entry);
 
-      const { injected, calls } = await runSessionStart(vault);
+      await expectSkipped(vault);
+    });
+
+    test("a child that posts an error skips the overview (no in-thread build)", async () => {
+      const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+      const entry = writeFixtureChild(
+        "posts-error.mjs",
+        'process.send({ error: "fixture build failed" });\n',
+      );
+      vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY", entry);
+
+      const { notifyCalls } = await expectSkipped(vault);
+      expect(notifyCalls[0].message).toContain("fixture build failed");
+    });
+
+    test("a child that fails without a UI skips silently", async () => {
+      const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+      const entry = writeFixtureChild(
+        "boom.mjs",
+        'throw new Error("fixture child exploded");\n',
+      );
+      vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY", entry);
+      const overview = vi.spyOn(Napkin.prototype, "overview");
+
+      const capture = await runSessionStart(vault);
+
+      expect(overview).not.toHaveBeenCalled();
+      expect(capture.calls).toBe(0);
+      expect(capture.notifyCalls).toEqual([]);
+    });
+
+    test("the disabled-child opt-in still builds in-thread", async () => {
+      vi.stubEnv("NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER", "1");
+      // A child entry that would fail proves the child is not used.
+      vi.stubEnv(
+        "NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY",
+        path.join(os.tmpdir(), "napkin-context-no-such-child.mjs"),
+      );
+      const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
+
+      const { injected, calls, notifyCalls } = await runSessionStart(vault, {
+        hasUI: true,
+      });
 
       expect(calls).toBe(1);
       expect(injected[0]).toContain("<napkin-overview>");
+      expect(notifyCalls).toEqual([]);
     });
 
     test("a session replaced while the child builds drops the result", async () => {
@@ -1004,7 +1069,7 @@ describe("vault overview (session context)", () => {
       expect(capture.calls).toBe(0);
     });
 
-    test("a timed-out child is SIGKILLed (no orphan) and the in-thread fallback delivers", async () => {
+    test("a timed-out child is SIGKILLed (no orphan) and the overview is skipped", async () => {
       const entry = writeFixtureChild(
         "hang.mjs",
         "setTimeout(() => {}, 60_000);\n",
@@ -1013,13 +1078,22 @@ describe("vault overview (session context)", () => {
       vi.stubEnv("NAPKIN_CONTEXT_OVERVIEW_TIMEOUT_MS", "100");
       const vault = makeVault({ "note.md": "# Note\n\nbody\n" });
 
-      const capture = await invokeSessionStart(vault);
+      const overview = vi.spyOn(Napkin.prototype, "overview");
+
+      const capture = await invokeSessionStart(vault, { hasUI: true });
       const pid = await waitForChildSpawn();
       await flushBackgroundWork();
 
-      // Timeout rejected the child build; the fallback built in-thread.
-      expect(capture.calls).toBe(1);
-      expect(capture.injected[0]).toContain("<napkin-overview>");
+      // Timeout rejected the child build; nothing was built in-thread.
+      expect(overview).not.toHaveBeenCalled();
+      expect(capture.calls).toBe(0);
+      expect(capture.notifyCalls).toHaveLength(1);
+      expect(capture.notifyCalls[0].message).toContain(
+        "overview child timed out",
+      );
+      expect(capture.setStatusCalls.at(-1)?.content).toBe(
+        "napkin: overview unavailable",
+      );
       // And the wedged child did not survive its timeout kill.
       expect(await waitForPidExit(pid)).toBe(true);
     });
