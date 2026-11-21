@@ -428,6 +428,54 @@ describe("distill-prompt.md — content invariants", () => {
       /git -C \{\{vaultPath\}\} pull origin \{\{defaultBranch\}\}(?!.*--no-rebase)/m,
     );
   });
+
+  test("step 7 forbids landing branches", () => {
+    // 2026-11-05 incident: the agent built a private landing-branch family
+    // (distill-land/<session>a/b/c) in a scratch worktree and pointed main
+    // at each tip. The prompt must scope the agent to the one distill
+    // branch it was given.
+    const lines = template.split("\n");
+    const start = lines.findIndex((l) => /^7\. /.test(l));
+    const end = lines.findIndex((l, i) => i > start && /^8\. /.test(l));
+    const step7 = lines.slice(start, end).join("\n");
+    expect(step7).toMatch(/Do not create landing branches/);
+    expect(step7).toMatch(/The only branch you may create or move is/);
+  });
+
+  test("step 8 forbids plumbing ref writes on the default branch", () => {
+    // The only sanctioned landing path stays checkout + merge --squash +
+    // commit. Every ref-writing verb that can rewrite main must be named
+    // so a literalist agent cannot infer that a plumbing write is an
+    // acceptable "recovery" when the squash or push fails.
+    const lines = template.split("\n");
+    const start = lines.findIndex((l) => /^8\. /.test(l));
+    const end = lines.findIndex((l, i) => i > start && /^9\. /.test(l));
+    const step8 = lines.slice(start, end).join("\n");
+
+    expect(step8).toMatch(
+      /git -C \{\{vaultPath\}\} checkout \{\{defaultBranch\}\}/,
+    );
+    expect(step8).toMatch(
+      /git -C \{\{vaultPath\}\} merge --squash \{\{branchName\}\}/,
+    );
+    expect(step8).toMatch(/git -C \{\{vaultPath\}\} commit -m/);
+
+    for (const verb of [
+      "git update-ref",
+      "git branch -f",
+      "git checkout -B",
+      "git switch -C",
+      "git reset",
+      "git rebase",
+      "git commit --amend",
+      "git fetch .",
+    ]) {
+      expect(step8).toContain(verb);
+    }
+    expect(step8).toMatch(/are forbidden on/);
+    expect(step8).toMatch(/drop another session's unpushed commits/);
+    expect(step8).toMatch(/stop and report the failure/);
+  });
 });
 
 describe("distill-prompt.md — shipped artifact is unmodified by tests (CI-A-5)", () => {
