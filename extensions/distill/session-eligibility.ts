@@ -24,7 +24,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
  *   that never bind a UI: `pi -p`, headless SDK embedders.
  * - `ctx.mode` is the field that separates a child from a real host session.
  *   `bindExtensions` assigns the mode only when the caller passes one, and pi
- *   defaults `_extensionMode = "print"` (dist/core/agent-session.js:182; the
+ *   defaults `_extensionMode = "print"` (dist/core/agent-session.js, pi 1.5–1.6; the
  *   runner's own default and its `mode` getter are runner.js:168 and :630).
  *   pi-subagents passes `uiContext` and `onError`
  *   only, so every ctx getter in a child reports `mode === "print"`. The
