@@ -35,6 +35,7 @@ import {
   spawnDistillInWorktree,
 } from "./distill-workspace";
 import { surfaceHealthFindings, surfaceSetupError } from "./health-notify";
+import { isAutoDistillEligible } from "./session-eligibility";
 import { getSessionTouchedFiles } from "./session-touched-files";
 import { maybeInjectNapkinSetupNotice } from "./setup-notice";
 import { shouldDistillOnShutdown } from "./should-distill-on-shutdown";
@@ -492,6 +493,15 @@ export default function (pi: ExtensionAPI) {
   // session. Path (b) is closed upstream by the arm gate in session_start;
   // this guard remains the backstop for queued ticks around either path.
   let sessionGeneration = 0;
+  // Session-role eligibility (issue #116). Decided exactly ONCE, in
+  // `session_start` (see ./session-eligibility.ts), and never recomputed: the
+  // interval arm, the countdown, the per-session setup work and the
+  // `session_shutdown` spawn all read this single flag. Subagent children run
+  // this factory too — pi-subagents creates an in-process `AgentSession` per
+  // subagent and emits `session_start` / `session_shutdown` for it — and a
+  // child must neither arm the interval nor spawn a distill on shutdown. Its
+  // transcript already reaches the vault through the parent's tool result.
+  let autoDistillEligible = false;
   // Stale-ctx lockdown (issue #96): if a tick ever catches the stale-ctx
   // error (the session_start's ctx was invalidated without the matching
   // session_shutdown clearing this closure's timers — e.g. a raw
@@ -595,6 +605,23 @@ export default function (pi: ExtensionAPI) {
     // clear the stale-ctx lockdown so the new session's timers can run
     // (issue #96).
     staleCtxDisarmed = false;
+
+    // Session-role gate (issue #116), decided ONCE here and read everywhere
+    // else in this closure. Subagent children activate this same factory in
+    // their own `AgentSession`; distilling them duplicates the parent's
+    // distill and hands the child's brief to a distill agent (issue #117).
+    // Returning before vault resolution / config load / auto-setup /
+    // `cleanupStaleWorktrees` keeps children free of every per-session side
+    // effect auto-distill needs (git init + commit, `git worktree list`
+    // sweeps, the napkin CLI probe) — all of which are spawnSync calls that
+    // would otherwise run once per subagent.
+    autoDistillEligible = isAutoDistillEligible(ctx);
+    if (!autoDistillEligible) {
+      // A session replacement/reload in a child must not leave a stale
+      // `uiRef` pointing at the previous session's UI.
+      uiRef = null;
+      return;
+    }
 
     const napkinVault = resolveDistillVault(ctx.cwd);
     if (!napkinVault) return;
@@ -773,10 +800,10 @@ export default function (pi: ExtensionAPI) {
       // accessor), leave the cursor at its prior value (0 on first
       // session_start).
     }
-    // Sidechain/SDK sessions bind no UI (ctx.hasUI === false); ephemeral runs
-    // (--no-session) have no session file to fork. Nothing can ever be distilled:
-    // arm nothing, paint nothing.
-    if (!ctx.hasUI || !ctx.sessionManager.getSessionFile()) return;
+    // Ephemeral runs (--no-session) have no session file to fork. (The role
+    // gate above already refused non-interactive and child sessions.) Nothing
+    // can ever be distilled: arm nothing, paint nothing.
+    if (!ctx.sessionManager.getSessionFile()) return;
 
     const intervalMs = config.intervalMinutes * 60 * 1000;
 
@@ -838,6 +865,13 @@ export default function (pi: ExtensionAPI) {
       }, IDLE_STATUS_REPAINT_INTERVAL_MS);
     }
 
+    // The interval arm reads the same one-time decision as every other
+    // consumer (issue #116). Today the role gate above already returned for an
+    // ineligible session, so this is redundant — kept so the arm site states
+    // its own precondition and a future reordering of the gates cannot leak an
+    // interval into a child.
+    if (!autoDistillEligible) return;
+
     intervalHandle = setInterval(() => {
       // Queued tick from a dead session (replacement/reload, or a
       // raw-dispose SDK session whose shutdown never fired — issue #100)
@@ -887,6 +921,17 @@ export default function (pi: ExtensionAPI) {
     // stick as `true` across an in-process session switch and suppress the
     // next session's status-bar rendering.
     isRunning = false;
+
+    // Role gate (issue #116), the same one-time decision from session_start:
+    // a subagent child must never spawn a distill when its host tears it down.
+    // Return BEFORE resolveDistillVault / config load / the full health check /
+    // the wrapper spawn — none of that work belongs to a child, and a child's
+    // `session_shutdown` (pi-subagents emits "quit" for every settle, stop and
+    // reload handover) must stay cheap.
+    if (!autoDistillEligible) {
+      uiRef = null;
+      return;
+    }
 
     // ------- Final shutdown distill (Phase B Item 8) -------------------------
     //
@@ -973,6 +1018,10 @@ export default function (pi: ExtensionAPI) {
     }
 
     uiRef = null;
+    // `autoDistillEligible` is deliberately NOT reset here: it describes this
+    // session's role, and a second `session_shutdown` in the same activation
+    // must still reach the `lastSpawnedSize` dedupe below instead of taking
+    // the role gate. The next `session_start` recomputes it unconditionally.
     // No need to kill anything — detached processes survive on their own
   });
 

@@ -10,6 +10,14 @@ Pi extension that automatically distills knowledge from conversations into your 
 4. The model extracts structured notes using your vault's templates
 5. Notes are written directly into the vault
 
+## Where auto-distill runs
+
+Auto-distill (the interval and the final distill on shutdown) runs only in the **top-level interactive session**: `ctx.hasUI` plus a host-bound mode that is not `"print"` (`"tui"` in the TUI, `"rpc"` under RPC).
+
+Hosts that load extensions in-process — subagent extensions such as `@cad0p/pi-subagents-tintinweb`, SDK embedders — activate this extension once per child session with their own `session_start` / `session_shutdown`. A child never arms the interval and never spawns a distill: it keeps pi's default `mode === "print"` (the parent host passes no mode when it binds extensions), even though it reports `hasUI === true` through the child UI proxy. Its work already reaches the vault through the parent's tool result, which the parent's own distill captures.
+
+A session's header `parentSession` is intentionally **not** the signal: pi also sets it for `/fork`, `/tree` branch creation, clone and `/new` with a parent, and those top-level sessions stay eligible. Manual `/distill` is unaffected — it works in any session that can invoke the command.
+
 ## Setup
 
 Enable distill in your vault config:

@@ -589,20 +589,47 @@ export function makeFakeUI(): {
 }
 
 /**
- * Build a UI-enabled session_start ctx (`hasUI: true`) around the given
- * session manager and ui stub. The distill extension arms its countdown
- * repaint — and, before the issue #100 arm gate, only ever armed the
- * auto-distill interval at all — for interactive sessions with a persisted
- * session file, so interval-firing tests need this ctx shape (`makeFakeUI()`
- * supplies the `ui` object). Shared by stale-ctx-race, pollhandle-timeout,
- * routing, and shutdown-handler suites.
+ * Build a UI-enabled session_start ctx around the given session manager and
+ * ui stub. The distill extension arms its countdown repaint — and, before the
+ * issue #100 arm gate, only ever armed the auto-distill interval at all — for
+ * interactive sessions with a persisted session file, so interval-firing
+ * tests need this ctx shape (`makeFakeUI()` supplies the `ui` object).
+ * Shared by stale-ctx-race, pollhandle-timeout, routing, and shutdown-handler
+ * suites.
+ *
+ * `mode` defaults to `"tui"`, which is what pi's interactive host binds via
+ * `session.bindExtensions({ mode: "tui", ... })`. The issue #116 role gate
+ * (`./session-eligibility.ts`) requires an interactive session, so a ctx
+ * without a mode — or with `mode: "print"`, the value every subagent child
+ * keeps — must never be built here. Pass `"rpc"` for the RPC host, and
+ * `"print"` only when a test deliberately models a subagent child.
  */
 export function makeUICtx(
   sm: SessionManager,
   cwd: string,
   ui: unknown,
+  mode: "tui" | "rpc" | "print" | "json" = "tui",
 ): Record<string, unknown> {
-  return { cwd, sessionManager: sm, hasUI: true, ui };
+  return { cwd, sessionManager: sm, hasUI: true, mode, ui };
+}
+
+/**
+ * Build a subagent-child ctx: exactly what an in-process child `AgentSession`
+ * sees under pi-subagents (issue #116).
+ *
+ * pi-subagents binds a child UI proxy
+ * (`bindExtensions({ uiContext: createChildUIProxy(...) })`), so
+ * `ctx.hasUI === true` — `hasUI` cannot identify a child. It passes no
+ * `mode`, so the session keeps pi's default `_extensionMode = "print"` and
+ * every ctx getter reports `mode === "print"`. The child's session file has
+ * `parentSession` set to the parent session (passed to `SessionManager.create`).
+ */
+export function makeSubagentCtx(
+  sm: SessionManager,
+  cwd: string,
+  ui: unknown,
+): Record<string, unknown> {
+  return makeUICtx(sm, cwd, ui, "print");
 }
 
 /**
