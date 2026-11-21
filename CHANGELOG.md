@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [calver-released]
+
+<!-- USER-EDITABLE SECTION START -->
+<!-- Add your curated release notes here. -->
+<!-- USER-EDITABLE SECTION END -->
+
+### 🚀 Features
+
+- *(napkin-context)* Bump @cad0p/napkin to 0.14.0-20261119.6, reuse vault walks for 5 s in kb_search (closes #130) ([#131](https://github.com/cad0p/pi-napkin/pull/131))
+- *(napkin-context)* Build the vault overview in a worker thread (closes #132) ([#133](https://github.com/cad0p/pi-napkin/pull/133))
+
+### 🐛 Bug Fixes
+
+- *(distill)* Past-tense overlap-notice wording (closes #104)
+- *(distill)* Preflight the napkin CLI and surface a repair notice when missing (closes #109)
+- *(package)* Ship CHANGELOG.md so Pi shows Extension Updates (closes #114)
+- *(napkin-context)* Skip the overview when the session has one; build it in the background, never trigger a turn (closes #126)
+- *(napkin-context)* Build the vault overview in a child process (closes #139) ([#140](https://github.com/cad0p/pi-napkin/pull/140))
+- *(napkin-context)* No in-thread overview build after the child fails or times out (closes #161) ([#162](https://github.com/cad0p/pi-napkin/pull/162))
+- *(distill)* Auto-distill only in the top-level session, never in subagent sessions (closes #116) ([#163](https://github.com/cad0p/pi-napkin/pull/163))
+
+### 💼 Other
+
+- Bump @cad0p/napkin to 0.14.0-20261119.9 (closes #134) ([#136](https://github.com/cad0p/pi-napkin/pull/136))
+- Bump @cad0p/napkin to 0.14.0-20261119.11 (closes #137) ([#138](https://github.com/cad0p/pi-napkin/pull/138))
+- Bump @cad0p/napkin to 0.14.0-20261119.12 (closes #141) ([#142](https://github.com/cad0p/pi-napkin/pull/142))
+- Bump @cad0p/napkin to 0.14.0-20261119.13 (closes #143) ([#144](https://github.com/cad0p/pi-napkin/pull/144))
+- Bump @cad0p/napkin to 0.14.0-20261119.14 (closes #145) ([#146](https://github.com/cad0p/pi-napkin/pull/146))
+- Bump @cad0p/napkin to 0.14.0-20261120.2, folder-term rows and content ignore fingerprint (closes #153) ([#154](https://github.com/cad0p/pi-napkin/pull/154))
+- Bump @cad0p/napkin to 0.14.0-20261120.3, cold batch build (closes #157) ([#158](https://github.com/cad0p/pi-napkin/pull/158))
+- Bump @cad0p/napkin to 0.14.0-20261120.4, frontmatter without gray-matter's cache (closes #159) ([#160](https://github.com/cad0p/pi-napkin/pull/160))
+
+### ⚡ Performance
+
+- *(napkin-context)* Fork the overview child with a 4 MB young generation (closes #147) ([#148](https://github.com/cad0p/pi-napkin/pull/148))
+- *(napkin-context, distill)* Resolve the vault through @cad0p/napkin/vault and load the SDK lazily, outside jiti (closes #149) ([#150](https://github.com/cad0p/pi-napkin/pull/150))
+- *(napkin-context)* Build the overview in the child through @cad0p/napkin/overview (closes #151) ([#152](https://github.com/cad0p/pi-napkin/pull/152))
+- *(napkin-context)* Fork the overview child with a 2 MB young generation and one malloc arena (closes #155) ([#156](https://github.com/cad0p/pi-napkin/pull/156))
+
+
 ## [0.7.3] - 2026-08-24
 
 <!-- USER-EDITABLE SECTION START -->
