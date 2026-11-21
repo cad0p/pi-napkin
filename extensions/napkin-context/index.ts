@@ -182,18 +182,22 @@ function kbRenderTimedResult(
 const SEARCH_FRESHNESS_MS = 5000;
 
 /**
- * Generous bound for a stuck overview child (pi-napkin #139). A 28.7k-note
- * cold build takes ~14 s worst case; 120 s only fires on a genuinely wedged
- * child, which is then SIGKILLed and the in-thread fallback runs.
+ * Bound for a stuck overview child (pi-napkin #139). A 29.5k-note cold build
+ * takes about 25–35 s on a loaded machine and a typical miss a few seconds,
+ * but a heavily loaded machine (load average 40–60 on 10 CPUs) stretched one
+ * past 120 s. A timed-out child is SIGKILLed and the overview is skipped for
+ * the session (#161) — there is no in-thread fallback any more — so a longer
+ * bound only gives a slow child more time and still ends a wedged one.
  */
-const OVERVIEW_CHILD_TIMEOUT_MS = 120_000;
+const OVERVIEW_CHILD_TIMEOUT_MS = 300_000;
 
 /**
  * Test/debug seams. The env names predate the move from worker_thread to a
  * forked child process (#139) and are kept unchanged so existing escape
  * hatches keep working:
  *  - NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER forces the in-thread build (also
- *    a user escape hatch if forking misbehaves on an exotic runtime);
+ *    a user escape hatch if forking misbehaves on an exotic runtime); it is
+ *    the only way the overview is ever built in pi's own thread (#161);
  *  - NAPKIN_CONTEXT_OVERVIEW_WORKER_ENTRY points the fork at a different
  *    file (tests use it to inject failing/slow children);
  *  - NAPKIN_CONTEXT_OVERVIEW_TIMEOUT_MS shortens the timeout in tests (a
@@ -278,9 +282,11 @@ function formatOverview(overview: RawOverview): OverviewPayload | null {
 }
 
 /**
- * Build the injectable overview payload in-thread. Used as the fallback when
- * the child cannot start, errors, or times out — the overview must never
- * disappear just because forking is unavailable.
+ * Build the injectable overview payload in-thread. Only used when the user
+ * opted out of the child (NAPKIN_CONTEXT_DISABLE_OVERVIEW_WORKER). A failed
+ * child never falls back here (#161): an in-thread build on a large vault
+ * freezes pi for seconds and keeps up to ~1 GB resident, and a child most
+ * often fails on a heavily loaded machine, where that build is slowest.
  */
 async function getOverview(cwd: string): Promise<OverviewPayload | null> {
   try {
@@ -457,30 +463,34 @@ export default function (pi: ExtensionAPI) {
    * without waiting for the overview (up to ~14 s / ~850 MB on a large
    * vault), then build it in a forked child so pi's main thread never
    * freezes and none of the build's memory is retained (pi-napkin #139).
-   * Falls back to the in-thread call if the child cannot deliver.
    *
-   * The child failing because session_shutdown killed it must NOT fall
-   * back: the result would be dropped by the generation guard anyway, and a
-   * synchronous in-thread build would freeze pi mid-teardown for seconds on
-   * a large vault.
+   * If the child cannot deliver (timeout, crash, error, cannot start), the
+   * overview is skipped for this session and `failure` says why (#161).
+   * It is never built in-thread instead: that would bring back the freeze
+   * and the memory the child exists to keep out of pi. The in-thread build
+   * only runs when the user disabled the child.
    */
   async function buildOverview(
     cwd: string,
     generation: number,
-  ): Promise<OverviewPayload | null> {
+  ): Promise<{ overview: OverviewPayload | null; failure?: string }> {
     await new Promise<void>((resolve) => setImmediate(resolve));
-    if (!overviewChildDisabled()) {
-      try {
-        return formatOverview(await runOverviewInChild(cwd));
-      } catch (err) {
-        if (generation !== sessionGeneration) return null;
-        console.error(
-          "[napkin-context] overview child unavailable; building in-thread:",
-          err,
-        );
-      }
+    if (overviewChildDisabled()) return { overview: await getOverview(cwd) };
+    try {
+      return { overview: formatOverview(await runOverviewInChild(cwd)) };
+    } catch (err) {
+      // A child killed by session_shutdown: nothing to report.
+      if (generation !== sessionGeneration) return { overview: null };
+      // One short line for the UI; the full error (with the child's stderr
+      // tail) goes to the console below.
+      const message = err instanceof Error ? err.message : String(err);
+      const failure = message.split("\n")[0].slice(0, 200);
+      console.error(
+        "[napkin-context] overview child failed; skipping the overview this session:",
+        err,
+      );
+      return { overview: null, failure };
     }
-    return getOverview(cwd);
   }
 
   pi.registerMessageRenderer(
@@ -588,14 +598,16 @@ export default function (pi: ExtensionAPI) {
 
     const showStatus = ctx.hasUI && loadShowStatus(vault.configPath);
 
-    const paintStatus = (hasOverview: boolean): void => {
+    const paintStatus = (hasOverview: boolean, failed = false): void => {
       if (!showStatus || !ctx.ui) return;
       const theme = ctx.ui.theme;
       ctx.ui.setStatus(
         "napkin",
         hasOverview
           ? `📜${theme.fg("dim", " napkin")}`
-          : theme.fg("dim", "napkin: no NAPKIN.md"),
+          : failed
+            ? theme.fg("dim", "napkin: overview unavailable")
+            : theme.fg("dim", "napkin: no NAPKIN.md"),
       );
     };
 
@@ -611,7 +623,7 @@ export default function (pi: ExtensionAPI) {
     const buildAndDeliver = async (): Promise<void> => {
       __overviewBuildsPending.count++;
       try {
-        const overview = await buildOverview(ctx.cwd, generation);
+        const { overview, failure } = await buildOverview(ctx.cwd, generation);
 
         // The session was replaced while the overview built (session_shutdown
         // bumped the generation). Never post into the new session from the
@@ -659,8 +671,21 @@ export default function (pi: ExtensionAPI) {
           });
         }
 
+        // A failed child skips the overview (#161): say so once, and keep
+        // the status distinct from a vault that has nothing to render.
+        if (failure !== undefined) {
+          paintStatus(false, true);
+          if (ctx.hasUI) {
+            ctx.ui.notify(
+              `napkin-context: vault overview skipped this session (${failure}); kb_search and kb_read still work`,
+              "warning",
+            );
+          }
+          return;
+        }
+
         // A vault without a renderable overview (no NAPKIN.md, empty
-        // vault, or a failed build) keeps the "no NAPKIN.md" status.
+        // vault) keeps the "no NAPKIN.md" status.
         paintStatus(!!overview);
       } finally {
         __overviewBuildsPending.count--;
