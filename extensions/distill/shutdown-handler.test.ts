@@ -310,13 +310,11 @@ describe("session_shutdown handler (Item 8)", () => {
   ): Promise<number> {
     const { api, captured } = makeMockAPI();
     distillExtension(api as never);
+    // An interactive session (issue #116): auto-distill is only eligible for
+    // the user's top-level TUI/RPC session — a headless or subagent ctx never
+    // arms the interval and never spawns here.
     // biome-ignore lint/suspicious/noExplicitAny: partial ctx
-    const ctx: any = {
-      cwd: vaultPath,
-      sessionManager,
-      hasUI: false,
-      ui: null,
-    };
+    const ctx: any = makeUICtx(sessionManager, vaultPath, makeFakeUI().ui);
     await captured.handlers.session_start({ reason: "new" }, ctx);
     await captured.handlers.session_shutdown({ reason: shutdownReason }, ctx);
     return countWorktrees(vaultPath);
@@ -402,7 +400,10 @@ describe("session_shutdown handler (Item 8)", () => {
 
   test("shutdown never blocks when vault resolution fails", async () => {
     // Point ctx.cwd at a directory that Napkin can't resolve to a vault.
-    // The handler's outer try/catch must swallow the error and still\u00a0complete.
+    // The handler's outer try/catch must swallow the error and still complete.
+    // Headless ctx on purpose (issue #116): a non-interactive host is not
+    // auto-distill eligible, so nothing can spawn even if a global-config
+    // fallback resolves some vault from `bogusCwd`.
     const bogusCwd = fs.mkdtempSync(path.join(os.tmpdir(), "no-vault-"));
     try {
       const { api, captured } = makeMockAPI();
@@ -455,13 +456,10 @@ describe("session_shutdown handler (Item 8)", () => {
     sm = createSession(vault);
     const { api, captured } = makeMockAPI();
     distillExtension(api as never);
+    // Interactive session (issue #116 gate) — this test pins the
+    // `lastSpawnedSize` bookkeeping of the real spawn path.
     // biome-ignore lint/suspicious/noExplicitAny: partial ctx
-    const ctx: any = {
-      cwd: vault,
-      sessionManager: sm,
-      hasUI: false,
-      ui: null,
-    };
+    const ctx: any = makeUICtx(sm, vault, makeFakeUI().ui);
     await captured.handlers.session_start({ reason: "new" }, ctx);
     await captured.handlers.session_shutdown({ reason: "quit" }, ctx);
     const first = countWorktrees(vault);
