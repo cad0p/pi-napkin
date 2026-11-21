@@ -352,7 +352,7 @@ export default function (pi: ExtensionAPI) {
   /**
    * Run Napkin.overview() in a forked child process and resolve with the
    * plain result object. Rejects on spawn failure, child error, a posted
-   * error, or the timeout; the caller falls back to the in-thread build.
+   * error, or the timeout; the caller then skips the overview (#161).
    *
    * A child process — not the #132 worker thread — because a terminated
    * worker's freed heap stays inside pi's process (~330 MB resident after a
