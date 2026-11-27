@@ -760,6 +760,8 @@ function isInsideDistillCacheRoot(
  */
 export interface StaleCleanupResult {
   removed: number;
+  /** Absolute paths of the entries counted in `removed` (also filled by a dry run). */
+  removedPaths: string[];
   kept: Array<{ path: string; branch: string; reason: string }>;
 }
 
@@ -803,7 +805,7 @@ export function sweepStaleWorktrees(
 ): StaleCleanupResult {
   const dryRun = options.dryRun === true;
   const now = options.now ?? Date.now();
-  const result: StaleCleanupResult = { removed: 0, kept: [] };
+  const result: StaleCleanupResult = { removed: 0, removedPaths: [], kept: [] };
   const vaultPath = vault.contentPath;
   // No git in the vault → nothing to clean up. session_start may call us
   // before auto-init runs on first launch.
@@ -828,6 +830,12 @@ export function sweepStaleWorktrees(
       // registration that the dirty probe can never examine. Safe even on a
       // dry run because the directory does not exist.
       if (!fs.existsSync(entry.path)) {
+        if (dryRun) {
+          // A dry run must stay read-only: report the prune without running it.
+          result.removed += 1;
+          result.removedPaths.push(entry.path);
+          continue;
+        }
         runGit(vaultPath, ["worktree", "prune"]);
         const gone = runGit(vaultPath, [
           "show-ref",
@@ -838,6 +846,7 @@ export function sweepStaleWorktrees(
           runGit(vaultPath, ["branch", "-D", entry.branch]);
         }
         result.removed += 1;
+        result.removedPaths.push(entry.path);
         continue;
       }
 
@@ -915,6 +924,7 @@ export function sweepStaleWorktrees(
 
       if (dryRun) {
         result.removed += 1;
+        result.removedPaths.push(entry.path);
         continue;
       }
 
@@ -927,6 +937,7 @@ export function sweepStaleWorktrees(
       // to the caller as unremoved rather than being misreported.
       if (!fs.existsSync(entry.path)) {
         result.removed += 1;
+        result.removedPaths.push(entry.path);
       } else {
         keep("removal failed");
       }

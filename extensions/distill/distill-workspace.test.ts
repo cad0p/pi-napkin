@@ -1054,6 +1054,7 @@ describe("cleanupStaleWorktrees", () => {
         { dryRun: true },
       );
       expect(result.removed).toBe(1);
+      expect(result.removedPaths).toEqual([w.worktreePath]);
       expect(fs.existsSync(w.worktreePath)).toBe(true);
       const branch = spawnSync(
         "git",
