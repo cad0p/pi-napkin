@@ -1094,7 +1094,10 @@ describe("cleanupStaleWorktrees", () => {
       expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(1);
       expect(fs.existsSync(w.worktreePath)).toBe(false);
     } finally {
-      process.env.XDG_CACHE_HOME = savedXdg;
+      // Assigning `undefined` to process.env stores the string "undefined",
+      // which would poison every later test's cache root.
+      if (savedXdg === undefined) delete process.env.XDG_CACHE_HOME;
+      else process.env.XDG_CACHE_HOME = savedXdg;
       if (w && fs.existsSync(w.worktreePath)) cleanupDistillWorkspace(vault, w);
       fs.rmSync(linkCache, { force: true });
       fs.rmSync(realCache, { recursive: true, force: true });
