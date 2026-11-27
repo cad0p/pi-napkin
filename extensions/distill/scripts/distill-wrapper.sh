@@ -414,6 +414,49 @@ write_outcome() {
   }
 }
 
+# Mark the run as finished in meta.json before cleanup. The normal path
+# removes the worktree immediately afterwards, so this marker is only
+# observable when cleanup partially fails; it then lets the JS-side sweep
+# distinguish a finished run from a live one even if the wrapper pid was
+# never recorded or has been reused. Best-effort by design: cleanup must
+# never be blocked by a metadata write.
+mark_meta_finished() {
+  [ -f "$META_PATH" ] || return 0
+  local node_bin="${REAL_NODE:-}"
+  if [ -z "$node_bin" ]; then
+    node_bin="$(command -v node || true)"
+  fi
+  [ -n "$node_bin" ] || return 0
+  local finished_at
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Also write a sibling marker that no pid rewrite can overwrite. The meta
+  # update below is useful schema evidence, but parent/wrapper metadata
+  # rewrites are independent read-modify-write sequences; the one-way marker
+  # is the race-proof terminal signal.
+  local finished_tmp="$META_PATH.finished.tmp.$$"
+  if printf '%s\n' "$finished_at" > "$finished_tmp" 2>/dev/null; then
+    mv "$finished_tmp" "$META_PATH.finished" 2>/dev/null || rm -f "$finished_tmp" 2>/dev/null || true
+  else
+    rm -f "$finished_tmp" 2>/dev/null || true
+  fi
+  "$node_bin" -e '
+    const fs = require("fs");
+    const metaPath = process.argv[1];
+    const finishedAt = process.argv[2];
+    try {
+      const meta = JSON.parse(fs.readFileSync(metaPath, "utf8"));
+      if (meta && typeof meta === "object" && typeof meta.finishedAt !== "string") {
+        meta.finishedAt = finishedAt;
+        const tmp = metaPath + ".finished." + process.pid + ".tmp";
+        fs.writeFileSync(tmp, JSON.stringify(meta, null, 2) + "\n");
+        fs.renameSync(tmp, metaPath);
+      }
+    } catch {
+      // Metadata is advisory; cleanup still proceeds without it.
+    }
+  ' "$META_PATH" "$finished_at" >/dev/null 2>&1 || true
+}
+
 # safe_rm_worktree <worktree_path> <expected_cache_root>
 #
 # Defense-in-depth path-safety guard before `rm -rf <worktree>`. The
@@ -874,6 +917,10 @@ detect_local_only() {
 # remove` errors on a missing path; we discard the error).
 cleanup() {
   local rc=$?
+  # Record terminal state before any removal step. If removal fails, the
+  # sweep can still prove this wrapper finished instead of relying on pid
+  # liveness alone.
+  mark_meta_finished
   # cd out of the worktree before removing it, otherwise git refuses.
   cd "$VAULT" 2>/dev/null || cd /
   if [ -d "$WORKTREE" ]; then
