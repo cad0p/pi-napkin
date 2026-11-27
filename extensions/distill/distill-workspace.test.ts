@@ -1067,6 +1067,40 @@ describe("cleanupStaleWorktrees", () => {
     }
   });
 
+  test("sweeps through a symlinked cache root (macOS /var → /private/var shape)", () => {
+    // git records the physical path of a worktree, while the cache root is
+    // built from the configured (possibly symlinked) $XDG_CACHE_HOME. macOS
+    // tmpdirs are exactly this shape: /var/folders/… is recorded by git as
+    // /private/var/folders/…, so a lexical containment check keeps every
+    // entry. The sweep must canonicalise both sides before comparing.
+    const realCache = fs.mkdtempSync(
+      path.join(os.tmpdir(), "stale-wt-cache-real-"),
+    );
+    const linkCache = `${realCache}-link`;
+    fs.symlinkSync(realCache, linkCache, "dir");
+    const savedXdg = process.env.XDG_CACHE_HOME;
+    process.env.XDG_CACHE_HOME = linkCache;
+    let w: ReturnType<typeof createDistillWorkspace> | undefined;
+    try {
+      w = createDistillWorkspace(vault, sourceSession, sessionDir);
+      // The worktree was requested through the symlinked root; git reports
+      // the physical one. The two spellings must still be recognised.
+      expect(w.worktreePath.startsWith(linkCache)).toBe(true);
+      const meta = readDistillMeta(w.worktreePath);
+      if (!meta) throw new Error("meta expected");
+      meta.pid = findDeadPid();
+      fs.writeFileSync(w.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+      expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(1);
+      expect(fs.existsSync(w.worktreePath)).toBe(false);
+    } finally {
+      process.env.XDG_CACHE_HOME = savedXdg;
+      if (w && fs.existsSync(w.worktreePath)) cleanupDistillWorkspace(vault, w);
+      fs.rmSync(linkCache, { force: true });
+      fs.rmSync(realCache, { recursive: true, force: true });
+    }
+  });
+
   test("prunes a registration whose worktree directory is gone and deletes its branch", () => {
     const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     // Out-of-band deletion (manual cache cleanup, earlier partial sweep).

@@ -738,12 +738,39 @@ export function hasUnintegratedWorktreeChanges(worktreePath: string): boolean {
   });
 }
 
+/**
+ * Canonicalise a path through `fs.realpathSync`, walking up to the nearest
+ * existing ancestor when the path (or part of it) is missing. `git worktree
+ * list` always reports the physical path of a worktree, while the cache root
+ * is built from whatever `$XDG_CACHE_HOME` says: on macOS `os.tmpdir()` is
+ * `/var/folders/…` and git records `/private/var/folders/…`, so comparing the
+ * two spellings lexically keeps every entry and the sweep never fires.
+ */
+function canonicalPath(p: string): string {
+  const absolute = path.resolve(p);
+  let current = absolute;
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      const real = fs.realpathSync(current);
+      return missing.length === 0
+        ? real
+        : path.join(real, ...missing.slice().reverse());
+    } catch {
+      const parent = path.dirname(current);
+      if (parent === current) return absolute;
+      missing.push(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
 function isInsideDistillCacheRoot(
   vaultPath: string,
   worktreePath: string,
 ): boolean {
-  const cacheRoot = path.resolve(resolveCacheRoot(vaultPath));
-  const resolved = path.resolve(worktreePath);
+  const cacheRoot = canonicalPath(resolveCacheRoot(vaultPath));
+  const resolved = canonicalPath(worktreePath);
   const relative = path.relative(cacheRoot, resolved);
   return (
     relative.length > 0 &&
