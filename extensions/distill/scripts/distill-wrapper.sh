@@ -429,6 +429,16 @@ mark_meta_finished() {
   [ -n "$node_bin" ] || return 0
   local finished_at
   finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  # Also write a sibling marker that no pid rewrite can overwrite. The meta
+  # update below is useful schema evidence, but parent/wrapper metadata
+  # rewrites are independent read-modify-write sequences; the one-way marker
+  # is the race-proof terminal signal.
+  local finished_tmp="$META_PATH.finished.tmp.$$"
+  if printf '%s\n' "$finished_at" > "$finished_tmp" 2>/dev/null; then
+    mv "$finished_tmp" "$META_PATH.finished" 2>/dev/null || rm -f "$finished_tmp" 2>/dev/null || true
+  else
+    rm -f "$finished_tmp" 2>/dev/null || true
+  fi
   "$node_bin" -e '
     const fs = require("fs");
     const metaPath = process.argv[1];

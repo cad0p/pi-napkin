@@ -692,6 +692,10 @@ describe("distill-wrapper.sh (integration)", () => {
     const after = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
     expect(typeof after.finishedAt).toBe("string");
     expect(after.finishedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
+    // The sibling marker is the race-proof terminal signal: parent-side pid
+    // rewrites can never overwrite it while updating meta.json itself.
+    const marker = fs.readFileSync(`${metaPath}.finished`, "utf-8").trim();
+    expect(marker).toBe(after.finishedAt);
   });
 
   test("POST-R6-CACHE: wrapper installs napkin shim and exports it on PATH", () => {

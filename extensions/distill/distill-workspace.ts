@@ -672,9 +672,13 @@ function hasDistillWrapperStarted(worktreePath: string): boolean {
   );
 }
 
-function isOlderThanMs(pathToStat: string, ageMs: number): boolean {
+function isOlderThanMs(
+  pathToStat: string,
+  ageMs: number,
+  now: number = Date.now(),
+): boolean {
   try {
-    return Date.now() - fs.statSync(pathToStat).mtimeMs > ageMs;
+    return now - fs.statSync(pathToStat).mtimeMs > ageMs;
   } catch {
     return false;
   }
@@ -711,17 +715,74 @@ function isBranchMergedIntoDefault(
 }
 
 /**
+ * Conservative dirty-worktree probe. Any tracked modification or untracked
+ * file outside the internal .napkin/distill/ machinery means the worktree may
+ * be the only copy of distill output and is therefore unmerged, regardless of
+ * branch ancestry. Probe failure is treated as dirty.
+ */
+export function hasUnintegratedWorktreeChanges(worktreePath: string): boolean {
+  const status = runGit(worktreePath, [
+    "status",
+    "--porcelain=v1",
+    "-z",
+    "--untracked-files=all",
+  ]);
+  if (status.status !== 0) return true;
+  const internalPrefix = `${NAPKIN_MARKER}/distill/`;
+  return status.stdout.split("\0").some((record) => {
+    if (record.length < 4) return false;
+    const file = record.slice(3);
+    return (
+      file !== internalPrefix.slice(0, -1) && !file.startsWith(internalPrefix)
+    );
+  });
+}
+
+function isInsideDistillCacheRoot(
+  vaultPath: string,
+  worktreePath: string,
+): boolean {
+  const cacheRoot = path.resolve(resolveCacheRoot(vaultPath));
+  const resolved = path.resolve(worktreePath);
+  const relative = path.relative(cacheRoot, resolved);
+  return (
+    relative.length > 0 &&
+    relative !== ".." &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
+
+/**
+ * Outcome of a read-only sweep pass. `removed` is the number of worktrees
+ * actually removed. `report` names every entry that was kept and why, so a
+ * caller can surface what a dry run would free without deleting anything.
+ */
+export interface StaleCleanupResult {
+  removed: number;
+  kept: Array<{ path: string; branch: string; reason: string }>;
+}
+
+/**
  * Remove distill worktrees whose runs are finished and whose branches are
  * merged into the vault default branch. Intended to run at `session_start`
  * AND before every distill spawn so long-lived pi sessions don't accumulate
  * debris from crashed or never-spawned wrappers.
  *
- * Safety invariant: a worktree whose distill branch is NOT an ancestor of
- * the default branch is never removed here, regardless of pid/meta age.
- * Squash-merged distill branches are deliberately not ancestors, so this
- * sweep is conservative; the wrapper remains the normal per-run cleanup.
+ * Safety invariant (deliberately conservative): a worktree is removed only
+ * when BOTH hold:
+ *   1. its worktree is clean — no tracked modification and no untracked file
+ *      outside the internal .napkin/distill/ machinery; and
+ *   2. its distill branch tip is an ancestor of the vault default branch
+ *      (`git merge-base --is-ancestor`).
  *
- * A merged worktree (branch matches `^distill/.*`) is removed if ANY of:
+ * Squash-merged distill branches are deliberately NOT ancestors, so they are
+ * KEPT (and reported) rather than swept; proving squash integration is a
+ * separate follow-up (issue #167). Dirty, unknown, and failed-probe entries
+ * are kept too, because the sweep can never be sure the worktree is not the
+ * only copy of that work.
+ *
+ * A merged, clean worktree (branch matches `^distill/.*`) is removed if ANY of:
  *   1. `<wt>/.napkin/distill/meta.json` is missing or unreadable
  *   2. meta.json carries `finishedAt` (the wrapper entered its exit trap)
  *   3. meta.json's `pid` is not a running process
@@ -736,82 +797,154 @@ function isBranchMergedIntoDefault(
  *
  * @returns number of worktrees removed.
  */
-export function cleanupStaleWorktrees(vault: StaleCleanupVault): number {
+export function sweepStaleWorktrees(
+  vault: StaleCleanupVault,
+  options: { dryRun?: boolean; now?: number } = {},
+): StaleCleanupResult {
+  const dryRun = options.dryRun === true;
+  const now = options.now ?? Date.now();
+  const result: StaleCleanupResult = { removed: 0, kept: [] };
   const vaultPath = vault.contentPath;
   // No git in the vault → nothing to clean up. session_start may call us
   // before auto-init runs on first launch.
-  if (!fs.existsSync(path.join(vaultPath, ".git"))) return 0;
+  if (!fs.existsSync(path.join(vaultPath, ".git"))) return result;
 
   const listRes = runGit(vaultPath, ["worktree", "list", "--porcelain"]);
-  if (listRes.status !== 0) return 0;
+  if (listRes.status !== 0) return result;
 
   const entries = parseWorktreeList(listRes.stdout).filter((e) =>
     e.branch.startsWith("distill/"),
   );
   const defaultBranch = detectDefaultBranch(vaultPath);
 
-  let removed = 0;
   for (const entry of entries) {
+    const keep = (reason: string) => {
+      result.kept.push({ path: entry.path, branch: entry.branch, reason });
+    };
     try {
-      // Hard safety gate before any pid/meta-based decision: a distill
-      // branch with unique, unmerged commits is the only remaining copy of
-      // that worktree's commit graph checkout and must never be swept.
-      if (!isBranchMergedIntoDefault(vaultPath, entry.branch, defaultBranch))
+      // A worktree whose directory is already gone holds no work at all:
+      // nothing can be lost by unregistering it. Prune the registration (and
+      // delete the now-unreferenced distill branch) instead of keeping a
+      // registration that the dirty probe can never examine. Safe even on a
+      // dry run because the directory does not exist.
+      if (!fs.existsSync(entry.path)) {
+        runGit(vaultPath, ["worktree", "prune"]);
+        const gone = runGit(vaultPath, [
+          "show-ref",
+          "--verify",
+          `refs/heads/${entry.branch}`,
+        ]);
+        if (gone.status === 0) {
+          runGit(vaultPath, ["branch", "-D", entry.branch]);
+        }
+        result.removed += 1;
         continue;
+      }
 
       const metaPath = path.join(entry.path, DISTILL_SUBDIR, "meta.json");
-      let shouldRemove = false;
+      let finished: { ok: true } | { ok: false; reason: string };
 
       if (!fs.existsSync(metaPath)) {
         // A concurrent createDistillWorkspace passes through a brief state
         // where git has registered the worktree but meta.json has not been
         // written yet. Never treat a fresh missing meta as proof of death:
         // require the worktree itself to be old before sweeping this class.
-        shouldRemove = isOlderThanMs(entry.path, STALE_META_AGE_MS);
+        finished = isOlderThanMs(entry.path, STALE_META_AGE_MS, now)
+          ? { ok: true }
+          : { ok: false, reason: "missing meta.json (fresh, create race)" };
       } else {
         let mtime = 0;
         try {
           mtime = fs.statSync(metaPath).mtimeMs;
         } catch {
-          shouldRemove = isOlderThanMs(entry.path, STALE_META_AGE_MS);
+          mtime = 0;
         }
-        if (!shouldRemove) {
-          const meta = readDistillMeta(entry.path);
-          if (!meta) {
-            // Malformed/truncated metadata can also be a transient create- or
-            // pid-rewrite race. Sweep it only once it is clearly old.
-            shouldRemove = isOlderThanMs(metaPath, STALE_META_AGE_MS);
-          } else if (
-            typeof meta.finishedAt === "string" &&
-            meta.finishedAt.length > 0
-          ) {
-            shouldRemove = true;
-          } else if (!isPidAlive(meta.pid)) {
-            shouldRemove = true;
-          } else if (
-            Date.now() - mtime > WRAPPER_START_GRACE_MS &&
-            !hasDistillWrapperStarted(entry.path)
-          ) {
-            // Legacy never-started workspaces contain only the fork + meta:
-            // their pid is the still-live parent pi process. A real wrapper
-            // installs its napkin shim before the potentially long pi phase,
-            // so the shim's presence exempts slow-but-live distills from this
-            // age-based recovery path.
-            shouldRemove = true;
-          }
+        const meta = mtime === 0 ? null : readDistillMeta(entry.path);
+        if (!meta) {
+          // Malformed/truncated metadata can also be a transient create- or
+          // pid-rewrite race. Sweep it only once it is clearly old.
+          finished = isOlderThanMs(metaPath, STALE_META_AGE_MS, now)
+            ? { ok: true }
+            : { ok: false, reason: "unreadable meta.json (fresh)" };
+        } else if (
+          (typeof meta.finishedAt === "string" && meta.finishedAt.length > 0) ||
+          fs.existsSync(`${metaPath}.finished`)
+        ) {
+          finished = { ok: true };
+        } else if (!isPidAlive(meta.pid)) {
+          finished = { ok: true };
+        } else if (
+          now - mtime > WRAPPER_START_GRACE_MS &&
+          !hasDistillWrapperStarted(entry.path)
+        ) {
+          // Legacy never-started workspaces contain only the fork + meta:
+          // their pid is the still-live parent pi process. A real wrapper
+          // installs its napkin shim before the potentially long pi phase,
+          // so the shim's presence exempts slow-but-live distills from this
+          // age-based recovery path.
+          finished = { ok: true };
+        } else {
+          finished = {
+            ok: false,
+            reason: `run still live (pid ${meta.pid})`,
+          };
         }
       }
 
-      if (shouldRemove) {
-        removeDistillWorktree(vaultPath, entry.path, entry.branch);
-        removed += 1;
+      if (!finished.ok) {
+        keep(finished.reason);
+        continue;
       }
-    } catch {
-      // Per-worktree failure is non-fatal; keep sweeping.
+
+      // Cheap, purely local gates first; the git probes run only for entries
+      // whose run is already known to be finished.
+      if (!isInsideDistillCacheRoot(vaultPath, entry.path)) {
+        keep("outside this vault's distill cache root");
+        continue;
+      }
+      if (hasUnintegratedWorktreeChanges(entry.path)) {
+        keep("worktree has uncommitted or untracked output");
+        continue;
+      }
+      if (!isBranchMergedIntoDefault(vaultPath, entry.branch, defaultBranch)) {
+        keep(
+          "branch head is not an ancestor of the default branch (unmerged or squash-merged)",
+        );
+        continue;
+      }
+
+      if (dryRun) {
+        result.removed += 1;
+        continue;
+      }
+
+      cleanupDistillWorkspace(vaultPath, {
+        worktreePath: entry.path,
+        branchName: entry.branch,
+      });
+      // cleanupDistillWorkspace is intentionally best-effort. Count only a
+      // directory that actually disappeared; a failed removal remains visible
+      // to the caller as unremoved rather than being misreported.
+      if (!fs.existsSync(entry.path)) {
+        result.removed += 1;
+      } else {
+        keep("removal failed");
+      }
+    } catch (err) {
+      keep(`sweep error: ${(err as Error).message}`);
     }
   }
 
-  return removed;
+  return result;
+}
+
+/**
+ * Sweep stale distill worktrees and return how many were removed. Thin
+ * wrapper over {@link sweepStaleWorktrees} for callers that only need the
+ * count.
+ */
+export function cleanupStaleWorktrees(vault: StaleCleanupVault): number {
+  return sweepStaleWorktrees(vault).removed;
 }
 
 /**

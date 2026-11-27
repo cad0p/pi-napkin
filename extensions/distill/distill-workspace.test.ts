@@ -24,6 +24,7 @@ import {
   resolveCacheRoot,
   STALE_META_AGE_MS,
   STALE_WORKTREE_MINUTES,
+  sweepStaleWorktrees,
 } from "./distill-workspace";
 
 /**
@@ -753,6 +754,51 @@ describe("cleanupStaleWorktrees", () => {
     sourceSession = createSeededSessionFile(sessionDir, sessionDir);
   });
 
+  function runGitChecked(cwd: string, args: string[]): void {
+    const r = spawnSync("git", args, {
+      cwd,
+      encoding: "utf-8",
+      env: {
+        ...process.env,
+        GIT_AUTHOR_NAME: "test",
+        GIT_AUTHOR_EMAIL: "test@example.com",
+        GIT_COMMITTER_NAME: "test",
+        GIT_COMMITTER_EMAIL: "test@example.com",
+      },
+    });
+    if (r.status !== 0) {
+      throw new Error(`git ${args.join(" ")} failed: ${r.stderr || r.stdout}`);
+    }
+  }
+
+  function prepareSquashIntegratedWorkspace(): ReturnType<
+    typeof createDistillWorkspace
+  > {
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
+    fs.writeFileSync(path.join(w.worktreePath, "unique.md"), "unique\n");
+    runGitChecked(w.worktreePath, ["add", "unique.md"]);
+    runGitChecked(w.worktreePath, ["commit", "-q", "-m", "unique"]);
+
+    // Landing through a squash commit copies the content to main without
+    // making the distill branch tip an ancestor of main.
+    fs.writeFileSync(path.join(vault, "unique.md"), "unique\n");
+    runGitChecked(vault, ["add", "unique.md"]);
+    runGitChecked(vault, ["commit", "-q", "-m", "squash unique"]);
+    const ancestry = spawnSync(
+      "git",
+      ["-C", vault, "merge-base", "--is-ancestor", w.branchName, "main"],
+      { encoding: "utf-8" },
+    );
+    expect(ancestry.status).not.toBe(0);
+
+    const meta = readDistillMeta(w.worktreePath);
+    if (!meta) throw new Error("meta expected");
+    meta.pid = findDeadPid();
+    meta.finishedAt = new Date().toISOString();
+    fs.writeFileSync(w.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+    return w;
+  }
+
   afterEach(() => {
     fs.rmSync(sessionDir, { recursive: true, force: true });
     fs.rmSync(vault, { recursive: true, force: true });
@@ -863,6 +909,20 @@ describe("cleanupStaleWorktrees", () => {
     expect(fs.existsSync(w.worktreePath)).toBe(false);
   });
 
+  test("removes a merged worktree with only the race-proof finished marker", () => {
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
+    const meta = readDistillMeta(w.worktreePath);
+    if (!meta) throw new Error("meta expected");
+    // Keep the pid live and omit meta.finishedAt: this is the lost-update
+    // shape if the parent-side pid rewrite races the wrapper's meta write.
+    meta.pid = process.pid;
+    fs.writeFileSync(w.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+    fs.writeFileSync(`${w.metaPath}.finished`, `${new Date().toISOString()}\n`);
+
+    expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(1);
+    expect(fs.existsSync(w.worktreePath)).toBe(false);
+  });
+
   test("never removes a worktree whose distill branch has unmerged commits", () => {
     const w = createDistillWorkspace(vault, sourceSession, sessionDir);
     // Put a unique commit on the distill branch. Squash-merging does not make
@@ -913,6 +973,117 @@ describe("cleanupStaleWorktrees", () => {
     } finally {
       cleanupDistillWorkspace(vault, w);
     }
+  });
+
+  test("never removes a finished ancestral worktree with untracked distill output", () => {
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
+    fs.writeFileSync(
+      path.join(w.worktreePath, "uncommitted-note.md"),
+      "only copy\n",
+    );
+    const meta = readDistillMeta(w.worktreePath);
+    if (!meta) throw new Error("meta expected");
+    meta.pid = findDeadPid();
+    meta.finishedAt = new Date().toISOString();
+    fs.writeFileSync(w.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+    try {
+      expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(0);
+      expect(fs.existsSync(w.worktreePath)).toBe(true);
+      expect(
+        fs.existsSync(path.join(w.worktreePath, "uncommitted-note.md")),
+      ).toBe(true);
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+
+  test("never removes a finished ancestral worktree with modified tracked output", () => {
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
+    fs.appendFileSync(path.join(w.worktreePath, "seed.md"), "distill edit\n");
+    const meta = readDistillMeta(w.worktreePath);
+    if (!meta) throw new Error("meta expected");
+    meta.pid = findDeadPid();
+    meta.finishedAt = new Date().toISOString();
+    fs.writeFileSync(w.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+    try {
+      expect(cleanupStaleWorktrees({ contentPath: vault })).toBe(0);
+      expect(fs.existsSync(w.worktreePath)).toBe(true);
+      expect(
+        fs.readFileSync(path.join(w.worktreePath, "seed.md"), "utf-8"),
+      ).toContain("distill edit");
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+
+  test("keeps a finished, clean squash-integrated branch and reports it", () => {
+    // The conservative removal proof is ancestry only. A squash-merged
+    // branch tip is deliberately not an ancestor of main, so the sweep must
+    // keep it (a follow-up issue tracks proving squash integration).
+    const w = prepareSquashIntegratedWorkspace();
+
+    try {
+      const result = sweepStaleWorktrees({ contentPath: vault });
+      expect(result.removed).toBe(0);
+      expect(fs.existsSync(w.worktreePath)).toBe(true);
+      expect(result.kept).toEqual([
+        {
+          path: w.worktreePath,
+          branch: w.branchName,
+          reason:
+            "branch head is not an ancestor of the default branch (unmerged or squash-merged)",
+        },
+      ]);
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+
+  test("dry run reports what it would remove without deleting anything", () => {
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
+    const meta = readDistillMeta(w.worktreePath);
+    if (!meta) throw new Error("meta expected");
+    meta.pid = findDeadPid();
+    fs.writeFileSync(w.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+    try {
+      const result = sweepStaleWorktrees(
+        { contentPath: vault },
+        { dryRun: true },
+      );
+      expect(result.removed).toBe(1);
+      expect(fs.existsSync(w.worktreePath)).toBe(true);
+      const branch = spawnSync(
+        "git",
+        ["-C", vault, "branch", "--list", w.branchName],
+        { encoding: "utf-8" },
+      ).stdout;
+      expect(branch).toContain(w.branchName);
+    } finally {
+      cleanupDistillWorkspace(vault, w);
+    }
+  });
+
+  test("prunes a registration whose worktree directory is gone and deletes its branch", () => {
+    const w = createDistillWorkspace(vault, sourceSession, sessionDir);
+    // Out-of-band deletion (manual cache cleanup, earlier partial sweep).
+    fs.rmSync(w.worktreePath, { recursive: true, force: true });
+
+    const result = sweepStaleWorktrees({ contentPath: vault });
+    expect(result.removed).toBe(1);
+    expect(result.kept).toEqual([]);
+    const list = spawnSync("git", ["-C", vault, "worktree", "list"], {
+      encoding: "utf-8",
+    }).stdout;
+    expect(list).not.toContain(w.worktreePath);
+    const branch = spawnSync(
+      "git",
+      ["-C", vault, "branch", "--list", w.branchName],
+      { encoding: "utf-8" },
+    ).stdout;
+    expect(branch.trim()).toBe("");
   });
 
   test("ignores non-distill-branch worktrees", () => {
