@@ -18,6 +18,7 @@ import {
   DISTILL_PROMPT_CACHE_KEY_ENV,
   type DistillWorkspace,
   detectDefaultBranch,
+  resolveCacheRoot,
   spawnDistillInWorktree,
 } from "./distill-workspace";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
@@ -357,6 +358,99 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     expect(result.pid).toBe(12345);
     expect(fs.existsSync(result.workspace.worktreePath)).toBe(true);
   });
+
+  test("records the spawned wrapper pid in meta.json immediately", () => {
+    const { spawnFn } = makeMockSpawn();
+    const result = spawnDistillInWorktree({
+      vault,
+      sessionFile,
+      parentCwd: sessionDir,
+      maxDurationSecs: 600,
+      spawnFn,
+    });
+    workspaces.push(result.workspace);
+
+    const meta = JSON.parse(
+      fs.readFileSync(result.workspace.metaPath, "utf-8"),
+    );
+    expect(meta.pid).toBe(12345);
+    expect(meta.pid).not.toBe(process.pid);
+  });
+
+  test("sweeps a finished merged worktree before spawning the next distill", () => {
+    const stale = createDistillWorkspace(vault, sessionFile, sessionDir);
+    workspaces.push(stale);
+    const meta = JSON.parse(fs.readFileSync(stale.metaPath, "utf-8"));
+    // A live parent pid must not protect an already-finished merged run.
+    meta.pid = process.pid;
+    meta.finishedAt = new Date().toISOString();
+    fs.writeFileSync(stale.metaPath, `${JSON.stringify(meta, null, 2)}\n`);
+
+    const { spawnFn } = makeMockSpawn();
+    const result = spawnDistillInWorktree({
+      vault,
+      sessionFile,
+      parentCwd: sessionDir,
+      maxDurationSecs: 600,
+      spawnFn,
+    });
+    workspaces.push(result.workspace);
+
+    expect(fs.existsSync(stale.worktreePath)).toBe(false);
+    expect(fs.existsSync(result.workspace.worktreePath)).toBe(true);
+  });
+
+  test("cleans up the new workspace when spawn throws synchronously", () => {
+    const throwingSpawn = (() => {
+      throw new Error("spawn ENOMEM");
+    }) as unknown as typeof spawn;
+
+    expect(() =>
+      spawnDistillInWorktree({
+        vault,
+        sessionFile,
+        parentCwd: sessionDir,
+        maxDurationSecs: 600,
+        spawnFn: throwingSpawn,
+      }),
+    ).toThrow("spawn ENOMEM");
+
+    const cacheRoot = resolveCacheRoot(vault);
+    const leftovers = fs.existsSync(cacheRoot) ? fs.readdirSync(cacheRoot) : [];
+    expect(leftovers).toEqual([]);
+    const branches = spawnSync(
+      "git",
+      ["-C", vault, "branch", "--list", "distill/*"],
+      { encoding: "utf-8" },
+    ).stdout.trim();
+    expect(branches).toBe("");
+  });
+
+  test("cleans up the new workspace when the child reports an asynchronous spawn error", async () => {
+    const spawnFn = (() => {
+      const emitter = new EventEmitter() as EventEmitter & {
+        unref: () => void;
+        pid: number;
+      };
+      emitter.unref = () => {};
+      emitter.pid = 12345;
+      setImmediate(() => emitter.emit("error", new Error("spawn ENOMEM")));
+      return emitter;
+    }) as unknown as typeof spawn;
+
+    const result = spawnDistillInWorktree({
+      vault,
+      sessionFile,
+      parentCwd: sessionDir,
+      maxDurationSecs: 600,
+      spawnFn,
+    });
+    workspaces.push(result.workspace);
+
+    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(fs.existsSync(result.workspace.worktreePath)).toBe(false);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -532,6 +626,72 @@ describe("distill-wrapper.sh (integration)", () => {
     spawnSync("git", ["-C", vault, "branch", "-D", workspace.branchName], {
       encoding: "utf-8",
     });
+  });
+
+  test("cleanup marks meta.json finished when worktree removal cannot complete", () => {
+    // A plain directory is not a registered git worktree, so
+    // `git worktree remove` fails; a deliberately non-matching
+    // expectedCacheRoot then makes safe_rm_worktree refuse the rm-rf
+    // fallback. That leaves meta.json observable after the EXIT trap and
+    // proves the trap records terminal state before attempting removal.
+    const worktree = path.join(xdgCacheDir, "plain-finished-wt");
+    const distillDir = path.join(worktree, NAPKIN_MARKER, "distill");
+    fs.mkdirSync(distillDir, { recursive: true });
+    const head = spawnSync("git", ["-C", vault, "rev-parse", "HEAD"], {
+      encoding: "utf-8",
+    }).stdout.trim();
+    const metaPath = path.join(distillDir, "meta.json");
+    fs.writeFileSync(
+      metaPath,
+      `${JSON.stringify(
+        {
+          pid: process.pid,
+          vault,
+          branch: "distill/plain-finished",
+          startedAt: new Date().toISOString(),
+          parentSession: sessionFile,
+          startSha: head,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+    const errorDir = path.join(vault, NAPKIN_MARKER, "distill", "errors");
+    fs.mkdirSync(errorDir, { recursive: true });
+    const wrongCacheRoot = path.join(xdgCacheDir, "not-the-cache-root");
+    fs.mkdirSync(wrongCacheRoot, { recursive: true });
+
+    const r = spawnSync(
+      "bash",
+      [
+        DISTILL_WRAPPER_SCRIPT,
+        vault,
+        worktree,
+        "distill/plain-finished",
+        sessionFile,
+        "test prompt",
+        errorDir,
+        "",
+        "main",
+        vault,
+        "60",
+        wrongCacheRoot,
+      ],
+      {
+        encoding: "utf-8",
+        env: {
+          ...process.env,
+          NAPKIN_DISTILL_NO_RECURSE: "1",
+          NAPKIN_DISTILL_SKIP_PI: "1",
+        },
+      },
+    );
+
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(worktree)).toBe(true);
+    const after = JSON.parse(fs.readFileSync(metaPath, "utf-8"));
+    expect(typeof after.finishedAt).toBe("string");
+    expect(after.finishedAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/);
   });
 
   test("POST-R6-CACHE: wrapper installs napkin shim and exports it on PATH", () => {

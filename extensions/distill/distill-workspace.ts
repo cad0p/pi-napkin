@@ -29,12 +29,10 @@ import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 import { findVault, NAPKIN_MARKER } from "@cad0p/napkin/vault";
-import {
-  parseSessionEntries,
-  SessionManager,
-} from "@earendil-works/pi-coding-agent";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { buildDistillPrompt } from "./distill-prompt";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
 
@@ -76,11 +74,11 @@ export interface DistillMeta {
   /**
    * PID of the detached wrapper shell. Written first as a pre-spawn
    * placeholder (= `process.pid` of the parent pi session) by
-   * `createDistillWorkspace`, then OVERWRITTEN by the wrapper itself
-   * (`$$`) immediately after it installs its cleanup trap. Readers see the
-   * wrapper's pid for the vast majority of the distill's lifetime; only a
-   * brief window (≲ 100ms between JS write and wrapper's rewrite) shows the
-   * parent pid. Liveness checks (`/distill-status.alive`,
+   * `createDistillWorkspace`, rewritten to the child pid by
+   * `spawnDistillInWorktree` immediately after `spawn`, and independently
+   * rewritten by the wrapper itself (`$$`) after it installs its cleanup
+   * trap. The wrapper rewrite is now a compatibility backstop, not the
+   * sole liveness write. Liveness checks (`/distill-status.alive`,
    * `cleanupStaleWorktrees`) use this field via `process.kill(pid, 0)`.
    */
   pid: number;
@@ -104,6 +102,13 @@ export interface DistillMeta {
    * MUST tolerate undefined and fall back to scanning the whole worktree.
    */
   startSha?: string;
+  /**
+   * ISO-8601 timestamp written by the wrapper when its EXIT trap starts.
+   * Presence means the distill process has finished even if worktree
+   * removal failed afterwards. Optional because pre-fix metas and metas
+   * from wrappers that never started do not carry it.
+   */
+  finishedAt?: string;
 }
 
 /**
@@ -223,10 +228,66 @@ function assertVaultIsGitRepo(vaultPath: string): void {
   }
 }
 
-function readSessionId(sessionFile: string): string | undefined {
-  const entries = parseSessionEntries(fs.readFileSync(sessionFile, "utf-8"));
-  const header = entries.find((e) => e.type === "session");
-  return header?.id;
+const SESSION_HEADER_READ_BYTES = 64 * 1024;
+const SESSION_HEADER_SCAN_BYTES = 1024 * 1024;
+
+function parseSessionHeaderId(line: string): string | undefined {
+  try {
+    const parsed = JSON.parse(line) as { type?: unknown; id?: unknown };
+    if (parsed.type === "session" && typeof parsed.id === "string") {
+      return parsed.id;
+    }
+  } catch {
+    // Malformed first line — no cache key.
+  }
+  return undefined;
+}
+
+/**
+ * Read the parent session id from the first JSONL header line without
+ * materialising the whole session file. Long-lived orchestrator sessions
+ * can exceed V8's maximum string length; parsing the full file here both
+ * threw ERR_STRING_TOO_LONG and orphaned the just-created worktree before
+ * the wrapper was ever spawned.
+ *
+ * Exported for regression tests; production callers remain internal.
+ */
+export function readSessionId(sessionFile: string): string | undefined {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(sessionFile, "r");
+    const decoder = new StringDecoder("utf8");
+    const buffer = Buffer.allocUnsafe(SESSION_HEADER_READ_BYTES);
+    let pending = "";
+    let scanned = 0;
+    while (scanned < SESSION_HEADER_SCAN_BYTES) {
+      const bytesToRead = Math.min(
+        buffer.length,
+        SESSION_HEADER_SCAN_BYTES - scanned,
+      );
+      const bytesRead = fs.readSync(fd, buffer, 0, bytesToRead, null);
+      if (bytesRead === 0) break;
+      scanned += bytesRead;
+      pending += decoder.write(buffer.subarray(0, bytesRead));
+      const newline = pending.indexOf("\n");
+      if (newline !== -1) {
+        return parseSessionHeaderId(pending.slice(0, newline));
+      }
+    }
+    pending += decoder.end();
+    const firstLine = pending.split("\n", 1)[0];
+    return parseSessionHeaderId(firstLine);
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Best-effort close; the header read is already complete.
+      }
+    }
+  }
 }
 
 /**
@@ -575,16 +636,13 @@ function isPidAlive(pid: number): boolean {
 }
 
 /**
- * Number of minutes past which a worktree with a stale mtime on its
- * meta.json is considered abandoned — even if its pid is still alive.
- *
- * Covers the `distill.maxDurationMinutes` config (10 minutes by
- * default; read in the extension factory via `getMaxDistillDurationMs`)
- * with a 6× margin, so a worktree older than this either crashed
- * silently, lost its pid (e.g. kernel reboot), or somehow outlived its
- * shutdown timeout. The window is deliberately generous: a false-positive
- * here would clobber a slow-but-live distill, whereas waiting an extra
- * 50 minutes to sweep a dead one is harmless.
+ * Number of minutes past which a worktree with missing or unreadable
+ * metadata is considered abandoned. The hour-long window exists only to
+ * protect the brief creation/rewrite race: git registers the worktree
+ * before meta.json is written, and a concurrent spawn-time sweep must not
+ * mistake that fresh partial state for a crashed run. Live distills are
+ * never removed on this timestamp alone; the pid/finishedAt/shim evidence
+ * below decides those.
  */
 export const STALE_WORKTREE_MINUTES = 60;
 
@@ -596,6 +654,33 @@ export const STALE_WORKTREE_MINUTES = 60;
 export const STALE_META_AGE_MS = STALE_WORKTREE_MINUTES * 60 * 1000;
 
 /**
+ * Grace period for a workspace whose recorded pid is alive but which has no
+ * evidence that its wrapper reached the distill phase. The wrapper installs
+ * <worktree>/.napkin/distill/bin/napkin before spawning pi; absence of that
+ * shim after five minutes means the wrapper either never started (the
+ * parent-pid placeholder leak fixed here) or died in preflight. Keeping the
+ * grace short lets the spawn-time sweep reclaim those never-started full
+ * checkouts promptly, while the shim check below prevents the legacy age
+ * fallback from deleting a slow-but-live distill merely because it has been
+ * running for a long time.
+ */
+export const WRAPPER_START_GRACE_MS = 5 * 60 * 1000;
+
+function hasDistillWrapperStarted(worktreePath: string): boolean {
+  return fs.existsSync(
+    path.join(worktreePath, DISTILL_SUBDIR, "bin", "napkin"),
+  );
+}
+
+function isOlderThanMs(pathToStat: string, ageMs: number): boolean {
+  try {
+    return Date.now() - fs.statSync(pathToStat).mtimeMs > ageMs;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * VaultInfo-shaped handle this module accepts. We rely only on `contentPath`
  * (the vault root = the git main worktree root) — kept minimal so tests and
  * callers don't have to construct a full Napkin instance.
@@ -605,14 +690,47 @@ export interface StaleCleanupVault {
 }
 
 /**
- * Remove distill worktrees that belong to dead sessions. Intended to run
- * once per `session_start` so long-lived vaults don't accumulate debris
- * from crashed pi instances.
+ * Conservative ancestry probe for the sweep's never-delete-unmerged-work
+ * invariant. Any failed probe is treated as unmerged.
+ */
+function isBranchMergedIntoDefault(
+  vaultPath: string,
+  branchName: string,
+  defaultBranch: string,
+): boolean {
+  const merged = runGit(vaultPath, [
+    "merge-base",
+    "--is-ancestor",
+    branchName,
+    defaultBranch,
+  ]);
+  // Any non-zero/failed probe is treated as unmerged. This deliberately
+  // keeps worktrees with unique distill commits, missing refs, corrupt git
+  // state, or an unresolvable default branch untouched.
+  return merged.status === 0;
+}
+
+/**
+ * Remove distill worktrees whose runs are finished and whose branches are
+ * merged into the vault default branch. Intended to run at `session_start`
+ * AND before every distill spawn so long-lived pi sessions don't accumulate
+ * debris from crashed or never-spawned wrappers.
  *
- * A worktree (branch matches `^distill/.*`) is removed if ANY of:
- *   1. `<wt>/.napkin/distill/meta.json` is missing
- *   2. meta.json's `pid` is not a running process
- *   3. meta.json's mtime is older than STALE_META_AGE_MS
+ * Safety invariant: a worktree whose distill branch is NOT an ancestor of
+ * the default branch is never removed here, regardless of pid/meta age.
+ * Squash-merged distill branches are deliberately not ancestors, so this
+ * sweep is conservative; the wrapper remains the normal per-run cleanup.
+ *
+ * A merged worktree (branch matches `^distill/.*`) is removed if ANY of:
+ *   1. `<wt>/.napkin/distill/meta.json` is missing or unreadable
+ *   2. meta.json carries `finishedAt` (the wrapper entered its exit trap)
+ *   3. meta.json's `pid` is not a running process
+ *   4. meta.json is older than WRAPPER_START_GRACE_MS and the wrapper's
+ *      pre-distill napkin shim was never installed (legacy fallback for
+ *      pre-fix metas whose pid is the still-live parent pi pid)
+ *
+ * Missing or unreadable metadata is swept only after STALE_META_AGE_MS so
+ * the scan cannot race a concurrent workspace creation or pid rewrite.
  *
  * Removal is best-effort: failures on one worktree don't abort the sweep.
  *
@@ -630,29 +748,55 @@ export function cleanupStaleWorktrees(vault: StaleCleanupVault): number {
   const entries = parseWorktreeList(listRes.stdout).filter((e) =>
     e.branch.startsWith("distill/"),
   );
+  const defaultBranch = detectDefaultBranch(vaultPath);
 
   let removed = 0;
   for (const entry of entries) {
     try {
+      // Hard safety gate before any pid/meta-based decision: a distill
+      // branch with unique, unmerged commits is the only remaining copy of
+      // that worktree's commit graph checkout and must never be swept.
+      if (!isBranchMergedIntoDefault(vaultPath, entry.branch, defaultBranch))
+        continue;
+
       const metaPath = path.join(entry.path, DISTILL_SUBDIR, "meta.json");
       let shouldRemove = false;
 
       if (!fs.existsSync(metaPath)) {
-        shouldRemove = true;
+        // A concurrent createDistillWorkspace passes through a brief state
+        // where git has registered the worktree but meta.json has not been
+        // written yet. Never treat a fresh missing meta as proof of death:
+        // require the worktree itself to be old before sweeping this class.
+        shouldRemove = isOlderThanMs(entry.path, STALE_META_AGE_MS);
       } else {
         let mtime = 0;
         try {
           mtime = fs.statSync(metaPath).mtimeMs;
         } catch {
-          shouldRemove = true;
+          shouldRemove = isOlderThanMs(entry.path, STALE_META_AGE_MS);
         }
         if (!shouldRemove) {
           const meta = readDistillMeta(entry.path);
           if (!meta) {
+            // Malformed/truncated metadata can also be a transient create- or
+            // pid-rewrite race. Sweep it only once it is clearly old.
+            shouldRemove = isOlderThanMs(metaPath, STALE_META_AGE_MS);
+          } else if (
+            typeof meta.finishedAt === "string" &&
+            meta.finishedAt.length > 0
+          ) {
             shouldRemove = true;
           } else if (!isPidAlive(meta.pid)) {
             shouldRemove = true;
-          } else if (Date.now() - mtime > STALE_META_AGE_MS) {
+          } else if (
+            Date.now() - mtime > WRAPPER_START_GRACE_MS &&
+            !hasDistillWrapperStarted(entry.path)
+          ) {
+            // Legacy never-started workspaces contain only the fork + meta:
+            // their pid is the still-live parent pi process. A real wrapper
+            // installs its napkin shim before the potentially long pi phase,
+            // so the shim's presence exempts slow-but-live distills from this
+            // age-based recovery path.
             shouldRemove = true;
           }
         }
@@ -696,6 +840,29 @@ export function readDistillMeta(worktreePath: string): DistillMeta | null {
     return parsed;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Best-effort atomic rewrite of meta.json's pid field. The wrapper still
+ * performs its own rewrite for compatibility; writing the already-known
+ * child pid here closes the parent-pid placeholder window and preserves a
+ * correct liveness token even if the wrapper dies before its first line of
+ * user code.
+ */
+function writeDistillMetaPid(metaPath: string, pid: number): void {
+  const tmpPath = `${metaPath}.${process.pid}.${randomBytes(3).toString("hex")}.tmp`;
+  try {
+    const meta = JSON.parse(fs.readFileSync(metaPath, "utf-8")) as DistillMeta;
+    meta.pid = pid;
+    fs.writeFileSync(tmpPath, `${JSON.stringify(meta, null, 2)}\n`);
+    fs.renameSync(tmpPath, metaPath);
+  } catch {
+    try {
+      fs.rmSync(tmpPath, { force: true });
+    } catch {
+      // Best-effort temp cleanup only.
+    }
   }
 }
 
@@ -949,86 +1116,128 @@ export function spawnDistillInWorktree(
   const { vault, sessionFile, parentCwd, model, maxDurationSecs } = opts;
   const spawnFn = opts.spawnFn ?? spawn;
 
+  // Sweep before creating another multi-hundred-MB checkout. session_start
+  // may be days in the past for a long-lived orchestrator, while distills
+  // spawn every interval; this is the only reliable point at which debris
+  // from prior spawn failures is guaranteed to be revisited.
+  try {
+    cleanupStaleWorktrees({ contentPath: vault });
+  } catch {
+    // Best-effort: never block a distill on cleanup.
+  }
+
   const workspace = createDistillWorkspace(vault, sessionFile, parentCwd);
-  const parentSessionId = readSessionId(sessionFile);
+  try {
+    const parentSessionId = readSessionId(sessionFile);
 
-  const defaultBranch = detectDefaultBranch(vault);
+    const defaultBranch = detectDefaultBranch(vault);
 
-  // Build the agent-driven distill prompt by substituting the four
-  // placeholders into `extensions/distill/distill-prompt.md`. The .md
-  // contains the full agent contract (steps 1–6 distill content + steps
-  // 7–10 merge/squash/push/cleanup) plus the worktree-isolation prefix
-  // from POST-R6-CACHE — see PR #12 design "Agent contract". The wrapper
-  // hands this directly to `pi -p` as the agent's task; PR #12 deletes the
-  // per-file merge driver entirely.
-  const finalPrompt = buildDistillPrompt({
-    worktreePath: workspace.worktreePath,
-    vaultPath: vault,
-    branchName: workspace.branchName,
-    defaultBranch,
-  });
+    // Build the agent-driven distill prompt by substituting the four
+    // placeholders into `extensions/distill/distill-prompt.md`. The .md
+    // contains the full agent contract (steps 1–6 distill content + steps
+    // 7–10 merge/squash/push/cleanup) plus the worktree-isolation prefix
+    // from POST-R6-CACHE — see PR #12 design "Agent contract". The wrapper
+    // hands this directly to `pi -p` as the agent's task; PR #12 deletes the
+    // per-file merge driver entirely.
+    const finalPrompt = buildDistillPrompt({
+      worktreePath: workspace.worktreePath,
+      vaultPath: vault,
+      branchName: workspace.branchName,
+      defaultBranch,
+    });
 
-  // Error dir lives on the MAIN vault (not in the worktree — worktrees are
-  // removed on cleanup, which would lose the logs). Resolve via Napkin's
-  // configPath (wherever it lives).
-  const errorDir = resolveDistillErrorDir(vault);
-  fs.mkdirSync(errorDir, { recursive: true });
+    // Error dir lives on the MAIN vault (not in the worktree — worktrees are
+    // removed on cleanup, which would lose the logs). Resolve via Napkin's
+    // configPath (wherever it lives).
+    const errorDir = resolveDistillErrorDir(vault);
+    fs.mkdirSync(errorDir, { recursive: true });
 
-  const wrapperArgs = [
-    DISTILL_WRAPPER_SCRIPT,
-    vault,
-    workspace.worktreePath,
-    workspace.branchName,
-    workspace.sessionForkPath,
-    finalPrompt,
-    errorDir,
-    model ?? "",
-    defaultBranch,
-    parentCwd,
-    String(maxDurationSecs),
-    // SEC-2 / CORR-3: pass the resolved cache root as an explicit
-    // positional arg so the wrapper's safe_rm_worktree path-safety
-    // guard can require worktrees to be descendants of THIS cache
-    // root (not just any path containing `/napkin-distill/<x>/<y>/`).
-    // The JS side is the source of truth — `resolveCacheRoot()` here
-    // is the same function that built `workspace.worktreePath`, so
-    // a future refactor that changes the cache layout updates both
-    // sides at once. Without this arg, the wrapper had to fall back
-    // on a glob pattern that any path containing the napkin-distill
-    // segment would satisfy.
-    resolveCacheRoot(vault),
-  ];
+    const wrapperArgs = [
+      DISTILL_WRAPPER_SCRIPT,
+      vault,
+      workspace.worktreePath,
+      workspace.branchName,
+      workspace.sessionForkPath,
+      finalPrompt,
+      errorDir,
+      model ?? "",
+      defaultBranch,
+      parentCwd,
+      String(maxDurationSecs),
+      // SEC-2 / CORR-3: pass the resolved cache root as an explicit
+      // positional arg so the wrapper's safe_rm_worktree path-safety
+      // guard can require worktrees to be descendants of THIS cache
+      // root (not just any path containing `/napkin-distill/<x>/<y>/`).
+      // The JS side is the source of truth — `resolveCacheRoot()` here
+      // is the same function that built `workspace.worktreePath`, so
+      // a future refactor that changes the cache layout updates both
+      // sides at once. Without this arg, the wrapper had to fall back
+      // on a glob pattern that any path containing the napkin-distill
+      // segment would satisfy.
+      resolveCacheRoot(vault),
+    ];
 
-  // Detached spawn: stdio "ignore" + unref() so the parent can exit cleanly
-  // while the wrapper continues. cwd is the PARENT's cwd — not the worktree
-  // — so pi's process.cwd() at startup matches the session-fork header's
-  // cwd, keeping the system prompt's `Current working directory:` line
-  // byte-identical to the parent's. The wrapper handles git ops in the
-  // worktree and installs a napkin shim that auto-routes vault writes to
-  // the worktree.
-  //
-  // Invoke via `bash` (not `sh`): the wrapper's shebang is `#!/usr/bin/env
-  // bash` and it relies on bash-specific syntax (arrays `pi_args=(...)`,
-  // `set -o pipefail`). On Ubuntu/Debian, `/bin/sh` is `dash` which
-  // parse-errors on bash syntax and exits 2 before the wrapper runs.
-  const proc = spawnFn("bash", wrapperArgs, {
-    cwd: parentCwd,
-    detached: true,
-    stdio: "ignore",
-    env: {
-      ...process.env,
-      NAPKIN_DISTILL_NO_RECURSE: "1",
-      ...(parentSessionId
-        ? { [DISTILL_PROMPT_CACHE_KEY_ENV]: parentSessionId }
-        : {}),
-    },
-  });
-  proc.unref();
+    // Detached spawn: stdio "ignore" + unref() so the parent can exit cleanly
+    // while the wrapper continues. cwd is the PARENT's cwd — not the worktree
+    // — so pi's process.cwd() at startup matches the session-fork header's
+    // cwd, keeping the system prompt's `Current working directory:` line
+    // byte-identical to the parent's. The wrapper handles git ops in the
+    // worktree and installs a napkin shim that auto-routes vault writes to
+    // the worktree.
+    //
+    // Invoke via `bash` (not `sh`): the wrapper's shebang is `#!/usr/bin/env
+    // bash` and it relies on bash-specific syntax (arrays `pi_args=(...)`,
+    // `set -o pipefail`). On Ubuntu/Debian, `/bin/sh` is `dash` which
+    // parse-errors on bash syntax and exits 2 before the wrapper runs.
+    const proc = spawnFn("bash", wrapperArgs, {
+      cwd: parentCwd,
+      detached: true,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        NAPKIN_DISTILL_NO_RECURSE: "1",
+        ...(parentSessionId
+          ? { [DISTILL_PROMPT_CACHE_KEY_ENV]: parentSessionId }
+          : {}),
+      },
+    });
 
-  return {
-    workspace,
-    pid: proc.pid ?? -1,
-  };
+    // If the OS refuses the spawn (ENOMEM/EMFILE/missing bash), Node reports
+    // it asynchronously as an error event. stdio is ignored and the wrapper
+    // never executes in that case, so the workspace would otherwise leak with
+    // meta.pid still pointing at the parent pi process.
+    proc.once("error", () => {
+      try {
+        cleanupDistillWorkspace(vault, workspace);
+      } catch {
+        // Cleanup is best-effort in an already-failing spawn path.
+      }
+    });
+
+    // Record the wrapper pid from the successful spawn call instead of relying
+    // solely on the wrapper's later sed rewrite. This closes the window where
+    // liveness probes mistake the parent pi process for the distill wrapper.
+    if (typeof proc.pid === "number" && proc.pid > 0) {
+      writeDistillMetaPid(workspace.metaPath, proc.pid);
+    }
+    proc.unref();
+
+    return {
+      workspace,
+      pid: proc.pid ?? -1,
+    };
+  } catch (err) {
+    // Any setup failure after createDistillWorkspace must roll back the
+    // worktree. Otherwise a throw before spawn (for example an oversized
+    // session header read in pre-fix code) leaves a full vault checkout whose
+    // meta pid is the still-live parent pi process.
+    try {
+      cleanupDistillWorkspace(vault, workspace);
+    } catch {
+      // Preserve the original error.
+    }
+    throw err;
+  }
 }
 
 // ============================================================================
