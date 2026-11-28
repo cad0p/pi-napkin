@@ -201,6 +201,7 @@ git -C "${s.vault}" checkout -q -b feature-branch
     // Regression guard: the multi-line sidecar parser must not invent a
     // recovery hint for the success classes (merged-content,
     // merged-local, no-content). Their sidecars are still single-line.
+    // This scaffold has no origin, so its success class is merged-local.
     const s = makeScaffold();
     try {
       writeStubPi(
@@ -218,7 +219,7 @@ git -C "${s.vault}" commit -m "distill: x" >/dev/null
 
       const branchShort = r.branch.replace(/^distill\//, "");
       const parsed = findDistillOutcomeForBranch(s.errorDir, branchShort);
-      expect(parsed?.outcomeClass).toBe("merged-content");
+      expect(parsed?.outcomeClass).toBe("merged-local");
       expect(parsed?.recoveryHint).toBeNull();
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });

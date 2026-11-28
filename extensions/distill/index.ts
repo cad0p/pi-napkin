@@ -34,7 +34,12 @@ import {
   resolveDistillErrorDir,
   spawnDistillInWorktree,
 } from "./distill-workspace";
-import { surfaceHealthFindings, surfaceSetupError } from "./health-notify";
+import {
+  markDistillFailureLedgerSeen,
+  surfaceDistillFailureLedger,
+  surfaceHealthFindings,
+  surfaceSetupError,
+} from "./health-notify";
 import { isAutoDistillEligible } from "./session-eligibility";
 import { getSessionTouchedFiles } from "./session-touched-files";
 import { maybeInjectNapkinSetupNotice } from "./setup-notice";
@@ -683,6 +688,14 @@ export default function (pi: ExtensionAPI) {
     // suppression state, because a `false` there would re-enable
     // auto-distill on a vault that isn't actually usable.
     const vaultContentPath = napkinVault.contentPath;
+    try {
+      surfaceDistillFailureLedger(
+        ctx,
+        resolveDistillErrorDir(vaultContentPath),
+      );
+    } catch {
+      // Failure surfacing is advisory; never block session_start on it.
+    }
     let setupFailed = false;
     try {
       const setup = ensureVaultReadyForDistill(
@@ -994,10 +1007,19 @@ export default function (pi: ExtensionAPI) {
               const modelStr = config.model
                 ? `${config.model.provider}/${config.model.id}`
                 : undefined;
+              let sessionTouchedFiles: string[] = [];
+              try {
+                sessionTouchedFiles = Array.from(
+                  getSessionTouchedFiles(ctx.sessionManager),
+                );
+              } catch {
+                // Best-effort: a session-read failure must not block shutdown distill.
+              }
               spawnDistillInWorktree({
                 vault: vaultInfo.contentPath,
                 sessionFile,
                 parentCwd: ctx.cwd,
+                sessionTouchedFiles,
                 maxDurationSecs: Math.round(
                   getMaxDistillDurationMs(config) / 1000,
                 ),
@@ -1476,6 +1498,10 @@ export default function (pi: ExtensionAPI) {
         }
         ctx.ui.notify(message, level);
       }
+
+      if (outcome?.outcomeClass.startsWith("failed:")) {
+        markDistillFailureLedgerSeen(path.dirname(outcome.outcomePath));
+      }
     };
 
     // Capture the generation at ARM time so a queued poll tick from an
@@ -1646,10 +1672,21 @@ export default function (pi: ExtensionAPI) {
       const modelStr = config.model
         ? `${config.model.provider}/${config.model.id}`
         : undefined;
+      let sessionTouchedFiles: string[] = [];
+      try {
+        sessionTouchedFiles = Array.from(
+          getSessionTouchedFiles(c.sessionManager),
+        );
+      } catch {
+        // Best-effort: overlap detection already treats session extraction as
+        // advisory; the distill spawn must not fail because it couldn't read
+        // the parent session's in-memory entries.
+      }
       const result = spawnDistillInWorktree({
         vault: vaultContentPath,
         sessionFile,
         parentCwd: c.cwd,
+        sessionTouchedFiles,
         maxDurationSecs: Math.round(getMaxDistillDurationMs(config) / 1000),
         model: modelStr,
       });
@@ -2102,15 +2139,13 @@ export function formatOutcomeNotification(args: {
         statusText: ` distill ${elapsedSec}s`,
       };
     case "merged-local":
-      // PR #12: agent landed content on main but origin wasn't reached
-      // (push failed, network down, or origin moved and the agent gave
-      // up rather than loop indefinitely). Local main is ahead of
-      // origin/<default>. User must push manually or wait for the next
-      // distill's push to carry both forward. Surface as `warning` per
-      // the locked notification severity contract.
+      // Origin-first integration keeps this class only for the no-origin
+      // fallback: the squash landed on the local default branch and there
+      // was no remote to push to. When origin exists but the distill commit
+      // is absent from it, the wrapper now emits failed:push-not-landed.
       return {
         level: "warning",
-        message: `Distillation complete locally; not pushed to origin (${elapsedSec}s)`,
+        message: `Distillation complete locally; no origin configured (${elapsedSec}s)`,
         statusKey: "warning",
         statusGlyph: "⚠",
         statusText: " distill: local-only",

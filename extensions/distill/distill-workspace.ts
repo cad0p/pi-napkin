@@ -320,6 +320,218 @@ function runGit(
 }
 
 /**
+ * Result of copySessionWritesToWorktree. copied and each skipped[].path
+ * are vault-relative when the input resolved inside the vault; outside-vault
+ * skips keep the original spelling for diagnostics.
+ */
+export interface CopySessionWritesResult {
+  copied: string[];
+  skipped: Array<{ path: string; reason: string }>;
+  /**
+   * SHA of the autocommit created in the worktree for the copied session
+   * writes, or null when nothing was copied. The distill agent rebuilds the
+   * two-commit history on top of origin from this SHA.
+   */
+  autocommit: string | null;
+  /** Absolute path of the worktree manifest the agent reads in its push step. */
+  manifestPath: string;
+}
+
+/**
+ * Worktree-relative path of the session-writes manifest. Lives under the
+ * distill runtime dir, which is gitignored in production and excluded from
+ * every distill commit (prompt + wrapper both exclude `.napkin/distill/`).
+ */
+export const SESSION_WRITES_MANIFEST = path.join(
+  NAPKIN_MARKER,
+  "distill",
+  "session-writes.json",
+);
+
+/**
+ * Copy files the parent session wrote directly in the shared vault checkout
+ * into this distill's worktree, at the same vault-relative paths.
+ *
+ * The distill agent only commits what exists in its worktree. Session writes
+ * that bypassed napkin's shim (a direct write/edit tool call or a shell
+ * redirect into the vault) would otherwise remain uncommitted in the shared
+ * checkout indefinitely. This helper is the handoff point: it copies, never
+ * removes, so the shared checkout remains byte-for-byte untouched and the
+ * vault's own sync can reconcile it after the distill commit lands.
+ *
+ * Inclusion rules (intentionally conservative):
+ *   - resolve relative tool paths against the parent session cwd;
+ *   - skip anything outside the vault, anything under .git, non-files,
+ *     ignored paths, and paths git does not report as modified/untracked;
+ *   - copy regular files only, creating parent directories in the worktree.
+ *
+ * Throws DistillError when a file that passed all filters cannot be copied.
+ * Setup then rolls back the workspace rather than silently dropping session
+ * output from the distill commit.
+ */
+export function copySessionWritesToWorktree(args: {
+  vaultPath: string;
+  worktreePath: string;
+  parentCwd: string;
+  touchedFiles: Iterable<string>;
+  /** Short session label for the autocommit message (id or name). */
+  sessionLabel?: string;
+}): CopySessionWritesResult {
+  const vaultRoot = path.resolve(args.vaultPath);
+  const result: CopySessionWritesResult = {
+    copied: [],
+    skipped: [],
+    autocommit: null,
+    manifestPath: path.join(args.worktreePath, SESSION_WRITES_MANIFEST),
+  };
+  const seen = new Set<string>();
+
+  for (const rawPath of args.touchedFiles) {
+    if (typeof rawPath !== "string" || rawPath.length === 0) continue;
+    const absolute = path.isAbsolute(rawPath)
+      ? path.normalize(rawPath)
+      : path.resolve(args.parentCwd, rawPath);
+    const rel = path.relative(vaultRoot, absolute);
+    if (
+      rel.length === 0 ||
+      rel.startsWith("..") ||
+      path.isAbsolute(rel) ||
+      rel === ".git" ||
+      rel.startsWith(".git" + path.sep)
+    ) {
+      result.skipped.push({ path: rawPath, reason: "outside-vault" });
+      continue;
+    }
+    if (seen.has(rel)) continue;
+    seen.add(rel);
+
+    let stat: fs.Stats;
+    try {
+      stat = fs.statSync(absolute);
+    } catch {
+      result.skipped.push({ path: rel, reason: "missing" });
+      continue;
+    }
+    if (!stat.isFile()) {
+      result.skipped.push({ path: rel, reason: "not-a-file" });
+      continue;
+    }
+
+    // --no-index is load-bearing: without it git can suppress ignore answers
+    // for tracked paths. The contract is simply "ignored files do not ride
+    // the distill commit", regardless of how they became tracked.
+    const ignored = runGit(vaultRoot, [
+      "check-ignore",
+      "-q",
+      "--no-index",
+      "--",
+      rel,
+    ]);
+    if (ignored.status === 0) {
+      result.skipped.push({ path: rel, reason: "ignored" });
+      continue;
+    }
+    if (ignored.status !== 1) {
+      result.skipped.push({ path: rel, reason: "ignore-check-failed" });
+      continue;
+    }
+
+    const status = runGit(vaultRoot, [
+      "status",
+      "--porcelain=v1",
+      "--untracked-files=all",
+      "--",
+      rel,
+    ]);
+    if (status.status !== 0) {
+      result.skipped.push({ path: rel, reason: "status-check-failed" });
+      continue;
+    }
+    if (status.stdout.trim().length === 0) {
+      result.skipped.push({ path: rel, reason: "unmodified" });
+      continue;
+    }
+
+    const destination = path.join(args.worktreePath, rel);
+    try {
+      fs.mkdirSync(path.dirname(destination), { recursive: true });
+      fs.copyFileSync(absolute, destination);
+      fs.chmodSync(destination, stat.mode & 0o777);
+    } catch (err) {
+      throw new DistillError(
+        "failed to copy session write " +
+          rel +
+          " into distill worktree: " +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+    result.copied.push(rel);
+  }
+
+  // The manifest is the agent's source of truth for the autocommit: it names
+  // the exact paths that belong to the session (not to the distill's own
+  // notes) and the autocommit SHA whose bytes must be re-staged when the
+  // agent rebuilds linear history on top of origin.
+  const baseSha = runGit(args.worktreePath, [
+    "rev-parse",
+    "HEAD",
+  ]).stdout.trim();
+  const writeManifest = (): void => {
+    fs.mkdirSync(path.dirname(result.manifestPath), { recursive: true });
+    fs.writeFileSync(
+      result.manifestPath,
+      `${JSON.stringify(
+        {
+          session: args.sessionLabel ?? "unknown",
+          base: baseSha,
+          autocommit: result.autocommit,
+          paths: result.copied,
+        },
+        null,
+        2,
+      )}\n`,
+    );
+  };
+
+  if (result.copied.length === 0) {
+    writeManifest();
+    return result;
+  }
+
+  // Commit (a): exactly the copied session writes, byte-for-byte, before the
+  // distill agent runs. Separating it here (rather than in the prompt) is what
+  // guarantees a parallel distill can never fold another session's files into
+  // its own autocommit: this commit exists only for paths in THIS session's
+  // touched set.
+  const add = runGit(args.worktreePath, ["add", "--", ...result.copied]);
+  if (add.status !== 0) {
+    throw new DistillError(
+      `failed to stage session writes in distill worktree: ${add.stderr.trim()}`,
+    );
+  }
+  const n = result.copied.length;
+  const message = `autocommit: ${n} file${n === 1 ? "" : "s"} written by session ${args.sessionLabel ?? "unknown"}`;
+  const commit = runGit(args.worktreePath, [
+    "-c",
+    "commit.gpgsign=false",
+    "commit",
+    "-m",
+    message,
+  ]);
+  if (commit.status !== 0) {
+    throw new DistillError(
+      `failed to create the session autocommit in the distill worktree: ${commit.stderr.trim()}`,
+    );
+  }
+  result.autocommit = runGit(args.worktreePath, [
+    "rev-parse",
+    "HEAD",
+  ]).stdout.trim();
+  writeManifest();
+  return result;
+}
+
+/**
  * Create a git worktree at `worktreePath` checked out to a fresh branch
  * `branchName` rooted at the vault's HEAD.
  *
@@ -1223,6 +1435,12 @@ export interface SpawnDistillOptions {
    */
   maxDurationSecs: number;
   /**
+   * File paths the parent session wrote through write/edit or common shell
+   * redirections. Resolved against the vault and copied into the worktree
+   * before the wrapper starts so direct vault writes ride the distill commit.
+   */
+  sessionTouchedFiles?: readonly string[];
+  /**
    * Override for the `spawn` function — wired by unit tests to capture calls
    * without actually starting processes. Defaults to the node:child_process
    * export at module load time.
@@ -1300,6 +1518,21 @@ export function spawnDistillInWorktree(
   const workspace = createDistillWorkspace(vault, sessionFile, parentCwd);
   try {
     const parentSessionId = readSessionId(sessionFile);
+
+    // Hand the distill agent every vault-local file the parent session wrote
+    // directly in the shared checkout, and create the session's autocommit in
+    // the worktree before the agent edits anything. Copy-only: the shared
+    // checkout is never cleaned or mutated here. The autocommit is commit (a)
+    // of the two-commit distill contract; the agent only ever owns commit (b).
+    if (opts.sessionTouchedFiles && opts.sessionTouchedFiles.length > 0) {
+      copySessionWritesToWorktree({
+        vaultPath: vault,
+        worktreePath: workspace.worktreePath,
+        parentCwd,
+        touchedFiles: opts.sessionTouchedFiles,
+        sessionLabel: parentSessionId ? parentSessionId.slice(0, 8) : "unknown",
+      });
+    }
 
     const defaultBranch = detectDefaultBranch(vault);
 

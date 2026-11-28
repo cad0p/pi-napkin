@@ -304,11 +304,20 @@ describe("distill-prompt.md — content invariants", () => {
     expect(template).toMatch(/--force-with-lease|NEVER use `--force`/);
   });
 
-  test("template prefers pull-merge over pull-rebase on push contention", () => {
-    // Per design.md "Pull-merge, not pull-rebase". The .md must mention
-    // pull-merge as the recovery path; "rebase" should appear only in
-    // the prohibitive context (or not at all).
-    expect(template).toMatch(/pull-merge/i);
+  test("template integrates origin in the worktree, never by pulling the shared checkout", () => {
+    // Origin-first contract: fetch + merge origin in the worktree, then push
+    // the squashed worktree HEAD. The shared checkout is brought forward by
+    // the vault sync job, never by a distill-side pull.
+    expect(template).toMatch(
+      /git -C \{\{worktreePath\}\} fetch origin \{\{defaultBranch\}\}/,
+    );
+    expect(template).toMatch(
+      /git -C \{\{worktreePath\}\} merge --no-edit origin\/\{\{defaultBranch\}\}/,
+    );
+    expect(template).toMatch(
+      /git -C \{\{worktreePath\}\} push origin HEAD:\{\{defaultBranch\}\}/,
+    );
+    expect(template).not.toMatch(/git -C \{\{vaultPath\}\} pull/);
   });
 
   test("template tells the agent not to loop indefinitely on push failure", () => {
@@ -348,7 +357,9 @@ describe("distill-prompt.md — content invariants", () => {
     expect(step7).toMatch(
       /git -C \{\{worktreePath\}\} merge --no-edit \{\{defaultBranch\}\}/,
     );
-    expect(step7).toMatch(/git -C \{\{worktreePath\}\} add \./);
+    expect(step7).toMatch(
+      /git -C \{\{worktreePath\}\} add -A -- \. ":\(exclude\)\.napkin\/distill\/"/,
+    );
     expect(step7).toMatch(/git -C \{\{worktreePath\}\} commit --no-edit/);
 
     // No bare git invocations on a line by themselves (after stripping
@@ -379,6 +390,26 @@ describe("distill-prompt.md — content invariants", () => {
     );
   });
 
+  test("step 8 builds two separate commits: session autocommit + distill", () => {
+    // Owner contract (2026-11-28): distill is also the session's autocommit
+    // path, but the two must never be squashed together — commit (a) carries
+    // only the paths this session wrote, commit (b) only the distill's edits.
+    expect(template).toContain("session-writes.json");
+    expect(template).toMatch(
+      /commit -m "autocommit: <n> files written by session <label>"/,
+    );
+    expect(template).toMatch(
+      /commit -m "distill: <one-line summary of what you captured>"/,
+    );
+    expect(template).toMatch(/reset --mixed origin\/\{\{defaultBranch\}\}/);
+    expect(template).toMatch(
+      /reset -q <autocommit> -- <paths from the manifest/,
+    );
+    expect(template).toMatch(/merge --ff-only \{\{branchName\}\}/);
+    expect(template).not.toMatch(/merge --squash/);
+    expect(template).toMatch(/two commits, always/i);
+  });
+
   test("step 7 has an explicit no-content branch that exits cleanly", () => {
     // If the agent decided nothing in the conversation merits capturing
     // (per the "Be selective" directive), running step 7's `git commit
@@ -393,8 +424,9 @@ describe("distill-prompt.md — content invariants", () => {
     const end = lines.findIndex((l, i) => i > start && /^8\. /.test(l));
     const step7 = lines.slice(start, end).join("\n");
     expect(step7).toMatch(/nothing in this conversation merits capturing/i);
-    expect(step7).toMatch(/skip steps 7-9/i);
-    expect(step7).toMatch(/exit/i);
+    expect(step7).toMatch(/skip step 8's distill commit/i);
+    // The session autocommit still lands even when nothing is distilled.
+    expect(step7).toMatch(/commit \(a\) still lands/i);
   });
 
   test("prefix scopes the vault-path prohibition to file-edit phase (CLEAN-4)", () => {
@@ -409,24 +441,25 @@ describe("distill-prompt.md — content invariants", () => {
     // `{{vaultPath}}` are correct and required).
     expect(template).toMatch(/steps 1-6/);
     expect(template).toMatch(/steps 7-9/);
-    // The integration-phase clause must explicitly call out
-    // `git -C {{vaultPath}}` as legitimate, not a violation.
+    // The no-origin fallback is the only integration-phase exception that
+    // may use `git -C {{vaultPath}}`; with origin the shared checkout is
+    // explicitly out of bounds.
     expect(template).toMatch(/git -C \{\{vaultPath\}\}/);
+    expect(template).toMatch(
+      /never checkout, squash, pull, or otherwise mutate `\{\{vaultPath\}\}`/i,
+    );
   });
 
-  test("step 9 pull recovery uses --no-rebase (SEC-A-6)", () => {
-    // The agent's pull recovery must override any global
-    // `pull.rebase=true` config the user may have set. Without
-    // `--no-rebase`, a rebase silently rewrites the recovery commit
-    // shape and breaks the design's "linear forensic record" promise.
+  test("step 8 push retry rebuilds both commits in the worktree, bounded at 3 attempts", () => {
+    expect(template).toMatch(/at most 3 total push attempts/i);
     expect(template).toMatch(
-      /git -C \{\{vaultPath\}\} pull --no-rebase origin \{\{defaultBranch\}\}/,
+      /git -C \{\{worktreePath\}\} reset --mixed origin\/\{\{defaultBranch\}\}/,
     );
-    // No bare `git pull origin` (without --no-rebase) anywhere in the
-    // template, so the agent can't be tempted to copy a flagless variant.
-    expect(template).not.toMatch(
-      /git -C \{\{vaultPath\}\} pull origin \{\{defaultBranch\}\}(?!.*--no-rebase)/m,
+    expect(template).toMatch(
+      /git -C \{\{worktreePath\}\} push origin HEAD:\{\{defaultBranch\}\}/,
     );
+    expect(template).toMatch(/never use `--force` or `--force-with-lease`/i);
+    expect(template).not.toMatch(/git -C \{\{vaultPath\}\} pull/);
   });
 });
 

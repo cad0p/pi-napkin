@@ -49,10 +49,11 @@
  * [agent-exit, worktree-removed] interval.
  *
  * Assertion contract:
- *   - outcomeAfterExit:    must be `merged-content` — proves the
- *                          wrapper does eventually succeed at writing
- *                          the outcome (so the test isn't passing for
- *                          some unrelated reason like a wrapper crash).
+ *   - outcomeAfterExit:    must be `merged-local` (no origin in this
+ *                          scaffold) — proves the wrapper does
+ *                          eventually succeed at writing the outcome
+ *                          (so the test isn't passing for some
+ *                          unrelated reason like a wrapper crash).
  *   - outcomeAtRaceWindow: must be non-null — the wrapper invariant
  *                          (write_outcome before any worktree-removal)
  *                          guarantees the JS poller's tick at
@@ -216,7 +217,7 @@ describe("agent step-10 / wrapper outcome-write race (regression)", () => {
       );
 
       // Sanity: wrapper completed successfully and the outcome ended
-      // up as merged-content. If either of these fails, the test isn't
+      // up as merged-local (no origin). If either of these fails, the test isn't
       // exercising the right scenario (the wrapper crashed, or the
       // fixture didn't drive the happy path) and the race-window
       // assertion below would be misleading.
@@ -225,7 +226,7 @@ describe("agent step-10 / wrapper outcome-write race (regression)", () => {
         outcomeAfterExit,
         `outcome sidecar missing after wrapper exit${diag()}`,
       ).not.toBeNull();
-      expect(outcomeAfterExit?.outcomeClass).toBe("merged-content");
+      expect(outcomeAfterExit?.outcomeClass).toBe("merged-local");
 
       // Wrapper-invariant assertion. The wrapper writes the outcome
       // before any worktree-removal step on the happy path (EXIT trap
@@ -238,7 +239,7 @@ describe("agent step-10 / wrapper outcome-write race (regression)", () => {
         outcomeAtRaceWindow,
         `outcome sidecar was missing at the moment the worktree disappeared — wrapper write_outcome is no longer running before worktree-removal on the happy path${diag()}`,
       ).not.toBeNull();
-      expect(outcomeAtRaceWindow?.outcomeClass).toBe("merged-content");
+      expect(outcomeAtRaceWindow?.outcomeClass).toBe("merged-local");
 
       // Production-symptom equivalence: feed `outcomeAtRaceWindow`
       // through the same `formatOutcomeNotification` call site

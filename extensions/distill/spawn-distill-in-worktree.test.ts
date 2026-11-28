@@ -359,6 +359,36 @@ describe("spawnDistillInWorktree (unit, mocked spawn)", () => {
     expect(fs.existsSync(result.workspace.worktreePath)).toBe(true);
   });
 
+  test("copies sessionTouchedFiles into the worktree before spawning", () => {
+    const direct = path.join(vault, "notes", "direct.md");
+    fs.mkdirSync(path.dirname(direct), { recursive: true });
+    fs.writeFileSync(direct, "# direct session write\n");
+    const outside = path.join(sessionDir, "outside.md");
+    fs.writeFileSync(outside, "# outside\n");
+
+    const { spawnFn, calls } = makeMockSpawn();
+    const result = spawnDistillInWorktree({
+      vault,
+      sessionFile,
+      parentCwd: sessionDir,
+      maxDurationSecs: 600,
+      sessionTouchedFiles: [direct, outside],
+      spawnFn,
+    });
+    workspaces.push(result.workspace);
+
+    expect(calls).toHaveLength(1);
+    expect(
+      fs.readFileSync(
+        path.join(result.workspace.worktreePath, "notes", "direct.md"),
+        "utf-8",
+      ),
+    ).toBe("# direct session write\n");
+    expect(
+      fs.existsSync(path.join(result.workspace.worktreePath, "outside.md")),
+    ).toBe(false);
+  });
+
   test("records the spawned wrapper pid in meta.json immediately", () => {
     const { spawnFn } = makeMockSpawn();
     const result = spawnDistillInWorktree({

@@ -33,8 +33,8 @@
  * Test cases:
  *   - Happy path: stub-pi commits content + exits 0; wrapper runs
  *     post-validation + write_outcome + EXIT trap. Assert outcome
- *     file exists with class `merged-content` at the moment worktree
- *     disappears.
+ *     file exists with class `merged-local` (these scaffolds have no
+ *     origin remote) at the moment worktree disappears.
  *   - Salvage path (added in a follow-up commit): stub-pi commits
  *     content WITH conflict markers + exits 0; wrapper's
  *     `validate_no_markers` fails → `salvage("markers-after-agent-exit")`.
@@ -146,7 +146,7 @@ describe("wrapper invariant: write_outcome before worktree-removal", () => {
     pathHandle.restore();
   });
 
-  test("happy path: outcome sidecar exists with class 'merged-content' at the moment worktree disappears", async () => {
+  test("happy path: outcome sidecar exists with class 'merged-local' at the moment worktree disappears", async () => {
     expect(fs.existsSync(HAPPY_PATH_STUB)).toBe(true);
 
     const s = makeWrapperScaffold("napkin-distill-wrapper-invariant-happy-");
@@ -256,7 +256,7 @@ describe("wrapper invariant: write_outcome before worktree-removal", () => {
       );
 
       // Sanity: the wrapper completed and the outcome eventually
-      // ended up as `merged-content`. If either fails, the test
+      // ended up as `merged-local` (no origin). If either fails, the test
       // isn't exercising the right scenario (wrapper crashed, or the
       // stub didn't drive the happy path) and the race-window
       // assertion below would be misleading.
@@ -265,7 +265,7 @@ describe("wrapper invariant: write_outcome before worktree-removal", () => {
         outcomeAfterExit,
         `outcome sidecar missing after wrapper exit${diag()}`,
       ).not.toBeNull();
-      expect(outcomeAfterExit?.outcomeClass).toBe("merged-content");
+      expect(outcomeAfterExit?.outcomeClass).toBe("merged-local");
 
       // Wrapper-invariant assertion. `write_outcome` runs before the
       // EXIT trap removes the worktree, so the outcome sidecar is on
@@ -274,7 +274,7 @@ describe("wrapper invariant: write_outcome before worktree-removal", () => {
         outcomeAtRaceWindow,
         `outcome sidecar was missing at the moment the worktree disappeared — wrapper write_outcome is no longer running before worktree-removal on the happy path${diag()}`,
       ).not.toBeNull();
-      expect(outcomeAtRaceWindow?.outcomeClass).toBe("merged-content");
+      expect(outcomeAtRaceWindow?.outcomeClass).toBe("merged-local");
     } finally {
       killDistillWrappers(s.vault);
       fs.rmSync(s.root, { recursive: true, force: true });

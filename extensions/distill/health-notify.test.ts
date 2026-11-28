@@ -1,7 +1,16 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, test } from "vitest";
 
 import type { HealthFinding } from "./auto-setup";
-import { surfaceHealthFindings, surfaceSetupError } from "./health-notify";
+import {
+  DISTILL_FAILURE_LEDGER_FILE,
+  markDistillFailureLedgerSeen,
+  surfaceDistillFailureLedger,
+  surfaceHealthFindings,
+  surfaceSetupError,
+} from "./health-notify";
 
 /**
  * Direct unit tests for `surfaceHealthFindings` and `surfaceSetupError`.
@@ -214,6 +223,88 @@ describe("surfaceHealthFindings", () => {
     ]);
     expect(Object.keys(err)).toEqual(["hasErrors"]);
     expect(err.hasErrors).toBe(true);
+  });
+});
+
+describe("surfaceDistillFailureLedger", () => {
+  function makeErrorDir(): string {
+    return fs.mkdtempSync(path.join(os.tmpdir(), "distill-failure-ledger-"));
+  }
+
+  test("surfaces only unseen failure lines once, in one error notify", () => {
+    const errorDir = makeErrorDir();
+    try {
+      const ledger = path.join(errorDir, DISTILL_FAILURE_LEDGER_FILE);
+      fs.writeFileSync(
+        ledger,
+        "2026-11-28T00:00:00Z failed:push-not-landed branch=distill/a dangling=abc123\n",
+      );
+      const { ctx, notifies } = makeCtx(true);
+
+      const first = surfaceDistillFailureLedger(ctx, errorDir);
+      expect(first).toEqual({ surfaced: 1 });
+      expect(notifies).toHaveLength(1);
+      expect(notifies[0].severity).toBe("error");
+      expect(notifies[0].msg).toContain("failed:push-not-landed");
+      expect(notifies[0].msg).toContain("dangling=abc123");
+
+      fs.appendFileSync(
+        ledger,
+        "2026-11-28T00:01:00Z failed:uncommitted-worktree branch=distill/b dangling=def456\n",
+      );
+      const second = surfaceDistillFailureLedger(ctx, errorDir);
+      expect(second).toEqual({ surfaced: 1 });
+      expect(notifies).toHaveLength(2);
+      expect(notifies[1].msg).toContain("failed:uncommitted-worktree");
+      expect(notifies[1].msg).not.toContain("failed:push-not-landed");
+
+      const third = surfaceDistillFailureLedger(ctx, errorDir);
+      expect(third).toEqual({ surfaced: 0 });
+      expect(notifies).toHaveLength(2);
+    } finally {
+      fs.rmSync(errorDir, { recursive: true, force: true });
+    }
+  });
+
+  test("hasUI=false does not consume unseen failures", () => {
+    const errorDir = makeErrorDir();
+    try {
+      fs.writeFileSync(
+        path.join(errorDir, DISTILL_FAILURE_LEDGER_FILE),
+        "2026-11-28T00:00:00Z failed:push-not-landed branch=distill/a dangling=abc123\n",
+      );
+      const { ctx: silentCtx, notifies: silentNotifies } = makeCtx(false);
+      expect(surfaceDistillFailureLedger(silentCtx, errorDir)).toEqual({
+        surfaced: 0,
+      });
+      expect(silentNotifies).toEqual([]);
+
+      const { ctx, notifies } = makeCtx(true);
+      expect(surfaceDistillFailureLedger(ctx, errorDir)).toEqual({
+        surfaced: 1,
+      });
+      expect(notifies).toHaveLength(1);
+    } finally {
+      fs.rmSync(errorDir, { recursive: true, force: true });
+    }
+  });
+
+  test("markDistillFailureLedgerSeen suppresses failures already rendered by outcome dispatch", () => {
+    const errorDir = makeErrorDir();
+    try {
+      fs.writeFileSync(
+        path.join(errorDir, DISTILL_FAILURE_LEDGER_FILE),
+        "2026-11-28T00:00:00Z failed:push-not-landed branch=distill/a dangling=abc123\n",
+      );
+      markDistillFailureLedgerSeen(errorDir);
+      const { ctx, notifies } = makeCtx(true);
+      expect(surfaceDistillFailureLedger(ctx, errorDir)).toEqual({
+        surfaced: 0,
+      });
+      expect(notifies).toEqual([]);
+    } finally {
+      fs.rmSync(errorDir, { recursive: true, force: true });
+    }
   });
 });
 

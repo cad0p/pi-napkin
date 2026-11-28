@@ -10,8 +10,10 @@
  *                               \u2192 failed:markers-after-agent-exit
  *   - validate_head_on_default  \u2192 failed:head-not-on-default
  *   - validate_commit_count     \u2192 no-content (when 0 commits since startSha)
- *   - detect_local_only         \u2192 merged-local (when origin diverges)
- *   - happy path                \u2192 merged-content
+ *   - detect_local_only         \u2192 merged-local (no origin) / push-not-landed /
+ *                                 failed:push-not-landed (origin lacks the
+ *                                 distill commit)
+ *   - happy path (no origin)    \u2192 merged-local
  *
  * Each helper has at least one pass test and one fail test.
  *
@@ -65,7 +67,7 @@ describe("distill-wrapper.sh post-agent validation (PR #12 A3)", () => {
   // validate_head_on_default
   // -------------------------------------------------------------------------
 
-  test("validate_head_on_default PASS: vault HEAD is on the default branch \u2192 happy path", () => {
+  test("validate_head_on_default PASS: vault HEAD is on the default branch \u2192 happy path (merged-local, no origin)", () => {
     const s = makeScaffold();
     try {
       // Stub: agent commits one new file directly on main (simulates a
@@ -82,7 +84,9 @@ git -C "${s.vault}" commit -m "distill: test" >/dev/null
       );
       const r = runWrapper(s);
       expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
+      // No origin in this scaffold: the legacy local squash is the
+      // success path and reports merged-local.
+      expect(r.outcome).toBe("merged-local");
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
@@ -163,7 +167,8 @@ git -C "${s.vault}" checkout -q --detach "$seed_sha"
     //   3. validate_head_on_default → head-not-on-default
     //   4. validate_no_unresolved_conflicts → markers-after-agent-exit / etc.
     //   5. validate_commit_count    → no-content / agent-exit-nonzero
-    //   6. detect_local_only        → merged-local / divergent-history
+    //   6. detect_local_only        → merged-local (no origin) /
+    //                                 failed:push-not-landed (origin)
     //
     // When the agent leaves the vault in MULTIPLE invalid states
     // simultaneously, the earliest validator in this order wins.
@@ -245,7 +250,7 @@ git -C "${s.vault}" merge conflict-side >/dev/null 2>&1 || true
     }
   }
 
-  test("validate_no_unresolved_conflicts PASS: no conflicts in vault → happy path", () => {
+  test("validate_no_unresolved_conflicts PASS: no conflicts in vault → happy path (merged-local, no origin)", () => {
     const s = makeScaffold();
     try {
       writeStubPi(
@@ -260,7 +265,7 @@ git -C "${s.vault}" commit -m "distill: clean" >/dev/null
       );
       const r = runWrapper(s);
       expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
+      expect(r.outcome).toBe("merged-local");
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
@@ -324,7 +329,7 @@ git -C "${s.vault}" commit -m "distill: full doc example" >/dev/null
       );
       const r = runWrapper(s);
       expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
+      expect(r.outcome).toBe("merged-local");
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
@@ -362,7 +367,7 @@ exit 0
     }
   });
 
-  test("validate_no_unresolved_conflicts PASS (CORR-1): agent RESOLVES pre-existing conflict → merged-content", () => {
+  test("validate_no_unresolved_conflicts PASS (CORR-1): agent RESOLVES pre-existing conflict → merged-local", () => {
     // Pre-existing unresolved conflict; the agent resolves it (checkout
     // --ours + add + commit). Post conflicts empty → rc 0 → merged-content.
     const s = makeScaffold();
@@ -383,7 +388,7 @@ git -C "${s.vault}" commit -m "distill: new note" >/dev/null
       );
       const r = runWrapper(s);
       expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
+      expect(r.outcome).toBe("merged-local");
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
@@ -500,7 +505,7 @@ git -C "${s.vault}" commit -m "distill: clean note" >/dev/null
   // validate_commit_count
   // -------------------------------------------------------------------------
 
-  test("validate_commit_count PASS: 1 new commit since startSha \u2192 merged-content", () => {
+  test("validate_commit_count PASS: 1 new commit since startSha \u2192 merged-local (no origin)", () => {
     const s = makeScaffold();
     try {
       writeStubPi(
@@ -515,7 +520,7 @@ git -C "${s.vault}" commit -m "distill: x" >/dev/null
       );
       const r = runWrapper(s);
       expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
+      expect(r.outcome).toBe("merged-local");
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
@@ -538,10 +543,11 @@ git -C "${s.vault}" commit -m "distill: x" >/dev/null
   // detect_local_only
   // -------------------------------------------------------------------------
 
-  test("detect_local_only PASS (no origin): origin not configured \u2192 merged-content", () => {
-    // No origin configured \u2192 detect_local_only returns false \u2192 merged-content.
-    // This is the same shape as the validate_commit_count PASS test, so we
-    // re-assert the no-origin case here for clarity.
+  test("detect_local_only PASS (no origin): origin not configured -> merged-local", () => {
+    // No origin configured -> the wrapper's origin arm is skipped and the
+    // legacy local squash in the shared checkout is validated instead.
+    // merged-local is the no-origin success class; merged-content is
+    // reserved for a distill commit that origin provably contains.
     const s = makeScaffold();
     try {
       writeStubPi(
@@ -561,115 +567,60 @@ git -C "${s.vault}" commit -m "distill: y" >/dev/null
         encoding: "utf-8",
       }).stdout.trim();
       expect(remotes).toBe("");
-      expect(r.outcome).toBe("merged-content");
-    } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
-    }
-  });
-
-  test("detect_local_only TRIGGERED: origin diverges from local \u2192 merged-local", () => {
-    const s = makeScaffold();
-    try {
-      // Add a bare-repo origin and fetch so origin/main is reachable.
-      const originPath = path.join(s.root, "origin.git");
-      spawnSync("git", ["init", "--bare", "-b", "main", originPath]);
-      spawnSync("git", ["-C", s.vault, "remote", "add", "origin", originPath]);
-      spawnSync("git", ["-C", s.vault, "push", "-u", "origin", "main"]);
-      // origin/main now == seed sha. Stub agent commits without pushing
-      // \u2192 local main is ahead of origin/main \u2192 merged-local.
-      writeStubPi(
-        s,
-        `
-git -C "${s.vault}" config user.email test@example.com
-git -C "${s.vault}" config user.name test
-echo "ahead" > "${s.vault}/ahead.md"
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: ahead" >/dev/null
-# Deliberately do NOT push.
-`,
-      );
-      const r = runWrapper(s);
-      expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-local");
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
-  test("detect_local_only DIVERGENT: origin diverges from local \u2192 failed:divergent-history (SEC-A-1, SEC-1/CORR-2)", () => {
-    // Spec at "Push behavior: never force" mandates a wrapper-side
-    // ancestry check. Equality alone (the pre-fix detect_local_only)
-    // couldn't distinguish a fast-forward push from a divergent
-    // history: in either case after the agent's push fetches back,
-    // local == origin. Here we simulate divergence by giving origin
-    // a history that doesn't share commits with local's main beyond
-    // the seed; the helper must return rc=2 and the wrapper must
-    // classify as failed:divergent-history.
-    //
-    // The reason code was renamed from `force-push-detected` to
-    // `divergent-history` in Pass 2A: the original name implied
-    // attacker action when the common cause is a teammate (or the
-    // user from another clone) pushing to origin while this distill
-    // ran \u2014 a non-ancestral but entirely benign event. The recovery
-    // hint now leads with the normal case.
+  test("detect_local_only: origin configured but the distill commit never landed -> failed:push-not-landed", () => {
+    // Origin-first contract: a worktree commit that origin does not contain
+    // is a failure, not a warning class (the old merged-local +
+    // divergent-history pair was replaced by the worktree retry loop and
+    // this single failure class). The failure ledger names the outcome and
+    // the dangling SHA so a later session can surface it.
     const s = makeScaffold();
     try {
-      // Stand up a bare-repo origin.
       const originPath = path.join(s.root, "origin.git");
       spawnSync("git", ["init", "--bare", "-b", "main", originPath]);
       spawnSync("git", ["-C", s.vault, "remote", "add", "origin", originPath]);
       spawnSync("git", ["-C", s.vault, "push", "-u", "origin", "main"]);
-
-      // Build a divergent origin/main from a SECOND clone: clone the
-      // bare origin into a working clone, commit a file there, force-
-      // push it to origin (rewriting origin/main onto a history that
-      // doesn't share commits with the vault's main beyond the seed).
-      // Then in the vault, the agent will commit a different file on
-      // its main \u2014 the result is local and origin both ahead of
-      // the shared seed, in incompatible directions.
-      const otherClone = path.join(s.root, "other-clone");
-      spawnSync("git", ["clone", originPath, otherClone]);
-      spawnSync("git", [
-        "-C",
-        otherClone,
-        "config",
-        "user.email",
-        "other@example.com",
-      ]);
-      spawnSync("git", ["-C", otherClone, "config", "user.name", "other"]);
-      fs.writeFileSync(path.join(otherClone, "foreign.md"), "# foreign\n");
-      spawnSync("git", ["-C", otherClone, "add", "."]);
-      spawnSync("git", ["-C", otherClone, "commit", "-m", "foreign"]);
-      spawnSync("git", ["-C", otherClone, "push", "origin", "main"]);
-
-      // Fetch into the vault so origin/main moves to the foreign tip.
-      // This is what would happen if the agent did a `git fetch origin`
-      // mid-distill before discovering the contention.
-      spawnSync("git", ["-C", s.vault, "fetch", "origin"]);
-
-      // Stub agent commits on local main without pulling. After this
-      // commit, local main has the seed + local commit; origin/main
-      // has the seed + foreign commit. Neither is an ancestor of the
-      // other \u2014 divergent.
       writeStubPi(
         s,
         `
-git -C "${s.vault}" config user.email test@example.com
-git -C "${s.vault}" config user.name test
-echo "local" > "${s.vault}/local.md"
-git -C "${s.vault}" add .
-git -C "${s.vault}" commit -m "distill: local" >/dev/null
+git -C "$NAPKIN_STUB_WORKTREE" config user.email test@example.com
+git -C "$NAPKIN_STUB_WORKTREE" config user.name test
+echo "ahead" > "$NAPKIN_STUB_WORKTREE/ahead.md"
+git -C "$NAPKIN_STUB_WORKTREE" add -A
+git -C "$NAPKIN_STUB_WORKTREE" commit -m "distill: ahead" >/dev/null
+# Deliberately do NOT push: origin lacks the distill commit.
 `,
       );
       const r = runWrapper(s);
       expect(r.exitCode).toBe(1);
-      expect(r.outcome).toBe("failed:divergent-history");
-      // The recovery hint should mention the common (third-party-push)
-      // case so users aren't misled into thinking only an attack
-      // produces this outcome (SEC-1/CORR-2).
+      expect(r.outcome).toBe("failed:push-not-landed");
+      // Origin never received the file, and the shared checkout was not an
+      // integration scratchpad (it stays at the pre-distill SHA).
+      const originHas = spawnSync(
+        "git",
+        ["--git-dir", originPath, "cat-file", "-e", "main:ahead.md"],
+        { encoding: "utf-8" },
+      );
+      expect(originHas.status).not.toBe(0);
+      expect(
+        spawnSync("git", ["-C", s.vault, "rev-parse", "main"], {
+          encoding: "utf-8",
+        }).stdout.trim(),
+      ).toBe(r.preSha);
+      // Loud surface: outcome sidecar hint + durable failure ledger line.
       const sidecar = fs.readFileSync(r.outcomePath ?? "", "utf-8");
-      expect(sidecar).toMatch(/diverged/);
-      expect(sidecar).toMatch(/teammate|another clone/i);
+      expect(sidecar).toMatch(/Dangling commit: [0-9a-f]{40}/);
+      const ledger = fs.readFileSync(
+        path.join(s.errorDir, "failures.log"),
+        "utf-8",
+      );
+      expect(ledger).toContain("failed:push-not-landed");
+      expect(ledger).toMatch(/dangling=[0-9a-f]{40}/);
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
@@ -903,7 +854,7 @@ git -C "${s.vault}" commit -m "distill: x" >/dev/null
       try {
         const r = runWrapper(s);
         expect(r.exitCode).toBe(0);
-        expect(r.outcome).toBe("merged-content");
+        expect(r.outcome).toBe("merged-local");
         const stragglers = fs
           .readdirSync(s.errorDir)
           .filter((f) => f.endsWith(".tmp"));

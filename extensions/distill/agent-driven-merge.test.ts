@@ -127,7 +127,9 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
         fixturePath: fixturePath("clean-distill.sh"),
       });
       expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
+      // No origin in this scaffold: the legacy local path reports
+      // merged-local; merged-content is reserved for a pushed commit.
+      expect(r.outcome).toBe("merged-local");
       // Vault should have the agent's content committed.
       expect(fs.existsSync(path.join(s.vault, "distilled.md"))).toBe(true);
     } finally {
@@ -143,14 +145,14 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
   // the full integrate-and-squash flow.
   // -------------------------------------------------------------------------
 
-  test("conflict-resolve-clean fixture \u2192 merged-content (resolved cleanly)", () => {
+  test("conflict-resolve-clean fixture \u2192 merged-local (resolved cleanly, no origin)", () => {
     const s = makeScaffold();
     try {
       const r = runWrapperWithStub(s, {
         fixturePath: fixturePath("conflict-resolve-clean.sh"),
       });
       expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
+      expect(r.outcome).toBe("merged-local");
       // The resolved file must NOT contain conflict markers.
       const noteContent = fs.readFileSync(
         path.join(s.vault, "note.md"),
@@ -257,68 +259,40 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
   // case to keep the dispatch invariant locked.
   // -------------------------------------------------------------------------
 
-  test("multiple-commits-on-main fixture \u2192 merged-content (2+ commits accepted) + squash-invariant warning logged (CORR-2)", () => {
+  test("multiple-commits-on-main fixture -> merged-local (2 commits accepted, no squash warning)", () => {
     const s = makeScaffold();
     try {
       const r = runWrapperWithStub(s, {
         fixturePath: fixturePath("multiple-commits-on-main.sh"),
       });
       expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-content");
-      // Both files should be on default.
+      expect(r.outcome).toBe("merged-local");
       expect(fs.existsSync(path.join(s.vault, "first.md"))).toBe(true);
       expect(fs.existsSync(path.join(s.vault, "second.md"))).toBe(true);
-      // And the commit count from startSha should be 2.
       const count = spawnSync(
         "git",
-        ["-C", s.vault, "rev-list", "--count", `${r.preSha}..HEAD`],
+        ["-C", s.vault, "rev-list", "--count", r.preSha + "..HEAD"],
         { encoding: "utf-8" },
       ).stdout.trim();
       expect(count).toBe("2");
 
-      // CORR-2 (Phase C Round 1): design.md "Mocked-pi behaviors" #6
-      // requires the wrapper to LOG A WARNING when the squash invariant
-      // is violated (commit_count > 1) even though the outcome is
-      // accepted as `merged-content`. The warning lives in a sibling
-      // `.warning.log` file (distinct from `.log` which is the fatal-
-      // error signal — adding to `.log` would mis-surface as a failed
-      // distillation in the UI). `findDistillErrorLogForBranch` matches
-      // only the suffix `-<branchShort>.log`, so the longer
-      // `.warning.log` suffix is naturally excluded from the failure
-      // poller.
+      // Two commits are the expected no-origin shape (session autocommit +
+      // distill commit), so the old squash-invariant warning must NOT fire.
       const branchShort = r.branch.replace(/^distill\//, "");
       const warningLogs = fs
         .readdirSync(s.errorDir)
-        .filter((f) => f.endsWith(`-${branchShort}.warning.log`));
-      expect(warningLogs.length).toBe(1);
-      const warningBody = fs.readFileSync(
-        path.join(s.errorDir, warningLogs[0]),
-        "utf-8",
-      );
-      expect(warningBody).toContain("WARNING:");
-      expect(warningBody).toContain("squash-invariant violation");
-      expect(warningBody).toMatch(/landed 2 commits on main/);
-
-      // The fatal `.log` must NOT exist (no failure surface).
-      const fatalLogs = fs
-        .readdirSync(s.errorDir)
-        .filter((f) => f.endsWith(`-${branchShort}.log`))
-        .filter((f) => !f.endsWith(".warning.log"));
-      expect(fatalLogs.length).toBe(0);
+        .filter((f) => f.endsWith("-" + branchShort + ".warning.log"));
+      expect(warningLogs).toEqual([]);
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
   // -------------------------------------------------------------------------
-  // Behavior 7: pushed-success
-  //
-  // Genuine gap fill: existing inline-stub coverage has detect_local_only
-  // PASS (no origin) and merged-local TRIGGERED, but no test where origin
-  // exists AND the agent pushes successfully.
+  // Behavior 7: pushed-success (origin-first, worktree-only integration)
   // -------------------------------------------------------------------------
 
-  test("pushed-success fixture (origin configured, agent pushes) \u2192 merged-content", () => {
+  test("pushed-success fixture (origin configured, agent pushes from the worktree) -> merged-content, checkout untouched", () => {
     const s = makeScaffold();
     try {
       const originPath = setupOriginForVault(s.root, s.vault);
@@ -327,99 +301,106 @@ describe("agent-driven merge: integration against formal bash-stub fixtures (PR 
       });
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-content");
-      // Origin's main should now equal local main.
-      const localSha = spawnSync("git", ["-C", s.vault, "rev-parse", "main"], {
-        encoding: "utf-8",
-      }).stdout.trim();
-      const originSha = spawnSync(
+      // The commit landed on origin; the shared checkout was not the
+      // integration scratchpad and stays exactly where it started.
+      const originHasFile = spawnSync(
         "git",
-        ["-C", originPath, "rev-parse", "main"],
+        ["--git-dir", originPath, "cat-file", "-e", "main:pushed.md"],
         { encoding: "utf-8" },
-      ).stdout.trim();
-      expect(localSha).toBe(originSha);
+      );
+      expect(originHasFile.status).toBe(0);
+      expect(
+        spawnSync("git", ["-C", s.vault, "rev-parse", "main"], {
+          encoding: "utf-8",
+        }).stdout.trim(),
+      ).toBe(r.preSha);
+      expect(fs.existsSync(path.join(s.vault, "pushed.md"))).toBe(false);
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }
   });
 
-  // -------------------------------------------------------------------------
-  // Behavior 8: push-fail-merged-local
-  // -------------------------------------------------------------------------
-
-  test("push-fail-merged-local fixture (origin diverges, agent doesn't push) \u2192 merged-local", () => {
-    const s = makeScaffold();
-    try {
-      setupOriginForVault(s.root, s.vault);
-      const r = runWrapperWithStub(s, {
-        fixturePath: fixturePath("push-fail-merged-local.sh"),
-      });
-      expect(r.exitCode).toBe(0);
-      expect(r.outcome).toBe("merged-local");
-    } finally {
-      fs.rmSync(s.root, { recursive: true, force: true });
-    }
-  });
-
-  // -------------------------------------------------------------------------
-  // Behavior 8 (recovery branch): push-fail-pull-merge-success
-  //
-  // Genuine gap fill (CORR-1, Phase C Round 1): the design's
-  // "Mocked-pi behaviors" #8 calls out the recovery flow where the
-  // agent's first push fails (origin moved during the distill) and
-  // the agent recovers via `git pull --no-rebase` + push. The existing
-  // `push-fail-merged-local` covers the OTHER valid path (agent gives
-  // up on push); this test covers the recovery-succeeds path so the
-  // wrapper's classification stays `merged-content` rather than
-  // `merged-local` when the agent's pull-merge-push closes the gap.
-  //
-  // The `--no-rebase` is the design-mandated invariant (the prompt
-  // emits the explicit flag because users with `pull.rebase=true`
-  // globally would otherwise rewrite local main). The fixture writes
-  // a sentinel file recording the exact `git pull` command it ran;
-  // this test reads it to pin that the flag was used.
-  // -------------------------------------------------------------------------
-
-  test("push-fail-pull-merge-success fixture (origin moved; agent recovers via pull --no-rebase) \u2192 merged-content + sentinel pins --no-rebase", () => {
+  test("pushed-success with origin already advanced -> merged-content (origin merged in the worktree)", () => {
     const s = makeScaffold();
     try {
       const originPath = setupOriginForVault(s.root, s.vault);
-      // Advance origin BEFORE the wrapper runs so the agent's first
-      // push observes a non-ff state.
       const sideSha = advanceOriginFromSideClone(s.root, originPath, "main");
       const r = runWrapperWithStub(s, {
-        fixturePath: fixturePath("push-fail-pull-merge-success.sh"),
+        fixturePath: fixturePath("pushed-success.sh"),
       });
       expect(r.exitCode).toBe(0);
       expect(r.outcome).toBe("merged-content");
+      // Both the concurrent origin commit and the distill content are on
+      // origin/main; the side commit is an ancestor of the pushed tip.
+      expect(
+        spawnSync(
+          "git",
+          [
+            "--git-dir",
+            originPath,
+            "merge-base",
+            "--is-ancestor",
+            sideSha,
+            "main",
+          ],
+          { encoding: "utf-8" },
+        ).status,
+      ).toBe(0);
+      expect(
+        spawnSync(
+          "git",
+          ["--git-dir", originPath, "cat-file", "-e", "main:pushed.md"],
+          {
+            encoding: "utf-8",
+          },
+        ).status,
+      ).toBe(0);
+      expect(
+        spawnSync("git", ["-C", s.vault, "rev-parse", "main"], {
+          encoding: "utf-8",
+        }).stdout.trim(),
+      ).toBe(r.preSha);
+    } finally {
+      fs.rmSync(s.root, { recursive: true, force: true });
+    }
+  });
 
-      // Origin's main should now equal local main (push landed).
-      const localSha = spawnSync("git", ["-C", s.vault, "rev-parse", "main"], {
-        encoding: "utf-8",
-      }).stdout.trim();
-      const originSha = spawnSync(
-        "git",
-        ["-C", originPath, "rev-parse", "main"],
-        { encoding: "utf-8" },
-      ).stdout.trim();
-      expect(localSha).toBe(originSha);
+  // -------------------------------------------------------------------------
+  // Behavior 8: origin-integrated but never pushed
+  //
+  // The old fixture pair (push-fail-merged-local / push-fail-pull-merge-
+  // success) encoded the deleted contract: squash in the shared checkout,
+  // then "git pull --no-rebase" there. Both are replaced here by the
+  // worktree-first fixture: a local commit with no push must fail loudly
+  // with the dangling SHA, not warn.
+  // -------------------------------------------------------------------------
 
-      // The side-clone commit must be reachable from local main (the
-      // pull --no-rebase merge folded it in).
-      const ancestryCheck = spawnSync(
+  test("origin-integrate-no-push fixture (worktree commit, no push) -> failed:push-not-landed + dangling sha", () => {
+    const s = makeScaffold();
+    try {
+      const originPath = setupOriginForVault(s.root, s.vault);
+      const r = runWrapperWithStub(s, {
+        fixturePath: fixturePath("origin-integrate-no-push.sh"),
+      });
+      expect(r.exitCode).toBe(1);
+      expect(r.outcome).toBe("failed:push-not-landed");
+
+      const branchShort = r.branch.replace(/^distill\//, "");
+      const parsed = findDistillOutcomeForBranch(s.errorDir, branchShort);
+      expect(parsed?.outcomeClass).toBe("failed:push-not-landed");
+      expect(parsed?.recoveryHint).toMatch(/Dangling commit: [0-9a-f]{40}/);
+
+      const originHasFile = spawnSync(
         "git",
-        ["-C", s.vault, "merge-base", "--is-ancestor", sideSha, "main"],
+        ["--git-dir", originPath, "cat-file", "-e", "main:unpushed.md"],
         { encoding: "utf-8" },
       );
-      expect(ancestryCheck.status).toBe(0);
-
-      // Pin the --no-rebase contract via the fixture's sentinel file.
-      const flagPath = path.join(s.vault, ".napkin-stub-pull-flag");
-      expect(fs.existsSync(flagPath)).toBe(true);
-      const flagBody = fs.readFileSync(flagPath, "utf-8");
-      expect(flagBody).toContain("pull --no-rebase origin main");
-
-      // Distilled content from the agent must be on default.
-      expect(fs.existsSync(path.join(s.vault, "pulled-merged.md"))).toBe(true);
+      expect(originHasFile.status).not.toBe(0);
+      expect(
+        spawnSync("git", ["-C", s.vault, "rev-parse", "main"], {
+          encoding: "utf-8",
+        }).stdout.trim(),
+      ).toBe(r.preSha);
     } finally {
       fs.rmSync(s.root, { recursive: true, force: true });
     }

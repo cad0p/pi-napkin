@@ -1,6 +1,8 @@
 Your distill content lives in the git worktree at {{worktreePath}}. Use `git -C {{worktreePath}}` for all git operations there — your shell cwd is NOT the worktree. Edit files in the worktree by absolute path under `{{worktreePath}}/...` (or `cd {{worktreePath}}` first if your tool supports it).
 
-For the distill-content phase (steps 1-6), edit files only inside `{{worktreePath}}`; do not edit files under `{{vaultPath}}`. Writing distill content to `{{vaultPath}}` directly bypasses the worktree's isolation and causes the merge in steps 7-8 to silently include none of your changes. The integration phase (steps 7-9) explicitly runs `git -C {{vaultPath}}` commands to squash and push — those are correct and required, not a violation of this rule.
+For the distill-content phase (steps 1-6), edit files only inside `{{worktreePath}}`; do not edit files under `{{vaultPath}}`. Writing distill content to `{{vaultPath}}` directly bypasses the worktree's isolation and causes the integration in steps 7-9 to silently include none of your changes. When an origin remote exists, the integration phase also happens entirely inside `{{worktreePath}}`: never checkout, squash, pull, or otherwise mutate `{{vaultPath}}`. The only exception is the no-origin fallback in step 8.
+
+The worktree may already contain uncommitted files copied from `{{vaultPath}}` because the parent session wrote them directly there. Treat those files as session output to preserve: do not delete or revert them, and include them in the distill commit unless they are truly contradictory to the note you are writing.
 
 Distill this conversation into the napkin vault, then integrate your changes back into the main vault yourself. The wrapper that invoked you will only validate the result; it will NOT run merge, squash, push, or cleanup on your behalf.
 
@@ -16,43 +18,64 @@ Distill this conversation into the napkin vault, then integrate your changes bac
 
 Be selective. Only capture knowledge useful to someone working on this project later. Skip meta-discussion, tool output, and chatter.
 
-7. Integrate with main. If you decided nothing in this conversation merits capturing (per "Be selective" above), skip steps 7-9 entirely and exit — the wrapper will classify this as `no-content` and surface a warning to the user. Otherwise, from the worktree at {{worktreePath}}, commit your distilled content first if you haven't already:
+7. Prepare the integration. The worktree already contains commit (a), the session autocommit: the files this pi session wrote directly into `{{vaultPath}}`, copied byte-for-byte before you started, committed as "autocommit: <n> files written by session <label>". Your own notes are NOT in it and must not be folded into it. If you decided nothing in this conversation merits capturing (per "Be selective" above) AND you made no edits of your own, skip step 8's distill commit — commit (a) still lands.
 
-       git -C {{worktreePath}} add -A
-       git -C {{worktreePath}} commit -m "distill: <one-line summary>"
+   Commit only your own distill work on the branch, then integrate origin in the worktree:
 
-   Then merge {{defaultBranch}} into your distill branch:
+       git -C {{worktreePath}} add -A -- . ":(exclude).napkin/distill/"
+       git -C {{worktreePath}} commit -m "wip: distill edits"   # skip if nothing staged
+
+   If `git -C {{worktreePath}} remote get-url origin` succeeds, fetch the remote default branch and merge it into your distill branch IN THE WORKTREE:
+
+       git -C {{worktreePath}} fetch origin {{defaultBranch}}
+       git -C {{worktreePath}} merge --no-edit origin/{{defaultBranch}}
+
+   Merge the local `{{defaultBranch}}` ref into the distill branch too, still in the worktree (it carries any local commits `origin/{{defaultBranch}}` lacks, and it is the base for the no-origin fallback):
 
        git -C {{worktreePath}} merge --no-edit {{defaultBranch}}
 
-   `--no-edit` accepts git's auto-generated merge commit message non-interactively; without it, git would open `core.editor` on a clean auto-merge and your bash tool (which has no TTY) would hang or fail.
+   It is fine for either merge to report "Already up to date". `--no-edit` accepts git's auto-generated merge commit message non-interactively; without it, git would open `core.editor` on a clean auto-merge and your bash tool (which has no TTY) would hang or fail.
 
-   If conflicts arise, you will see files with standard `<<<<<<<`, `=======`, `>>>>>>>` markers. Resolve each by editing the file in place to produce the correct merged content. Use the conversation history above to inform your choices — you have full context on what content you intended to add. Once all markers are gone:
+   If conflicts arise, resolve each one in the worktree (union both sides' lines for notes unless they truly contradict; use the conversation above to decide). Once no markers remain:
 
-       git -C {{worktreePath}} add .
+       git -C {{worktreePath}} add -A -- . ":(exclude).napkin/distill/"
        git -C {{worktreePath}} commit --no-edit
 
-   If `git -C {{worktreePath}} merge --no-edit {{defaultBranch}}` reports "Already up to date" (no merge commit), that's fine — proceed.
+8. Rebuild TWO linear commits and push. Read the manifest first; it names the session's paths and the autocommit whose exact bytes belong in commit (a):
 
-8. Squash to main. From the main vault at {{vaultPath}}, switch to the default branch and squash-merge your branch:
+       cat {{worktreePath}}/.napkin/distill/session-writes.json
+
+   `autocommit` is the SHA of commit (a) (may be null when the session wrote nothing into the vault), `paths` are its worktree-relative files. Use `--mixed` (NOT `--soft`): it rebuilds the index from the integration base while leaving your working tree — your final content — untouched, so commit (a) can be staged without stealing your own edits.
+
+   Rebuild the history on top of the integration base so commit (a) and commit (b) sit directly on `origin/{{defaultBranch}}` (or on the local `{{defaultBranch}}` when no origin exists), never squashed together:
+
+       git -C {{worktreePath}} reset --mixed origin/{{defaultBranch}}
+
+   Stage commit (a) from the recorded autocommit SHA, so it keeps the session's original bytes even if you edited one of those files later, then commit it. `git reset <commit> -- <paths>` writes only the INDEX — it leaves your working tree (your final content) intact, which is what keeps your own edit of a session-written file available for commit (b):
+
+       git -C {{worktreePath}} reset -q <autocommit> -- <paths from the manifest...>
+       git -C {{worktreePath}} commit -m "autocommit: <n> files written by session <label>"
+
+   Skip both commands when the manifest's `autocommit` is null. Then commit (b), which owns everything you edited — including your own edit layered on top of a session-written file:
+
+       git -C {{worktreePath}} add -A -- . ":(exclude).napkin/distill/"
+       git -C {{worktreePath}} commit -m "distill: <one-line summary of what you captured>"
+
+   Skip (b) when nothing is staged. Never fold (a) into (b) and never amend one into the other: two commits, always.
+
+   Then push both commits from the worktree:
+
+       git -C {{worktreePath}} push origin HEAD:{{defaultBranch}}
+
+   Never use `--force` or `--force-with-lease`. If the push is rejected as non-fast-forward because origin moved, retry at most 3 total push attempts: fetch `origin/{{defaultBranch}}`, merge it into the distill branch in the worktree, resolve conflicts with the union rule, repeat this step's rebuild (reset --mixed, commit (a) from the autocommit, commit (b)), and push again. If the third attempt is rejected, stop — do not loop indefinitely and do not mutate `{{vaultPath}}` to recover.
+
+   If no origin remote is configured, build the same two commits on top of the local `{{defaultBranch}}` (`git -C {{worktreePath}} reset --mixed {{defaultBranch}}` above, then (a) and (b)), and land them in the main vault without rewriting history:
 
        git -C {{vaultPath}} checkout {{defaultBranch}}
-       git -C {{vaultPath}} merge --squash {{branchName}}
-       git -C {{vaultPath}} commit -m "distill: <one-line summary of what you captured>"
+       git -C {{vaultPath}} merge --ff-only {{branchName}}
 
-   Use `--squash` to keep main's history linear (one commit per distill). If `git merge --squash` produces no staged changes (e.g. your distill content was already on main), skip the commit step — there's nothing new to land.
+   The fast-forward keeps both commits and their messages intact; never `--squash` them together.
 
-9. Push if origin exists. Check `git -C {{vaultPath}} remote -v`. If `origin/{{defaultBranch}}` is configured, push your changes:
-
-       git -C {{vaultPath}} push origin {{defaultBranch}}
-
-   If push fails because the remote moved, recover with pull-merge-push (NOT pull-rebase):
-
-       git -C {{vaultPath}} pull --no-rebase origin {{defaultBranch}}
-       git -C {{vaultPath}} push origin {{defaultBranch}}
-
-   `--no-rebase` forces merge semantics regardless of any global `pull.rebase` config the user may have set.
-
-   NEVER use `--force` or `--force-with-lease`. If push fails for any reason and you cannot recover, stop — do not loop indefinitely. The wrapper will detect local-only state and surface a warning to the user.
+9. Final integration rule. With origin configured, success means `origin/{{defaultBranch}}` contains both commits: the session autocommit (a) and your distill commit (b). Do not use `{{vaultPath}}` as an integration scratchpad and do not run `git pull` there; the vault's own sync fast-forwards the shared checkout after the push lands. Without origin, success means both commits are on the local `{{defaultBranch}}` in `{{vaultPath}}`. NEVER use `--force` or `--force-with-lease`. If push fails for a reason other than a retryable non-fast-forward rejection, stop — the wrapper will surface the failure and the dangling commit to the user.
 
 Report progress concisely as you go. Stop when steps 1-9 are complete.
