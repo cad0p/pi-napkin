@@ -13,7 +13,11 @@ import * as path from "node:path";
 
 import { NAPKIN_MARKER } from "@cad0p/napkin";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { createDistillWorkspace, resolveCacheRoot } from "./distill-workspace";
+import {
+  copySessionWritesToWorktree,
+  createDistillWorkspace,
+  resolveCacheRoot,
+} from "./distill-workspace";
 import { DISTILL_WRAPPER_SCRIPT } from "./scripts-paths";
 
 /**
@@ -431,6 +435,12 @@ export function runWrapperWithStub(
     extraEnv?: Record<string, string>;
     maxDurationSecs?: string;
     fixturePath?: string;
+    /**
+     * Vault-local paths the parent session wrote directly, copied into the
+     * worktree before the wrapper starts. Mirrors spawnDistillInWorktree's
+     * production pre-spawn handoff.
+     */
+    sessionTouchedFiles?: readonly string[];
   } = {},
 ): {
   exitCode: number;
@@ -447,6 +457,14 @@ export function runWrapperWithStub(
     scaffold.parentCwd,
   );
   const branch = workspace.branchName;
+  if (opts.sessionTouchedFiles && opts.sessionTouchedFiles.length > 0) {
+    copySessionWritesToWorktree({
+      vaultPath: scaffold.vault,
+      worktreePath: workspace.worktreePath,
+      parentCwd: scaffold.parentCwd,
+      touchedFiles: opts.sessionTouchedFiles,
+    });
+  }
   const preSha = spawnSync("git", ["-C", scaffold.vault, "rev-parse", "main"], {
     encoding: "utf-8",
   }).stdout.trim();

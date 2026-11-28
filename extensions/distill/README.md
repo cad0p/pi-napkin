@@ -10,6 +10,33 @@ Pi extension that automatically distills knowledge from conversations into your 
 4. The model extracts structured notes using your vault's templates
 5. Notes are written directly into the vault
 
+## Integration: origin-first, two commits
+
+Distill is also the session's autocommit path, with a clean split between the
+two kinds of work:
+
+- **Commit (a) — session autocommit.** Every vault path the parent session
+  wrote directly (write/edit tool calls, shell redirects) is copied
+  byte-for-byte into the distill worktree *before* the agent runs and committed
+  alone as `autocommit: <n> files written by session <label>`. A session only
+  ever commits paths in its own touched set, so two parallel distills never
+  commit each other's files; a path both sessions wrote is committed by
+  whichever distill runs first and the second sees it already on origin.
+- **Commit (b) — distill.** The agent's own notes, and its own edit layered on
+  top when it touches a session-written file.
+
+When the vault has an `origin` remote, the whole integration happens in the
+worktree: fetch, merge `origin/<default>` (conflicts resolved there, unioning
+both sides for notes), rebuild the two commits linearly on top of it, and push
+both. The shared vault checkout is never checked out, squashed, or pulled —
+the vault's own sync fast-forwards it after the push lands. Without an origin,
+the same two commits are fast-forwarded into the local default branch.
+
+A run succeeds only when `origin/<default>` provably contains the distill
+commit (`merge-base --is-ancestor` after a fresh fetch), otherwise the wrapper
+writes `failed:push-not-landed` and appends the outcome plus the dangling SHA
+to `.napkin/distill/errors/failures.log`, which the next session surfaces.
+
 ## Where auto-distill runs
 
 Auto-distill (the interval and the final distill on shutdown) runs only in the **top-level interactive session**: `ctx.hasUI` plus a host-bound mode that is not `"print"` (`"tui"` in the TUI, `"rpc"` under RPC).

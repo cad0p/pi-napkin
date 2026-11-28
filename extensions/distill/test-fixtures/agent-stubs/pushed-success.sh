@@ -1,24 +1,30 @@
 #!/usr/bin/env bash
-# pushed-success.sh — agent commits to the default branch and pushes
-# to origin. The test harness pre-configures origin (bare repo) +
-# initial push so origin/<default> is reachable.
+# pushed-success.sh — origin-first happy path. The agent commits in the
+# distill worktree, fetches and merges origin/<default> there, squashes to
+# one commit on top of origin/<default>, and pushes HEAD:<default>. The
+# shared vault checkout is intentionally untouched.
 #
-# Wrapper outcome: `detect_local_only` finds local == origin ⇒
-# `merged-content` (no `merged-local` because the push landed).
+# Wrapper outcome: origin/<default> contains the worktree squash commit ⇒
+# merged-content.
 #
-# Reads (env): NAPKIN_STUB_VAULT, NAPKIN_STUB_DEFAULT_BRANCH
+# Reads (env): NAPKIN_STUB_WORKTREE, NAPKIN_STUB_DEFAULT_BRANCH
 
 set -euo pipefail
 
-VAULT="${NAPKIN_STUB_VAULT:?NAPKIN_STUB_VAULT must be set}"
+WORKTREE="${NAPKIN_STUB_WORKTREE:?NAPKIN_STUB_WORKTREE must be set}"
 DEFAULT_BRANCH="${NAPKIN_STUB_DEFAULT_BRANCH:-main}"
 
-git -C "$VAULT" config user.email "stub@example.com"
-git -C "$VAULT" config user.name "stub"
+git -C "$WORKTREE" config user.email "stub@example.com"
+git -C "$WORKTREE" config user.name "stub"
 
-echo "# pushed" > "$VAULT/pushed.md"
-git -C "$VAULT" add .
-git -C "$VAULT" commit -m "distill: pushed" >/dev/null
+echo "# pushed" > "$WORKTREE/pushed.md"
+git -C "$WORKTREE" add -A
+git -C "$WORKTREE" commit -m "distill: pushed" >/dev/null
 
-# Push to origin. Origin is configured by the test harness.
-git -C "$VAULT" push origin "$DEFAULT_BRANCH" >/dev/null 2>&1
+git -C "$WORKTREE" fetch origin "$DEFAULT_BRANCH" >/dev/null 2>&1
+git -C "$WORKTREE" merge --no-edit "origin/$DEFAULT_BRANCH" >/dev/null 2>&1 || true
+git -C "$WORKTREE" merge --no-edit "$DEFAULT_BRANCH" >/dev/null 2>&1 || true
+
+git -C "$WORKTREE" reset --soft "origin/$DEFAULT_BRANCH"
+git -C "$WORKTREE" commit -m "distill: pushed" >/dev/null
+git -C "$WORKTREE" push origin "HEAD:$DEFAULT_BRANCH" >/dev/null 2>&1

@@ -50,15 +50,18 @@ reads them with bash defaults (`${NAPKIN_STUB_FOO:-default}`).
 
 | Fixture                          | Behavior                                                                    | Expected outcome                  |
 |----------------------------------|-----------------------------------------------------------------------------|-----------------------------------|
-| `clean-distill.sh`               | commits 1 file directly on default branch                                   | `merged-content`                  |
-| `conflict-resolve-clean.sh`      | commits to distill branch, merges default with a conflict, resolves, squash | `merged-content`                  |
+| `clean-distill.sh`               | commits 1 file directly on default branch                                   | `merged-local` (no origin)        |
+| `conflict-resolve-clean.sh`      | commits to distill branch, merges default with a conflict, resolves, squash | `merged-local` (no origin)        |
 | `conflict-leave-markers.sh`      | creates a REAL unresolved merge conflict (index stages 1/2/3)               | `failed:markers-after-agent-exit` |
 | `no-distill.sh`                  | exits 0 without producing any commits                                       | `no-content`                      |
 | `squash-skipped.sh`              | commits to distill branch but never squashes to default branch              | `no-content`                      |
-| `multiple-commits-on-main.sh`    | commits 2+ times directly on default branch                                 | `merged-content`                  |
-| `pushed-success.sh`              | commits and pushes to origin (requires test-side origin setup)              | `merged-content`                  |
-| `push-fail-merged-local.sh`      | commits without pushing while origin exists                                 | `merged-local`                    |
-| `push-fail-pull-merge-success.sh`| first push fails (origin advanced); agent recovers via pull --no-rebase     | `merged-content`                  |
+| `multiple-commits-on-main.sh`    | commits 2 times directly on default branch                                  | `merged-local` (<=2, no warning)  |
+| `pushed-success.sh`              | commits in the worktree, merges origin there, pushes HEAD:default           | `merged-content`                  |
+| `origin-same-note-merge-push.sh` | origin moved the same note; conflict resolved in the worktree, then pushed  | `merged-content`                  |
+| `push-race-retry-success.sh`     | first push loses a race; fetch+merge+re-squash+push retried in the worktree | `merged-content`                  |
+| `origin-two-commits.sh`          | two-commit contract: session autocommit (a) + distill commit (b), pushed    | `merged-content`                  |
+| `origin-integrate-no-push.sh`    | worktree commit integrated but never pushed                                 | `failed:push-not-landed`          |
+| `local-no-origin-squash.sh`      | no origin: worktree branch squash-merged into the local default branch      | `merged-local`                    |
 | `agent-timeout.sh`               | sleeps past `maxDurationSecs` (test passes a low budget)                    | `failed:agent-timeout`            |
 | `agent-crashes.sh`               | exits non-zero with diagnostic stderr                                       | `failed:agent-exit-nonzero`       |
 

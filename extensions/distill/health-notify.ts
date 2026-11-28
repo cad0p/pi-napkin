@@ -17,6 +17,9 @@
  * the caller's abort logic continues to work in the non-UI path.
  */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
+
 import type { ensureVaultReadyForDistill, HealthFinding } from "./auto-setup";
 
 /**
@@ -31,6 +34,98 @@ interface HealthNotifyCtx {
   ui: {
     notify: (message: string, severity: "info" | "warning" | "error") => void;
   };
+}
+
+/** Wrapper-emitted durable failure ledger, stored in the distill error dir. */
+export const DISTILL_FAILURE_LEDGER_FILE = "failures.log";
+const DISTILL_FAILURE_LEDGER_CURSOR_FILE = "failures.log.seen";
+
+function failureLedgerPaths(errorDir: string): {
+  ledger: string;
+  cursor: string;
+} {
+  return {
+    ledger: path.join(errorDir, DISTILL_FAILURE_LEDGER_FILE),
+    cursor: path.join(errorDir, DISTILL_FAILURE_LEDGER_CURSOR_FILE),
+  };
+}
+
+function readLedgerCursor(cursorPath: string): number {
+  try {
+    const raw = fs.readFileSync(cursorPath, "utf-8").trim();
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function writeLedgerCursor(cursorPath: string, offset: number): void {
+  try {
+    fs.writeFileSync(cursorPath, String(offset));
+  } catch {
+    // Advisory-only: failing to persist the cursor must never block distill.
+  }
+}
+
+/**
+ * Mark every currently present wrapper failure-ledger byte as seen. Called
+ * when the active session has already rendered the failed:* outcome through
+ * the normal outcome-sidecar dispatch, preventing a duplicate session-start
+ * notification later. Best-effort and silent by design.
+ */
+export function markDistillFailureLedgerSeen(errorDir: string): void {
+  const { ledger, cursor } = failureLedgerPaths(errorDir);
+  try {
+    const size = fs.statSync(ledger).size;
+    writeLedgerCursor(cursor, size);
+  } catch {
+    // No ledger (or unreadable ledger): nothing to mark.
+  }
+}
+
+/**
+ * Surface wrapper failures that completed after their parent session went
+ * away. The wrapper appends one line per failed:* outcome to failures.log;
+ * this helper renders only bytes after the shared cursor through the same
+ * ctx.ui.notify path used for health findings, then advances the cursor.
+ *
+ * The cursor is deliberately shared rather than per-session: the contract is
+ * that a session sees the failure once, not that every session is spammed.
+ * If no UI exists, nothing is marked seen so a later interactive session can
+ * still surface the line.
+ */
+export function surfaceDistillFailureLedger(
+  ctx: HealthNotifyCtx,
+  errorDir: string,
+): { surfaced: number } {
+  if (!ctx.hasUI) return { surfaced: 0 };
+  const { ledger, cursor } = failureLedgerPaths(errorDir);
+  try {
+    if (!fs.existsSync(ledger)) return { surfaced: 0 };
+    const buf = fs.readFileSync(ledger);
+    let offset = readLedgerCursor(cursor);
+    if (offset > buf.length) offset = 0;
+    const lines = buf
+      .subarray(offset)
+      .toString("utf-8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (lines.length > 0) {
+      ctx.ui.notify(
+        lines.length === 1
+          ? "Auto-distill failure recorded: " + lines[0]
+          : "Auto-distill failures recorded:\n" +
+              lines.map((line) => "- " + line).join("\n"),
+        "error",
+      );
+    }
+    writeLedgerCursor(cursor, buf.length);
+    return { surfaced: lines.length };
+  } catch {
+    return { surfaced: 0 };
+  }
 }
 
 /**

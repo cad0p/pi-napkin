@@ -414,6 +414,25 @@ write_outcome() {
   }
 }
 
+# Durable failure surface. The outcome sidecar is consumed by the parent
+# session's poller when that session is still alive, but shutdown distills
+# often finish after the parent is gone. Append one line here for the next
+# session-start surface pass (extensions/distill/health-notify.ts); the
+# line deliberately names both the outcome class and the dangling commit
+# so the notification carries the recovery anchor without opening the
+# forensic log first.
+FAILURE_SURFACE_PATH="$ERROR_DIR/failures.log"
+append_failure_surface() {
+  local class="$1"
+  local sha
+  sha="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
+  if [ -z "$sha" ]; then
+    sha="unknown"
+  fi
+  mkdir -p "$ERROR_DIR" 2>/dev/null || true
+  printf '%s %s branch=%s dangling=%s\n'     "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$class" "$BRANCH" "$sha"     >> "$FAILURE_SURFACE_PATH" 2>/dev/null || true
+}
+
 # Mark the run as finished in meta.json before cleanup. The normal path
 # removes the worktree immediately afterwards, so this marker is only
 # observable when cleanup partially fails; it then lets the JS-side sweep
@@ -583,6 +602,12 @@ salvage() {
   # refuse on "cwd inside worktree".
   cd "$vault" 2>/dev/null || cd /
 
+  # Capture the worktree HEAD before cleanup deletes the branch ref. This
+  # is the commit the user can inspect with git cat-file when recovering
+  # content; it is also the dangling anchor written to the failure surface.
+  local dangling_sha
+  dangling_sha="$(git -C "$worktree" rev-parse HEAD 2>/dev/null || true)"
+
   # Compose recovery hint per reason. Each hint points the user at the
   # specific recovery action that fits the failure mode — the design
   # spec calls out `git revert HEAD --no-edit` and `git reflog` as the
@@ -608,6 +633,12 @@ salvage() {
     agent-timeout)
       hint="Agent task exceeded the maxDurationMinutes budget and was killed. Bump 'distill.maxDurationMinutes' in vault config.json if this happens repeatedly. Distill content (if any) is recoverable from 'git -C $vault reflog'."
       ;;
+    push-not-landed)
+      hint="The distill commit was produced in the worktree but origin/$DEFAULT_BRANCH does not contain it after the agent stopped (push rejected, unreachable, or never attempted). Inspect the dangling commit with 'git -C $vault cat-file -p $dangling_sha', then fetch origin, merge in a scratch worktree, re-squash, and push manually if the content should be kept. Never force-push."
+      ;;
+    uncommitted-worktree)
+      hint="The agent exited with uncommitted or unintegrated changes in the distill worktree, so the wrapper could not prove a distill commit landed. Inspect the dangling worktree HEAD with 'git -C $vault cat-file -p $dangling_sha' and the forensic log; uncommitted copied files may need to be re-copied from the shared vault checkout."
+      ;;
     divergent-history)
       hint="origin/$DEFAULT_BRANCH and local $DEFAULT_BRANCH have diverged — typically because someone (you or a teammate) pushed to origin from another clone before this distill ran. Less commonly, someone force-pushed there. Inspect with 'git -C $vault log origin/$DEFAULT_BRANCH..$DEFAULT_BRANCH' (your local commits not on origin) and 'git -C $vault log $DEFAULT_BRANCH..origin/$DEFAULT_BRANCH' (origin commits not local), then resolve by pulling-and-merging or by inspecting the divergence and choosing the right recovery (revert, manual merge, etc.). Distill content is recoverable from 'git -C $vault reflog' for ~90 days."
       ;;
@@ -616,9 +647,14 @@ salvage() {
       ;;
   esac
 
+  if [ -n "$dangling_sha" ]; then
+    hint="$hint Dangling commit: $dangling_sha."
+  fi
+
   # Write the outcome BEFORE any worktree-removal step. Pins the
   # function-level invariant noted above.
   write_outcome "failed:$reason" "$hint"
+  append_failure_surface "failed:$reason"
 
   # Verify HEAD is on default. Per V3, the salvage path NEVER moves
   # HEAD on the user's behalf — if the user manually checked out a
@@ -824,84 +860,53 @@ validate_commit_count() {
   return 0
 }
 
-# detect_local_only <vault> <default_branch>
+# detect_local_only <worktree> <default_branch> <distill_sha>
 #
-# Determines whether the vault has commits on `<default_branch>` that
-# haven't reached `origin/<default_branch>`. Distinguishes legitimate
-# fast-forward state (local ahead of remote, remote is ancestor of
-# local — the agent didn't push but origin's history is intact) from
-# divergent state (remote is NOT an ancestor of local — origin and
-# local share no linear ancestry, e.g. because a teammate pushed from
-# another clone or, less commonly, someone force-pushed origin).
-#
-# Per the spec at "Push behavior: never force":
-#   "Spec the prohibition in the prompt; the wrapper post-validates by
-#    checking that origin/<default> only fast-forwarded (its tip is an
-#    ancestor of the new tip after push)."
-#
-# Equality-check (the pre-fix behavior) couldn't tell those two states
-# apart — in either case local != remote post-agent. The prompt's
-# prohibition was the only enforcement of the no-force-push invariant
-# (a soft control). This helper now adds the wrapper-side hard control
-# the spec requires (SEC-A-1).
+# Legacy helper name retained for the wrapper's dispatch table, but the
+# integration contract is now origin-first: when origin exists, success is
+# not "local fast-forward pending"; success is exactly that
+# `origin/<default_branch>` contains the squash commit the agent produced
+# in the worktree. The shared vault checkout is intentionally irrelevant
+# here — the vault's own sync brings it forward after the push.
 #
 # Return codes:
-#   0 — local-only (`merged-local` outcome): origin configured AND
-#       (no remote-tracking ref yet OR remote is ancestor of local).
-#       Either case is legitimate “distilled but not pushed” state.
-#   1 — in sync OR no origin configured: proceed to `merged-content`.
-#   2 — divergent histories (`failed:divergent-history` outcome):
-#       remote is NOT an ancestor of local. The wrapper surfaces this
-#       as a failure because the agent's safe-recovery flow
-#       (pull --no-rebase + push) did not run or did not converge,
-#       and the user must inspect/resolve before the next distill.
-#       The naming is neutral on cause: a benign third-party push
-#       from another clone is the common case, force-push the rare
-#       one (and SEC-1/CORR-2 round-2 review elevated this to a
-#       cross-reviewer-consensus rename from `force-push-detected`).
+#   0 — origin is configured AND `origin/<default>` contains <distill_sha>
+#       (verified after a fresh fetch). This is `merged-content`.
+#   1 — no origin configured. Caller uses the legacy local integration path
+#       and may classify a landed commit as `merged-local`.
+#   2 — origin is configured but does NOT contain <distill_sha>. The agent
+#       either never pushed or exhausted its non-fast-forward retries; caller
+#       classifies `failed:push-not-landed`.
+#   3 — verification itself failed (fetch failed or the remote-tracking ref
+#       is unavailable). Caller also classifies `failed:push-not-landed`
+#       because success cannot be proven; the forensic log carries the
+#       underlying git diagnostic.
 detect_local_only() {
-  local vault="$1"
+  local worktree="$1"
   local default="$2"
-  # No origin configured at all → push was never expected; not local-only.
-  if ! git -C "$vault" remote get-url origin >/dev/null 2>&1; then
+  local distill_sha="$3"
+
+  if ! git -C "$worktree" remote get-url origin >/dev/null 2>&1; then
     return 1
   fi
-  local local_sha remote_sha
-  local_sha="$(git -C "$vault" rev-parse "$default" 2>/dev/null || true)"
-  remote_sha="$(git -C "$vault" rev-parse "origin/$default" 2>/dev/null || true)"
-  # Origin configured but no remote-tracking ref yet (e.g. never fetched)
-  # → treat as local-only because origin is the user's intent and the
-  # agent's push didn't materialise.
+  if [ -z "$distill_sha" ]; then
+    log_error "detect_local_only: empty distill sha; cannot verify origin/$default integration"
+    return 3
+  fi
+  if ! git -C "$worktree" fetch origin "$default" >/dev/null 2>&1; then
+    log_error "detect_local_only: git fetch origin $default failed in worktree; cannot verify whether origin contains distill commit $distill_sha"
+    return 3
+  fi
+  local remote_sha
+  remote_sha="$(git -C "$worktree" rev-parse "origin/$default" 2>/dev/null || true)"
   if [ -z "$remote_sha" ]; then
-    log_error "detect_local_only: origin configured but origin/$default unreachable; treating as merged-local"
+    log_error "detect_local_only: origin/$default unavailable after fetch; cannot verify distill commit $distill_sha"
+    return 3
+  fi
+  if git -C "$worktree" merge-base --is-ancestor "$distill_sha" "origin/$default"; then
     return 0
   fi
-  if [ -z "$local_sha" ]; then
-    # Default branch doesn't exist locally — unexpected; surface as
-    # not-local-only and let the markers / commit-count validators
-    # decide the outcome.
-    return 1
-  fi
-  if [ "$local_sha" = "$remote_sha" ]; then
-    # In sync — push happened (or nothing changed). Not local-only.
-    return 1
-  fi
-  # Local differs from remote. Ancestry decides whether the divergence
-  # is legitimate (fast-forward pending) or non-linear (`divergent-history`).
-  if git -C "$vault" merge-base --is-ancestor "$remote_sha" "$local_sha"; then
-    # Remote is ancestor of local — fast-forward pending. Either the
-    # agent didn't push, or the push failed and the agent fell back
-    # to local-only. Legitimate `merged-local`.
-    return 0
-  fi
-  # Remote is NOT an ancestor of local — origin and local share no
-  # linear ancestry. The common case is a teammate (or the user from
-  # another clone) pushing to origin while this distill ran; the rare
-  # case is a force-push that rewrote origin's history. Either way
-  # the agent's safe-recovery path (pull --no-rebase + push) did not
-  # converge, so the wrapper surfaces a `divergent-history` failure
-  # for the user to inspect and resolve.
-  log_error "detect_local_only: origin/$default at $remote_sha is not an ancestor of local $default at $local_sha (divergent histories)"
+  log_error "detect_local_only: origin/$default at $remote_sha does not contain distill commit $distill_sha"
   return 2
 }
 
@@ -1326,31 +1331,101 @@ if [ "$AGENT_RC" -ne 0 ]; then
   exit 1
 fi
 
-# Agent exit-0 path. Run validators in order: head-on-default first
-# (cheap; fails loud on detached HEAD or wrong branch), then markers
-# (slightly more expensive scan), then commit count + local-only
-# dispatch.
+# Agent exit-0 path. The validation target depends on the integration
+# mode the prompt now owns:
+#   - origin configured  → integration must have happened in the worktree;
+#                          validate the worktree and verify that
+#                          origin/$DEFAULT_BRANCH contains the distill
+#                          squash commit. The shared checkout is never
+#                          part of the success invariant.
+#   - no origin          → preserve the legacy local squash into the
+#                          shared checkout and classify a landed commit
+#                          as merged-local.
+ORIGIN_CONFIGURED=0
+if git -C "$WORKTREE" remote get-url origin >/dev/null 2>&1; then
+  ORIGIN_CONFIGURED=1
+fi
+
+if [ "$ORIGIN_CONFIGURED" -eq 1 ]; then
+  # Conflicts the agent was supposed to resolve live in the worktree, not
+  # in the shared checkout. The worktree started clean, so there is no
+  # meaningful pre-existing-conflict snapshot here; any unresolved index
+  # entry is agent-induced.
+  validate_no_unresolved_conflicts "$WORKTREE" ""
+  MARKER_RC=$?
+  if [ "$MARKER_RC" -eq 1 ] || [ "$MARKER_RC" -eq 2 ]; then
+    record_dangling_sha
+    salvage "$VAULT" "$WORKTREE" "$BRANCH" "markers-after-agent-exit"
+    exit 1
+  fi
+  if [ "$MARKER_RC" -eq 3 ]; then
+    record_dangling_sha
+    salvage "$VAULT" "$WORKTREE" "$BRANCH" "internal-validator-error"
+    exit 1
+  fi
+
+  DISTILL_SHA="$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null || true)"
+  if [ -z "$DISTILL_SHA" ]; then
+    log_error "could not resolve worktree HEAD after agent exit"
+    record_dangling_sha
+    salvage "$VAULT" "$WORKTREE" "$BRANCH" "internal-validator-error"
+    exit 1
+  fi
+
+  # Exclude the wrapper's own runtime directory. .napkin/distill/ holds
+  # meta.json, the forked session and the napkin shim; it is gitignored in
+  # production through the managed block, but tests and damaged vaults can
+  # lack that rule. Infrastructure files must never count as unintegrated
+  # session content.
+  WORKTREE_STATUS="$(git -C "$WORKTREE" status --porcelain=v1 --untracked-files=all -- . ":(exclude).napkin/distill/" 2>/dev/null || true)"
+
+  # Genuine no-op: the agent produced no commit and left no copied session
+  # writes or note edits behind. Classify before looking at origin because
+  # origin may have moved independently while the no-op distill ran.
+  if [ "$DISTILL_SHA" = "$START_SHA" ] && [ -z "$WORKTREE_STATUS" ]; then
+    write_outcome "no-content"
+    exit 0
+  fi
+
+  # Copied session writes and distill notes must be inside the squash
+  # commit. Anything dirty after agent exit means the agent stopped half-way
+  # (for example it skipped integration because it misread the pre-copied
+  # files as someone else's work). Never classify that as success.
+  if [ -n "$WORKTREE_STATUS" ]; then
+    log_error "worktree is dirty after agent exit; copied session writes or distill edits were not integrated"
+    record_dangling_sha
+    salvage "$VAULT" "$WORKTREE" "$BRANCH" "uncommitted-worktree"
+    exit 1
+  fi
+
+  # detect_local_only's updated rc contract (the legacy name is retained):
+  #   0 — origin/$DEFAULT_BRANCH contains DISTILL_SHA
+  #   1 — no origin configured (not expected inside this arm)
+  #   2 — origin does not contain DISTILL_SHA
+  #   3 — verification failed (fetch/ref failure)
+  detect_local_only "$WORKTREE" "$DEFAULT_BRANCH" "$DISTILL_SHA"
+  ORIGIN_RC=$?
+  if [ "$ORIGIN_RC" -eq 0 ]; then
+    write_outcome "merged-content"
+    exit 0
+  fi
+
+  log_error "origin integration validation failed (rc $ORIGIN_RC): distill commit $DISTILL_SHA is not proven on origin/$DEFAULT_BRANCH"
+  record_dangling_sha
+  salvage "$VAULT" "$WORKTREE" "$BRANCH" "push-not-landed"
+  exit 1
+fi
+
+# No-origin fallback: preserve the pre-origin-integration local behavior.
+# The agent is explicitly permitted to checkout and squash inside the
+# shared checkout in exactly this case, so HEAD/content validation still
+# applies to $VAULT.
 if ! validate_head_on_default "$VAULT" "$DEFAULT_BRANCH"; then
   record_dangling_sha
   salvage "$VAULT" "$WORKTREE" "$BRANCH" "head-not-on-default"
   exit 1
 fi
 
-# Conflict validation (CORR-A-1, SEC-A-7, CORR-1, CORR-1 R3 / SEC-1 R3).
-# Three rc paths (plus rc 3 for validator failure):
-#   0 → no unresolved conflicts post-distill, pass
-#   1 → NEW conflict paths (agent-induced) → markers-after-agent-exit
-#   2 → only pre-existing conflict paths → pre-existing-markers (NOT
-#       agent-induced; user must resolve the merge manually before next
-#       distill)
-#   3 → git ls-files failed; validator could not scan →
-#       internal-validator-error (graceful degradation; do NOT
-#       blame the agent for state nobody observed — CORR-1 R3 /
-#       SEC-1 R3)
-#
-# Pass the pre-distill snapshot (newline-separated conflict paths, empty
-# when none were captured) so validate_no_unresolved_conflicts can do
-# the diff.
 validate_no_unresolved_conflicts "$VAULT" "$PRE_DISTILL_CONFLICT_FILES"
 MARKER_RC=$?
 if [ "$MARKER_RC" -eq 1 ]; then
@@ -1378,59 +1453,19 @@ if [ -z "$VAULT_COMMIT_COUNT" ]; then
 fi
 
 if [ "$VAULT_COMMIT_COUNT" -eq 0 ]; then
-  # Genuine no-op — agent ran but produced nothing for main. Outcome
-  # surfaces as a `warning` notification per the locked notification
-  # severity contract.
   write_outcome "no-content"
   exit 0
 fi
 
-# CORR-2 (Phase C Round 1): design.md "Mocked-pi behaviors" #6 — agent
-# committed 2+ times to default directly (rather than to its branch +
-# squash-merge). The wrapper accepts the outcome as `merged-content`
-# (the dispatch is no-content vs has-content; the squash invariant is
-# a soft suggestion baked into the prompt, not a hard wrapper-side
-# constraint), but logs a warning so the forensic record reflects
-# that the squash didn't collapse to one commit. Keeps the design's
-# spec literally implemented.
-if [ "$VAULT_COMMIT_COUNT" -gt 1 ]; then
-  log_warning "validate_commit_count: agent landed $VAULT_COMMIT_COUNT commits on $DEFAULT_BRANCH since startSha (squash-invariant violation; expected 1). Outcome accepted as merged-content but the squash didn't collapse to a single commit."
+# Two commits are expected on a no-origin distill: (a) the session
+# autocommit and (b) the distill commit. A third commit means the agent left
+# extra history behind; the outcome is still merged-local, but log it.
+if [ "$VAULT_COMMIT_COUNT" -gt 2 ]; then
+  log_warning "validate_commit_count: agent landed $VAULT_COMMIT_COUNT commits on $DEFAULT_BRANCH since startSha (expected at most 2: session autocommit + distill). Outcome accepted as merged-local."
 fi
 
-# Run merged-local / divergent-history detection. detect_local_only returns:
-#   0 — local-only (`merged-local` outcome): origin configured AND
-#       local is ahead of remote in a fast-forwardable way.
-#   1 — in sync OR no origin configured: proceed to `merged-content`.
-#   2 — divergent histories (`failed:divergent-history` outcome):
-#       remote is NOT an ancestor of local. Either a teammate's push
-#       to origin from another clone or, more rarely, a force-push
-#       that rewrote origin's history. The agent's safe-recovery
-#       path (pull --no-rebase + push) did not converge, so the
-#       wrapper surfaces it for user inspection (SEC-A-1: spec at
-#       "Push behavior: never force" mandates wrapper-side ancestry
-#       validation; SEC-1/CORR-2 round-2 renamed the reason code
-#       from `force-push-detected` to neutral-on-cause naming).
-#
-# Capture rc explicitly because `if detect_local_only … ; then` would
-# only branch on rc=0 vs rc!=0, collapsing the rc=1 (in sync) and
-# rc=2 (divergent) cases into the same arm.
-detect_local_only "$VAULT" "$DEFAULT_BRANCH"
-LOCAL_ONLY_RC=$?
-if [ "$LOCAL_ONLY_RC" -eq 0 ]; then
-  # Origin configured but local main is ahead — agent's push didn't
-  # land. Outcome surfaces as `warning` ("distilled but not pushed").
-  write_outcome "merged-local"
-  exit 0
-fi
-if [ "$LOCAL_ONLY_RC" -eq 2 ]; then
-  log_error "detect_local_only signaled divergent histories (rc 2) — origin/$DEFAULT_BRANCH and local $DEFAULT_BRANCH share no linear ancestry; agent's pull-merge-push recovery did not converge"
-  record_dangling_sha
-  salvage "$VAULT" "$WORKTREE" "$BRANCH" "divergent-history"
-  exit 1
-fi
-
-# Happy path: vault HEAD on default, no markers, at least one commit
-# since startSha, and either (a) origin is in sync OR (b) origin not
-# configured. Surface as `info` ("Distillation complete").
-write_outcome "merged-content"
+# No origin exists, so there is nothing to push. merged-local is the
+# successful local-integration outcome for this fallback (not a degraded
+# push outcome on an origin-enabled vault).
+write_outcome "merged-local"
 exit 0
