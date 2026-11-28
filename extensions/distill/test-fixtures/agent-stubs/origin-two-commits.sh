@@ -43,7 +43,8 @@ git -C "$WORKTREE" reset --mixed "origin/$DEFAULT_BRANCH"
 if [ -n "$AUTOCOMMIT" ]; then
   # shellcheck disable=SC2086
   git -C "$WORKTREE" reset -q "$AUTOCOMMIT" -- $SESSION_PATHS
-  git -C "$WORKTREE" commit -m "autocommit: $(echo $SESSION_PATHS | wc -w) files written by session stub" >/dev/null
+  SESSION_COUNT=$(echo $SESSION_PATHS | wc -w | tr -d "[:space:]")
+  git -C "$WORKTREE" commit -m "autocommit: ${SESSION_COUNT} files written by session stub" >/dev/null
 fi
 git -C "$WORKTREE" add -A -- . ":(exclude).napkin/distill/"
 if ! git -C "$WORKTREE" diff --cached --quiet; then
