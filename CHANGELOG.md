@@ -23,6 +23,7 @@ All notable changes to this project will be documented in this file.
 - *(napkin-context)* No in-thread overview build after the child fails or times out (closes #161) ([#162](https://github.com/cad0p/pi-napkin/pull/162))
 - *(distill)* Auto-distill only in the top-level session, never in subagent sessions (closes #116) ([#163](https://github.com/cad0p/pi-napkin/pull/163))
 - *(distill)* Sweep finished merged worktrees at spawn and close the never-spawned leak (closes #166)
+- *(distill)* Integrate against origin inside the worktree + two-commit session autocommit ([#170](https://github.com/cad0p/pi-napkin/pull/170))
 
 ### 💼 Other
 
